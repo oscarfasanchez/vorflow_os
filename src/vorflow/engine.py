@@ -37,6 +37,29 @@ class MeshGenerator:
         self.node_tags = None
         self.zones_gdf = None
     
+    def _force_close_polygon(self, poly):
+        """Ensure a polygon's exterior and interior rings are closed."""
+        if not isinstance(poly, Polygon):
+            return poly
+
+        # Close exterior ring
+        if poly.exterior.coords[0] != poly.exterior.coords[-1]:
+            exterior_coords = list(poly.exterior.coords)
+            exterior_coords.append(exterior_coords[0])
+            poly = Polygon(exterior_coords, [list(i.coords) for i in poly.interiors])
+
+        # Close interior rings
+        new_interiors = []
+        for interior in poly.interiors:
+            if interior.coords[0] != interior.coords[-1]:
+                interior_coords = list(interior.coords)
+                interior_coords.append(interior_coords[0])
+                new_interiors.append(interior_coords)
+            else:
+                new_interiors.append(list(interior.coords))
+        
+        return Polygon(poly.exterior, new_interiors)
+
     def _initialize_gmsh(self):
         if not gmsh.is_initialized():
             gmsh.initialize()
@@ -217,22 +240,74 @@ class MeshGenerator:
                     continue
                 
                 for poly in polys:
-                    # Define the exterior boundary of the polygon.
+                    if poly.is_empty:
+                        continue
+                        
+                    # Ensure the polygon is valid and closed before processing.
+                    poly = self._force_close_polygon(poly)
+
+                    def create_loop(coords):
+                        # Remove consecutive duplicates and points that are too close
+                        clean_coords = []
+                        for pt in coords:
+                            if not clean_coords:
+                                clean_coords.append(pt)
+                                continue
+                            
+                            # Check distance to last point
+                            dist = math.sqrt((pt[0]-clean_coords[-1][0])**2 + (pt[1]-clean_coords[-1][1])**2)
+                            if dist > 1e-5: # Slightly larger than Gmsh tolerance to be safe
+                                clean_coords.append(pt)
+                        
+                        # Check closure with first point
+                        if len(clean_coords) > 1:
+                             dist = math.sqrt((clean_coords[0][0]-clean_coords[-1][0])**2 + (clean_coords[0][1]-clean_coords[-1][1])**2)
+                             if dist < 1e-5:
+                                 clean_coords.pop()
+                            
+                        if len(clean_coords) < 3:
+                            # A polygon must have at least 3 points (triangle)
+                            return None
+
+                        p_tags = [gmsh.model.occ.addPoint(x, y, 0) for x, y in clean_coords]
+                        l_tags = []
+                        for i in range(len(p_tags)):
+                            p1 = p_tags[i]
+                            p2 = p_tags[(i + 1) % len(p_tags)]
+                            try:
+                                l_tags.append(gmsh.model.occ.addLine(p1, p2))
+                            except Exception as e:
+                                print(f"Error adding line {p1}-{p2}: {e}")
+                                return None
+                        
+                        try:
+                            return gmsh.model.occ.addCurveLoop(l_tags)
+                        except Exception as e:
+                            print(f"Error adding curve loop: {e}")
+                            return None
+
+                    # 1. Exterior Boundary
                     ext_coords = list(poly.exterior.coords)
-                    p_tags = []
-                    for x, y in ext_coords[:-1]: # Skip duplicate end point.
-                        p_tags.append(gmsh.model.occ.addPoint(x, y, 0))
+                    exterior_loop_tag = create_loop(ext_coords)
                     
-                    # Create the line segments forming the boundary.
-                    l_tags = []
-                    for i in range(len(p_tags)):
-                        p1 = p_tags[i]
-                        p2 = p_tags[(i + 1) % len(p_tags)]
-                        l_tags.append(gmsh.model.occ.addLine(p1, p2))
-                    
-                    # Create a curve loop and a plane surface from the boundary.
-                    cl_tag = gmsh.model.occ.addCurveLoop(l_tags)
-                    s_tag = gmsh.model.occ.addPlaneSurface([cl_tag])
+                    if exterior_loop_tag is None:
+                        print(f"Warning: Skipping degenerate polygon {idx}")
+                        continue
+
+                    # 2. Interior Boundaries (Holes)
+                    loops = [exterior_loop_tag]
+                    for interior in poly.interiors:
+                        int_coords = list(interior.coords)
+                        interior_loop_tag = create_loop(int_coords)
+                        if interior_loop_tag is not None:
+                            loops.append(interior_loop_tag)
+
+                    # Create plane surface with holes
+                    try:
+                        s_tag = gmsh.model.occ.addPlaneSurface(loops)
+                    except Exception as e:
+                        print(f"Error creating surface for polygon {idx}: {e}")
+                        continue
                     
                     key = to_key(2, s_tag)
                     input_tag_info[key] = {'type': 'surface', 'id': idx}
@@ -269,7 +344,7 @@ class MeshGenerator:
             if key in input_tag_info:
                 info = input_tag_info[key]
                 kind = info['type']
-                feat_id = info['id']
+                feat_id = int(info['id'])
                 
                 if kind == 'point':
                     if feat_id not in final_map['points']:

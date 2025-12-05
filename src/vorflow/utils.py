@@ -1,6 +1,7 @@
 import numpy as np
 import geopandas as gpd
 import pandas as pd
+from shapely.geometry import LineString, Polygon, MultiPolygon
 
 def calculate_orthogonality(gdf: gpd.GeoDataFrame) -> pd.Series:
     """
@@ -185,7 +186,7 @@ def summarize_quality(gdf: gpd.GeoDataFrame):
     # will lie on or very close to the cell's own geometric boundary.
     is_boundary = np.zeros(len(gdf), dtype=bool)
     if 'x' in gdf.columns and 'y' in gdf.columns:
-        gens = gpd.GeoSeries(gpd.points_from_xy(gdf.x, gdf.y), index=gdf.index)
+        gens = gpd.GeoSeries(gpd.points_from_xy(gdf.x, gdf.y), index=gdf.index,crs=gdf.crs)
         dists = gdf.geometry.boundary.distance(gens)
         
         # Use a small tolerance relative to the cell size.
@@ -248,3 +249,95 @@ def summarize_quality(gdf: gpd.GeoDataFrame):
                 print(f"[WARNING] {high_drift_bnd} BOUNDARY cells have excessive drift (> 0.45).")
             else:
                 print("[OK] Boundary drift is within geometric norms (~0.34).")
+
+
+def check_geometry_resolution(gdf):
+    """
+    Analyzes the vertex spacing (resolution) of geometries in a GeoDataFrame.
+    Returns a summary of min, max, and mean segment lengths.
+    """
+    all_lengths = []
+
+    for geom in gdf.geometry:
+        # Handle different geometry types
+        if geom.geom_type == 'Polygon':
+            geoms = [geom]
+        elif geom.geom_type == 'MultiPolygon':
+            geoms = geom.geoms
+        elif geom.geom_type == 'LineString':
+            geoms = [geom]
+        else:
+            continue
+
+        for g in geoms:
+            # For polygons, check exterior and interiors
+            if g.geom_type == 'Polygon':
+                coords = list(g.exterior.coords)
+                for interior in g.interiors:
+                    coords.extend(list(interior.coords))
+            else:
+                coords = list(g.coords)
+
+            # Calculate distances between consecutive points
+            if len(coords) > 1:
+                points = np.array(coords)
+                # Vectorized distance calculation
+                diffs = np.diff(points, axis=0)
+                dists = np.sqrt((diffs**2).sum(axis=1))
+                all_lengths.extend(dists)
+
+    if not all_lengths:
+        return "No valid segments found."
+
+    all_lengths = np.array(all_lengths)
+    return {
+        "min": all_lengths.min(),
+        "max": all_lengths.max(),
+        "mean": all_lengths.mean(),
+        "median": np.median(all_lengths),
+        "count": len(all_lengths)
+    }
+
+
+def resample_geometry(geom, target_spacing):
+    """
+    Resamples a geometry so that vertices are evenly spaced at `target_spacing`.
+    This is useful for creating uniform boundaries for meshing.
+    """
+    if geom.is_empty:
+        return geom
+
+    if geom.geom_type == 'LineString':
+        length = geom.length
+        # Calculate number of segments needed
+        num_segments = max(int(np.ceil(length / target_spacing)), 1)
+        # Generate distances along the line
+        distances = np.linspace(0, length, num_segments + 1)
+        # Interpolate points at these distances
+        points = [geom.interpolate(d) for d in distances]
+        return LineString(points)
+    
+    elif geom.geom_type == 'Polygon':
+        # Resample exterior ring
+        ext_len = geom.exterior.length
+        num_ext = max(int(np.ceil(ext_len / target_spacing)), 3) # Min 3 pts for polygon
+        ext_dists = np.linspace(0, ext_len, num_ext + 1)
+        # Note: interpolate(0) and interpolate(length) are the same for rings
+        ext_points = [geom.exterior.interpolate(d) for d in ext_dists]
+        
+        # Resample interior rings (holes)
+        interiors = []
+        for interior in geom.interiors:
+            int_len = interior.length
+            num_int = max(int(np.ceil(int_len / target_spacing)), 3)
+            int_dists = np.linspace(0, int_len, num_int + 1)
+            int_points = [interior.interpolate(d) for d in int_dists]
+            interiors.append(int_points)
+            
+        return Polygon(ext_points, interiors)
+        
+    elif geom.geom_type == 'MultiPolygon':
+        parts = [resample_geometry(p, target_spacing) for p in geom.geoms]
+        return MultiPolygon(parts)
+        
+    return geom

@@ -80,3 +80,64 @@ def test_gmsh_integration_with_internal_line():
     # We expect significantly more cells than a 5.0 resolution square would imply (approx 4 cells)
     # because of the 1.0 resolution line.
     assert len(grid) > 10
+
+def test_gmsh_integration_overlapping_polygon_with_hole():
+    """
+    Test the case where an overlapping polygon (Zone 2) has a hole in its center.
+    Zone 1 (Domain) should fill the area outside Zone 2 AND the area inside Zone 2's hole.
+    """
+    cm = ConceptualMesh(crs="EPSG:3857")
+    
+    # 1. Base Domain (Large Square) - Zone 1
+    # 20x20 square
+    domain = Polygon([(0, 0), (20, 0), (20, 20), (0, 20)])
+    cm.add_polygon(domain, zone_id=1, resolution=5.0, z_order=0)
+    
+    # 2. Overlapping Polygon with Hole (Donut) - Zone 2
+    # Outer: 5,5 to 15,15
+    # Hole: 8,8 to 12,12
+    donut_shell = [(5, 5), (15, 5), (15, 15), (5, 15)]
+    donut_hole = [(8, 8), (12, 8), (12, 12), (8, 12)]
+    donut = Polygon(donut_shell, [donut_hole])
+    
+    cm.add_polygon(donut, zone_id=2, resolution=2.0, z_order=1)
+    
+    # 3. Generate Conceptual Mesh
+    clean_polys, clean_lines, clean_points = cm.generate()
+    
+    # Verify Zone 2 (The Donut)
+    zone2_geom = clean_polys[clean_polys['zone_id'] == 2].geometry.iloc[0]
+    assert zone2_geom.geom_type == 'Polygon'
+    assert len(zone2_geom.interiors) == 1, "Zone 2 should preserve its hole"
+    
+    # Verify Zone 1 (The Background)
+    # Zone 1 should be split into the outer frame and the inner core (inside the donut hole)
+    # This might result in a MultiPolygon or multiple Polygon rows depending on implementation
+    zone1_rows = clean_polys[clean_polys['zone_id'] == 1]
+    # It usually explodes MultiPolygons into multiple rows in _resolve_overlaps
+    # So we expect at least 2 parts (outer frame and inner core)
+    # Note: The outer frame might be one polygon with a hole (where the donut is), 
+    # and the inner core is another polygon.
+    assert len(zone1_rows) >= 2, "Zone 1 should be split into outer and inner parts"
+    
+    # 4. Generate Mesh
+    mg = MeshGenerator(background_lc=5.0, verbosity=1)
+    success = mg.generate(clean_polys, clean_lines, clean_points)
+    
+    assert success, "Mesh generation failed for donut overlap scenario"
+    assert len(mg.nodes) > 0
+    
+    # 5. Tessellate
+    vt = VoronoiTessellator(mg, cm, clip_to_boundary=True)
+    grid = vt.generate()
+    
+    assert not grid.empty
+    
+    # Check that we have cells from both zones
+    assert 1 in grid['zone_id'].values
+    assert 2 in grid['zone_id'].values
+    
+    # Check total area conservation
+    total_area = grid.geometry.area.sum()
+    expected_area = domain.area # 400
+    assert pytest.approx(total_area, rel=0.01) == expected_area
