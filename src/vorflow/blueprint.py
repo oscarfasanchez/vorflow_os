@@ -76,7 +76,7 @@ class ConceptualMesh:
         })
 
     def add_line(self, geometry, line_id, resolution, snap_to_polygons=True, is_barrier=False,
-                  dist_min=None, dist_max=None, straddle_width=None, densify=None, simplify_tolerance=None):
+                  dist_min=None, dist_max=None, straddle_width=None, densify=True, simplify_tolerance=None):
         """
         Adds a line feature, such as a river, fault, or other linear boundary.
 
@@ -94,8 +94,8 @@ class ConceptualMesh:
                 transitions to the background resolution.
             straddle_width (float, optional): If set, forces Voronoi cell edges to align
                 perfectly with the line by creating a "virtual straddle" of mesh nodes.
-            densify (float, optional): If set, densifies the line by adding vertices,
-                ensuring no segment is longer than this value.
+            densify (float or bool, optional): If set, densifies the line by adding vertices,
+                ensuring no segment is longer than this value. If False, disables densification.
             simplify_tolerance (float, optional): Tolerance for simplifying the line geometry.
         """
         if not geometry.is_valid:
@@ -390,6 +390,20 @@ class ConceptualMesh:
 
         # Densify lines based on their target resolution ('lc').
         if not self.clean_lines.empty:
+            # Helper to determine the target resolution for a line row
+            def get_line_resolution(row):
+                d = row.get('densify')
+                
+                # 1. Explicitly disabled (densify=False)
+                if d is False:
+                    return None
+                
+                # 2. Explicit custom resolution (e.g., densify=5.0)
+                if isinstance(d, (int, float)) and d > 0:
+                    return d
+                
+                # 3. Default behavior (True or None): use the mesh resolution (lc)
+                return row.get('lc')
             self.clean_lines['geometry'] = self.clean_lines.apply(
-                lambda row: self._densify_geometry(row['geometry'], row['lc']), axis=1
-            )
+                lambda row: self._densify_geometry(row['geometry'], get_line_resolution(row))
+                if get_line_resolution(row) is not None else row['geometry'], axis=1)
