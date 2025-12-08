@@ -109,7 +109,8 @@ class ConceptualMesh:
             'dist_min': dist_min,
             'dist_max': dist_max,
             'straddle_width': straddle_width,
-            'densify': densify
+            'densify': densify,
+            'simplify_tolerance': simplify_tolerance
         })
 
     def add_point(self, geometry, point_id, resolution, dist_min=None, dist_max=None, simplify_tolerance=None):
@@ -146,7 +147,7 @@ class ConceptualMesh:
                 tol = lc * 0.5 if lc is not None else None
 
             if tol is not None and tol > 0:
-                self.raw_polygons[i]['geometry'] = poly_data['geometry'].simplify(tol, preserve_topology=True)
+                self.raw_polygons[i]['geometry'] = poly_data['geometry'].simplify(tol, preserve_topology=False)
 
         # Simplify Lines
         for i, line_data in enumerate(self.raw_lines):
@@ -202,6 +203,12 @@ class ConceptualMesh:
         lower ones.
         """
         # Sort polygons by priority, with the highest z_order processed first.
+        if self.raw_polygons == []:
+            #if this is empty, just create an empty GeoDataFrame
+            self.clean_polygons = gpd.GeoDataFrame(columns=['geometry', 'zone_id', 'lc', 'z_order', 'refine',
+                                                          'dist_min', 'dist_max_in', 'dist_max_out',
+                                                          'border_density', 'simplify_tolerance'], crs=self.crs)
+            return
         df = pd.DataFrame(self.raw_polygons)
         df = df.sort_values(by='z_order', ascending=False)
         
