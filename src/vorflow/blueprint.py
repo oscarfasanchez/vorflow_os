@@ -29,7 +29,8 @@ class ConceptualMesh:
         self.clean_lines = gpd.GeoDataFrame()
         self.clean_points = gpd.GeoDataFrame()
 
-    def add_polygon(self, geometry, zone_id, resolution=None, z_order=0, mesh_refinement=True, dist_min=None, dist_max=None, dist_max_in=None, dist_max_out=None, border_density=None):
+    def add_polygon(self, geometry, zone_id, resolution=None, z_order=0, mesh_refinement=True, dist_min=None,
+                     dist_max=None, dist_max_in=None, dist_max_out=None, border_density=None, simplify_tolerance=None):
         """
         Adds a polygon feature, such as a model boundary or a refinement zone.
 
@@ -51,6 +52,8 @@ class ConceptualMesh:
                 mesh transitions to the background resolution.
             border_density (float, optional): If set, densifies the polygon's boundary
                 by adding vertices, ensuring no segment is longer than this value.
+            simplify_tolerance (float, optional): Tolerance for simplifying the polygon geometry, no simplification is applied
+                if None.
         """
         if not geometry.is_valid:
             geometry = make_valid(geometry)
@@ -68,10 +71,12 @@ class ConceptualMesh:
             'dist_min': dist_min,
             'dist_max_in': dist_max_in,
             'dist_max_out': dist_max_out,
-            'border_density': border_density
+            'border_density': border_density,
+            'simplify_tolerance': simplify_tolerance
         })
 
-    def add_line(self, geometry, line_id, resolution, snap_to_polygons=True, is_barrier=False, dist_min=None, dist_max=None, straddle_width=None):
+    def add_line(self, geometry, line_id, resolution, snap_to_polygons=True, is_barrier=False,
+                  dist_min=None, dist_max=None, straddle_width=None, densify=None, simplify_tolerance=None):
         """
         Adds a line feature, such as a river, fault, or other linear boundary.
 
@@ -89,6 +94,9 @@ class ConceptualMesh:
                 transitions to the background resolution.
             straddle_width (float, optional): If set, forces Voronoi cell edges to align
                 perfectly with the line by creating a "virtual straddle" of mesh nodes.
+            densify (float, optional): If set, densifies the line by adding vertices,
+                ensuring no segment is longer than this value.
+            simplify_tolerance (float, optional): Tolerance for simplifying the line geometry.
         """
         if not geometry.is_valid:
             geometry = make_valid(geometry)
@@ -100,10 +108,11 @@ class ConceptualMesh:
             'is_barrier': is_barrier,
             'dist_min': dist_min,
             'dist_max': dist_max,
-            'straddle_width': straddle_width
+            'straddle_width': straddle_width,
+            'densify': densify
         })
 
-    def add_point(self, geometry, point_id, resolution, dist_min=None, dist_max=None):
+    def add_point(self, geometry, point_id, resolution, dist_min=None, dist_max=None, simplify_tolerance=None):
         """
         Adds a point feature, such as a well or an observation point.
 
@@ -121,8 +130,70 @@ class ConceptualMesh:
             'point_id': point_id,
             'lc': resolution,
             'dist_min': dist_min,
-            'dist_max': dist_max
+            'dist_max': dist_max,
+            'simplify_tolerance': simplify_tolerance
         })
+    def _apply_simplification(self):
+        """
+        Applies geometry simplification to raw polygons, lines, and points
+        based on their specified tolerances.
+        """
+        # Simplify Polygons
+        for i, poly_data in enumerate(self.raw_polygons):
+            tol = poly_data.get('simplify_tolerance')
+            if tol is True:
+                lc = poly_data.get('lc')
+                tol = lc * 0.5 if lc is not None else None
+
+            if tol is not None and tol > 0:
+                self.raw_polygons[i]['geometry'] = poly_data['geometry'].simplify(tol, preserve_topology=True)
+
+        # Simplify Lines
+        for i, line_data in enumerate(self.raw_lines):
+            tol = line_data.get('simplify_tolerance')
+            if tol is True:
+                lc = line_data.get('lc')
+                tol = lc * 0.5 if lc is not None else None
+            if tol is not None and tol > 0:
+                simplified_geom = line_data['geometry'].simplify(tol, preserve_topology=True)
+                self.raw_lines[i]['geometry'] = simplified_geom
+
+        # lets merge points that are very close to each other
+        if self.raw_points:
+            #lets sort by resolution first
+            sorted_points = sorted(
+                self.raw_points,
+                  key=lambda x: x['lc'] if x['lc'] is not None else float('inf'))
+            final_points = []
+
+            for point_data in sorted_points:
+                current_geom = point_data['geometry']
+                # Use specific tolerance if provided, otherwise default to a small value or skip
+                tol = point_data.get('simplify_tolerance')
+                if tol is None or tol <= 0:
+                    final_points.append(point_data)
+                    continue
+
+
+                if tol is True:
+                    lc = point_data.get('lc')
+                    tol = lc * 0.5 if lc is not None else 1e-6
+                is_merged = False
+
+                for kept in final_points:
+                    dist = kept['geometry'].distance(current_geom)
+                    if dist < tol:
+                        is_merged = True
+                        break
+                if not is_merged:
+                    final_points.append(point_data)
+
+            if len(self.raw_points) != len(final_points):
+                print(f"Simplification merged {len(self.raw_points) - len(final_points)} points.")
+                
+            self.raw_points = final_points
+                        
+                
 
     def _resolve_overlaps(self):
         """
@@ -228,6 +299,9 @@ class ConceptualMesh:
         ensures topological connectivity, and prepares clean GeoDataFrames
         for the mesher.
         """
+        print("Applying optional geometry simplification...")
+        self._apply_simplification()
+
         print("Resolving polygon overlaps...")
         self._resolve_overlaps()
         
