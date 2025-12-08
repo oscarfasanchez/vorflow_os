@@ -241,12 +241,15 @@ class ConceptualMesh:
             if final_geo.is_empty:
                 continue
                 
+            # Ensure the resulting geometry is valid before exploding.
+            final_geo = make_valid(final_geo)
+
             # If the difference operation resulted in a MultiPolygon, explode it into
             # individual Polygons, each inheriting the parent's attributes.
             if final_geo.geom_type == 'MultiPolygon':
                 for part in final_geo.geoms:
                     feat = row.copy()
-                    feat['geometry'] = part
+                    feat['geometry'] = make_valid(part) # Ensure each part is valid
                     final_features.append(feat)
             else:
                 feat = row.copy()
