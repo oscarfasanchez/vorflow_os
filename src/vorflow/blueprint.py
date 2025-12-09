@@ -4,6 +4,7 @@ import numpy as np
 from shapely.geometry import Polygon, LineString, Point, box, MultiPolygon
 from shapely.ops import unary_union, snap, linemerge
 from shapely.validation import make_valid
+from shapely.strtree import STRtree
 
 class ConceptualMesh:
     def __init__(self, crs="EPSG:4326"):
@@ -52,11 +53,16 @@ class ConceptualMesh:
                 mesh transitions to the background resolution.
             border_density (float, optional): If set, densifies the polygon's boundary
                 by adding vertices, ensuring no segment is longer than this value.
-            simplify_tolerance (float, optional): Tolerance for simplifying the polygon geometry, no simplification is applied
-                if None.
+            simplify_tolerance (float or bool, optional): If a float > 0, applies Douglas-Peucker
+                simplification with this tolerance. If True, computes an automatic tolerance from
+                the polygon's resolution ('lc') using a heuristic (currently lc * 0.5).
+                If None or 0, no simplification is applied. Raises ValueError if negative.
         """
         if not geometry.is_valid:
             geometry = make_valid(geometry)
+
+        if isinstance(simplify_tolerance, (int, float)) and simplify_tolerance < 0:
+            raise ValueError(f"simplify_tolerance must be non-negative. Got {simplify_tolerance}.")
             
         # For backward compatibility, allow 'dist_max' to function as 'dist_max_out'.
         if dist_max is not None and dist_max_out is None:
@@ -94,13 +100,25 @@ class ConceptualMesh:
                 transitions to the background resolution.
             straddle_width (float, optional): If set, forces Voronoi cell edges to align
                 perfectly with the line by creating a "virtual straddle" of mesh nodes.
-            densify (float or bool, optional): If set, densifies the line by adding vertices,
-                ensuring no segment is longer than this value. If False, disables densification.
-            simplify_tolerance (float, optional): Tolerance for simplifying the line geometry.
+            densify (float or bool, optional): Controls line densification:
+                - If False, disables densification.
+                - If True, densifies the line using the `resolution` value.
+                - If a float, densifies the line so that no segment is longer than this value.
+                Raises ValueError if negative or zero.
+            simplify_tolerance (float or bool, optional): If a float > 0, simplifies the line with
+                this tolerance using Douglas-Peucker algorithm.
+                If True, computes an automatic tolerance from 'lc' (currently lc * 0.5).
+                If None or 0, no simplification is applied. Raises ValueError if negative.
         """
         if not geometry.is_valid:
             geometry = make_valid(geometry)
             
+        if isinstance(simplify_tolerance, (int, float)) and simplify_tolerance < 0:
+            raise ValueError(f"simplify_tolerance must be non-negative. Got {simplify_tolerance}.")
+        
+        if isinstance(densify, (int, float)) and not isinstance(densify, bool) and densify <= 0:
+            raise ValueError(f"densify must be positive when specified as a float. Got {densify}.")
+        
         self.raw_lines.append({
             'geometry': geometry,
             'line_id': line_id,
@@ -125,7 +143,13 @@ class ConceptualMesh:
                 held constant at the point's resolution.
             dist_max (float, optional): Distance from the point over which the mesh
                 transitions to the background resolution.
+            simplify_tolerance (float or bool, optional): If a float > 0, merges points
+                that are closer than this tolerance. If True, computes an automatic tolerance
+                from 'lc' (currently lc * 0.5). If None or 0, no simplification is applied.
+                Raises ValueError if negative.
         """
+        if isinstance(simplify_tolerance, (int, float)) and simplify_tolerance < 0:
+            raise ValueError(f"simplify_tolerance must be non-negative. Got {simplify_tolerance}.")
         self.raw_points.append({
             'geometry': geometry,
             'point_id': point_id,
@@ -137,7 +161,16 @@ class ConceptualMesh:
     def _apply_simplification(self):
         """
         Applies geometry simplification to raw polygons, lines, and points
-        based on their specified tolerances.
+        based on their specified tolerances to reduce
+        geometric complexity.For polygon and lines
+        the Douglas-Peucker algorithm is used.
+        For points, this method performs deduplication: points that are within
+        a specified tolerance of each other are merged, and only the point with the
+        finest (smallest) resolution is kept. The tolerance for merging is taken from
+        the 'simplify_tolerance' attribute of each point, or derived from the point's
+        resolution if set to True. This ensures that closely spaced points do not
+        result in redundant mesh nodes, and that the most restrictive mesh size is
+        preserved at each location.
         """
         # Simplify Polygons
         for i, poly_data in enumerate(self.raw_polygons):
@@ -147,8 +180,15 @@ class ConceptualMesh:
                 tol = lc * 0.5 if lc is not None else None
 
             if tol is not None and tol > 0:
-                self.raw_polygons[i]['geometry'] = poly_data['geometry'].simplify(tol, preserve_topology=False)
-
+                org_area = poly_data['geometry'].area
+                simplified_geom = poly_data['geometry'].simplify(tol, preserve_topology=True)
+                self.raw_polygons[i]['geometry'] = simplified_geom
+                new_area = simplified_geom.area
+                if new_area < org_area and org_area > 0:
+                    reduction_pct = 100 * (org_area - new_area) / org_area
+                    if reduction_pct > 1.0:
+                        print(f"Simplified polygon (zone_id={poly_data['zone_id']}) "
+                            f"reduced area by {reduction_pct:.2f}% using tolerance {tol}.")
         # Simplify Lines
         for i, line_data in enumerate(self.raw_lines):
             tol = line_data.get('simplify_tolerance')
@@ -156,23 +196,33 @@ class ConceptualMesh:
                 lc = line_data.get('lc')
                 tol = lc * 0.5 if lc is not None else None
             if tol is not None and tol > 0:
+                org_length = line_data['geometry'].length
                 simplified_geom = line_data['geometry'].simplify(tol, preserve_topology=True)
                 self.raw_lines[i]['geometry'] = simplified_geom
+                new_length = simplified_geom.length
+                if new_length < org_length and org_length > 0:
+                    reduction_pct = 100 * (org_length - new_length) / org_length
+                    if reduction_pct > 1.0:
+                        print(f"Simplified line (line_id={line_data['line_id']}) "
+                            f"reduced length by {reduction_pct:.2f}% using tolerance {tol}.")
 
-        # lets merge points that are very close to each other
+        # Let's merge points that are very close to each other
         if self.raw_points:
-            #lets sort by resolution first
+            # Let's sort by resolution first
             sorted_points = sorted(
                 self.raw_points,
-                  key=lambda x: x['lc'] if x['lc'] is not None else float('inf'))
+                key=lambda x: x['lc'] if x['lc'] is not None else float('inf'))
             final_points = []
-
-            for point_data in sorted_points:
+            geoms = [p['geometry'] for p in sorted_points]
+            tree = STRtree(geoms)
+            kept_indices = set()
+            for i, point_data in enumerate(sorted_points):
                 current_geom = point_data['geometry']
                 # Use specific tolerance if provided, otherwise default to a small value or skip
                 tol = point_data.get('simplify_tolerance')
                 if tol is None or tol <= 0:
                     final_points.append(point_data)
+                    kept_indices.add(i)
                     continue
 
 
@@ -181,17 +231,23 @@ class ConceptualMesh:
                     tol = lc * 0.5 if lc is not None else 1e-6
                 is_merged = False
 
-                for kept in final_points:
-                    dist = kept['geometry'].distance(current_geom)
-                    if dist < tol:
-                        is_merged = True
-                        break
+                #query tree for potential neighbors
+                # tree.query returns indices of geometries that intersect the buffer
+                search_area = current_geom.buffer(tol)
+                candidate_indices = tree.query(search_area)
+                for candidate_idx in candidate_indices:
+                    if candidate_idx in kept_indices:
+                        dist = geoms[candidate_idx].distance(current_geom)
+                        if dist < tol:
+                            is_merged = True
+                            break
                 if not is_merged:
                     final_points.append(point_data)
+                    kept_indices.add(i)
 
             if len(self.raw_points) != len(final_points):
-                print(f"Simplification merged {len(self.raw_points) - len(final_points)} points.")
-                
+                print(f"Simplification merged {len(self.raw_points) - len(final_points)} "
+                      f"points out of {len(self.raw_points)}")
             self.raw_points = final_points
                         
                 
@@ -203,8 +259,8 @@ class ConceptualMesh:
         lower ones.
         """
         # Sort polygons by priority, with the highest z_order processed first.
-        if self.raw_polygons == []:
-            #if this is empty, just create an empty GeoDataFrame
+        if not self.raw_polygons:
+            # If this is empty, just create an empty GeoDataFrame.
             self.clean_polygons = gpd.GeoDataFrame(columns=['geometry', 'zone_id', 'lc', 'z_order', 'refine',
                                                           'dist_min', 'dist_max_in', 'dist_max_out',
                                                           'border_density', 'simplify_tolerance'], crs=self.crs)
@@ -414,6 +470,8 @@ class ConceptualMesh:
                 
                 # 3. Default behavior (True or None): use the mesh resolution (lc)
                 return row.get('lc')
-            self.clean_lines['geometry'] = self.clean_lines.apply(
-                lambda row: self._densify_geometry(row['geometry'], get_line_resolution(row))
-                if get_line_resolution(row) is not None else row['geometry'], axis=1)
+            def _line_densify(row):
+                res = get_line_resolution(row)
+                return self._densify_geometry(row['geometry'], res) if res is not None else row['geometry']
+
+            self.clean_lines['geometry'] = self.clean_lines.apply(_line_densify, axis=1)

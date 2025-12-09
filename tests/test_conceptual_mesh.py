@@ -56,10 +56,7 @@ def test_polygon_simplification():
     
     # Create a "noisy" square with a tiny bump on the top edge
     # (0,1) -> (0.5, 1.001) -> (1,1)
-    poly = Polygon([
-        (0, 0), (1, 0), 
-        (1, 1), (0.5, 1.001), (0, 1)
-    ])
+    poly = Polygon([(0, 0), (1, 0), (1, 1), (0.5, 1.001), (0, 1)])
     
     # Add with a tolerance larger than the noise (0.001)
     cm.add_polygon(poly, zone_id=1, simplify_tolerance=0.01)
@@ -138,8 +135,8 @@ def test_line_densification_options():
     
     # Check 2: Default densification (lc=1.0)
     l2 = clean_lines[clean_lines['line_id'] == "default_densify"].iloc[0].geometry
-    # Should have roughly 11 points (10 segments)
-    assert len(l2.coords) >= 11 
+    # Should have 11 points (10 segments)
+    assert len(l2.coords) == 11 
     
     # Check 3: Custom densification (val=5.0)
     l3 = clean_lines[clean_lines['line_id'] == "custom_densify"].iloc[0].geometry
