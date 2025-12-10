@@ -6,6 +6,11 @@ from shapely.ops import unary_union, snap, linemerge
 from shapely.validation import make_valid
 from shapely.strtree import STRtree
 
+# Constants for geometry simplification and reporting
+SIGNIFICANT_REDUCTION_PCT = 1.0
+AUTO_SIMPLIFY_FACTOR = 0.5
+DEFAULT_TOLERANCE = 1e-3
+
 class ConceptualMesh:
     def __init__(self, crs="EPSG:4326"):
         """
@@ -162,7 +167,7 @@ class ConceptualMesh:
         """
         Applies geometry simplification to raw polygons, lines, and points
         based on their specified tolerances to reduce
-        geometric complexity.For polygon and lines
+        geometric complexity.For polygons and lines
         the Douglas-Peucker algorithm is used.
         For points, this method performs deduplication: points that are within
         a specified tolerance of each other are merged, and only the point with the
@@ -177,7 +182,7 @@ class ConceptualMesh:
             tol = poly_data.get('simplify_tolerance')
             if tol is True:
                 lc = poly_data.get('lc')
-                tol = lc * 0.5 if lc is not None else None
+                tol = lc * AUTO_SIMPLIFY_FACTOR if lc is not None else None
 
             if tol is not None and tol > 0:
                 org_area = poly_data['geometry'].area
@@ -186,7 +191,7 @@ class ConceptualMesh:
                 new_area = simplified_geom.area
                 if new_area < org_area and org_area > 0:
                     reduction_pct = 100 * (org_area - new_area) / org_area
-                    if reduction_pct > 1.0:
+                    if reduction_pct > SIGNIFICANT_REDUCTION_PCT:
                         print(f"Simplified polygon (zone_id={poly_data['zone_id']}) "
                             f"reduced area by {reduction_pct:.2f}% using tolerance {tol}.")
         # Simplify Lines
@@ -194,7 +199,7 @@ class ConceptualMesh:
             tol = line_data.get('simplify_tolerance')
             if tol is True:
                 lc = line_data.get('lc')
-                tol = lc * 0.5 if lc is not None else None
+                tol = lc * AUTO_SIMPLIFY_FACTOR if lc is not None else None
             if tol is not None and tol > 0:
                 org_length = line_data['geometry'].length
                 simplified_geom = line_data['geometry'].simplify(tol, preserve_topology=True)
@@ -202,7 +207,7 @@ class ConceptualMesh:
                 new_length = simplified_geom.length
                 if new_length < org_length and org_length > 0:
                     reduction_pct = 100 * (org_length - new_length) / org_length
-                    if reduction_pct > 1.0:
+                    if reduction_pct > SIGNIFICANT_REDUCTION_PCT:
                         print(f"Simplified line (line_id={line_data['line_id']}) "
                             f"reduced length by {reduction_pct:.2f}% using tolerance {tol}.")
 
@@ -228,10 +233,10 @@ class ConceptualMesh:
 
                 if tol is True:
                     lc = point_data.get('lc')
-                    tol = lc * 0.5 if lc is not None else 1e-6
+                    tol = lc * AUTO_SIMPLIFY_FACTOR if lc is not None else DEFAULT_TOLERANCE
                 is_merged = False
 
-                #query tree for potential neighbors
+                # Query tree for potential neighbors
                 # tree.query returns indices of geometries that intersect the buffer
                 search_area = current_geom.buffer(tol)
                 candidate_indices = tree.query(search_area)
@@ -314,7 +319,7 @@ class ConceptualMesh:
 
         self.clean_polygons = gpd.GeoDataFrame(final_features, crs=self.crs)
 
-    def _enforce_connectivity(self, tolerance=1e-3):
+    def _enforce_connectivity(self, tolerance=DEFAULT_TOLERANCE):
         """
         Snaps features together to ensure they are topologically connected before
         being passed to the mesher. This is crucial for Gmsh to correctly
@@ -465,7 +470,7 @@ class ConceptualMesh:
                     return None
                 
                 # 2. Explicit custom resolution (e.g., densify=5.0)
-                if isinstance(d, (int, float)) and d > 0:
+                if isinstance(d, (int, float)) and not isinstance(d, bool) and d > 0:
                     return d
                 
                 # 3. Default behavior (True or None): use the mesh resolution (lc)
