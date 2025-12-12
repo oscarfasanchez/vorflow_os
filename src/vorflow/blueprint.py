@@ -4,6 +4,7 @@ import numpy as np
 from shapely.geometry import Polygon, LineString, Point, box, MultiPolygon
 from shapely.ops import unary_union, snap, linemerge
 from shapely.validation import make_valid
+from .fields import ThresholdField, ExponentialField, AutoLinearField, AutoExponentialField
 
 class ConceptualMesh:
     def __init__(self, crs="EPSG:4326"):
@@ -29,7 +30,9 @@ class ConceptualMesh:
         self.clean_lines = gpd.GeoDataFrame()
         self.clean_points = gpd.GeoDataFrame()
 
-    def add_polygon(self, geometry, zone_id, resolution=None, z_order=0, mesh_refinement=True, dist_min=None, dist_max=None, dist_max_in=None, dist_max_out=None, border_density=None):
+    def add_polygon(self, geometry, zone_id, resolution=None, z_order=0, mesh_refinement=True,
+                     dist_min=None, dist_max=None, dist_max_in=None, dist_max_out=None, border_density=None,
+                     fields=None, embed=True):
         """
         Adds a polygon feature, such as a model boundary or a refinement zone.
 
@@ -51,6 +54,8 @@ class ConceptualMesh:
                 mesh transitions to the background resolution.
             border_density (float, optional): If set, densifies the polygon's boundary
                 by adding vertices, ensuring no segment is longer than this value.
+            fields (list, optional): List of MeshField objects.
+            embed (bool): If True, the polygon is embedded in the mesh. If False, it is used only for fields.
         """
         if not geometry.is_valid:
             geometry = make_valid(geometry)
@@ -58,6 +63,10 @@ class ConceptualMesh:
         # For backward compatibility, allow 'dist_max' to function as 'dist_max_out'.
         if dist_max is not None and dist_max_out is None:
             dist_max_out = dist_max
+
+        if dist_max_out is not None and dist_max_out > 0:
+            final_fields.append(ThresholdField(resolution, d_min, dist_max_out))
+
 
         self.raw_polygons.append({
             'geometry': geometry,
