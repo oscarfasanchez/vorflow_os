@@ -142,4 +142,19 @@ def test_line_densification_options():
     l3 = clean_lines[clean_lines['line_id'] == "custom_densify"].iloc[0].geometry
     # Should have roughly 3 points (2 segments)
     assert len(l3.coords) == 3
-    
+
+@pytest.mark.parametrize("bool_tol", [True, False])
+def test_simplify_tolerance_bool_is_rejected(bool_tol):
+    cm = ConceptualMesh()
+
+    poly = Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
+    with pytest.raises(ValueError):
+        cm.add_polygon(poly, zone_id=1, simplify_tolerance=bool_tol)
+
+    line = LineString([(0, 0), (1, 0)])
+    with pytest.raises(ValueError):
+        cm.add_line(line, line_id="l1", resolution=0.1, simplify_tolerance=bool_tol, densify=False)
+
+    pt = Point(0, 0)
+    with pytest.raises(ValueError):
+        cm.add_point(pt, point_id="p1", resolution=0.1, simplify_tolerance=bool_tol)
