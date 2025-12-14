@@ -4,7 +4,7 @@ import numpy as np
 from shapely.geometry import Polygon, LineString, Point, box, MultiPolygon
 from shapely.ops import unary_union, snap, linemerge
 from shapely.validation import make_valid
-from .fields import ThresholdField, ExponentialField, AutoLinearField, AutoExponentialField
+from .fields import ThresholdField, ExponentialField, AutoLinearField, AutoExponentialField, ConstantField
 
 class ConceptualMesh:
     def __init__(self, crs="EPSG:4326"):
@@ -77,10 +77,13 @@ class ConceptualMesh:
             'dist_min': dist_min,
             'dist_max_in': dist_max_in,
             'dist_max_out': dist_max_out,
-            'border_density': border_density
+            'border_density': border_density,
+            'fields': fields,
+            'embed': embed
         })
 
-    def add_line(self, geometry, line_id, resolution, snap_to_polygons=True, is_barrier=False, dist_min=None, dist_max=None, straddle_width=None):
+    def add_line(self, geometry, line_id, resolution, snap_to_polygons=True, is_barrier=False,
+                  dist_min=None, dist_max=None, straddle_width=None, fields=None, embed=True):
         """
         Adds a line feature, such as a river, fault, or other linear boundary.
 
@@ -98,6 +101,8 @@ class ConceptualMesh:
                 transitions to the background resolution.
             straddle_width (float, optional): If set, forces Voronoi cell edges to align
                 perfectly with the line by creating a "virtual straddle" of mesh nodes.
+            fields (list, optional): List of MeshField objects.
+            embed (bool): If True, the line is embedded in the mesh. If False, it is used only for fields.
         """
         if not geometry.is_valid:
             geometry = make_valid(geometry)
@@ -109,10 +114,12 @@ class ConceptualMesh:
             'is_barrier': is_barrier,
             'dist_min': dist_min,
             'dist_max': dist_max,
-            'straddle_width': straddle_width
+            'straddle_width': straddle_width,
+            'fields': fields,
+            'embed': embed,
         })
 
-    def add_point(self, geometry, point_id, resolution, dist_min=None, dist_max=None):
+    def add_point(self, geometry, point_id, resolution, dist_min=None, dist_max=None, fields=None, embed=True):
         """
         Adds a point feature, such as a well or an observation point.
 
@@ -130,7 +137,9 @@ class ConceptualMesh:
             'point_id': point_id,
             'lc': resolution,
             'dist_min': dist_min,
-            'dist_max': dist_max
+            'dist_max': dist_max,
+            'fields': fields,
+            'embed': embed,
         })
 
     def _resolve_overlaps(self):

@@ -27,6 +27,16 @@ class MeshField:
 
 # --- Manual Fields ---
 
+class ConstantField(MeshField):
+    def __init__(self, size):
+        self.size = float(size)
+
+    def create(self, gmsh_api, tags_dict, background_lc, feature_lc=None):
+        const = gmsh_api.model.mesh.field.add("Constant")
+        gmsh_api.model.mesh.field.setNumber(const, "VIn", background_lc)
+        gmsh_api.model.mesh.field.setNumber(const, "VOut", background_lc)
+
+
 class ThresholdField(MeshField):
     def __init__(self, size_min, dist_min, dist_max, size_max=None):
         self.size_min = float(size_min)

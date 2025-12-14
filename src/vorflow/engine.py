@@ -6,6 +6,7 @@ import pandas as pd
 from shapely.geometry import Point, LineString, Polygon
 from shapely.ops import unary_union
 from shapely.validation import make_valid
+from .fields import ThresholdField, ExponentialField, AutoLinearField, AutoExponentialField, ConstantField
 
 class MeshGenerator:
     def __init__(self, background_lc=None,verbosity=0, mesh_algorithm=6, smoothing_steps=10, optimization_cycles=2):
