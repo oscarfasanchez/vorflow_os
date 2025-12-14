@@ -25,7 +25,7 @@ def test_gmsh_integration_simple_square():
     # 10x10 square
     square = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
     # Zone ID 1, resolution 2.0 (coarse mesh for speed)
-    cm.add_polygon(square, zone_id=1, resolution=2.0)
+    cm.add_polygon(square, zone_id=1, resolution=2.0, dist_max_out=10.0)
     
     clean_polys, clean_lines, clean_points = cm.generate()
     
@@ -59,7 +59,7 @@ def test_gmsh_integration_with_internal_line():
     """
     cm = ConceptualMesh(crs="EPSG:3857")
     square = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
-    cm.add_polygon(square, zone_id=1, resolution=5.0)
+    cm.add_polygon(square, zone_id=1, resolution=5.0, dist_max_out=25.0)
     
     # Diagonal line with finer resolution
     line = LineString([(1, 1), (9, 9)])
@@ -81,6 +81,30 @@ def test_gmsh_integration_with_internal_line():
     # because of the 1.0 resolution line.
     assert len(grid) > 10
 
+
+def test_gmsh_integration_with_field_only_line_refinement():
+    """A non-embedded (field-only) line should refine the mesh without partitioning it."""
+    cm = ConceptualMesh(crs="EPSG:3857")
+    square = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
+    cm.add_polygon(square, zone_id=1, resolution=5.0, dist_max_out=25.0)
+
+    # Field-only diagonal line with finer resolution.
+    line = LineString([(1, 1), (9, 9)])
+    cm.add_line(line, line_id="fault", resolution=1.0, embed=False)
+
+    clean_polys, clean_lines, clean_points = cm.generate()
+
+    mg = MeshGenerator(background_lc=5.0, verbosity=1)
+    success = mg.generate(clean_polys, clean_lines, clean_points)
+    assert success
+
+    vt = VoronoiTessellator(mg, cm, clip_to_boundary=True)
+    grid = vt.generate()
+    assert not grid.empty
+
+    # Still expect refinement from the line-based size field.
+    assert len(grid) > 10
+
 def test_gmsh_integration_overlapping_polygon_with_hole():
     """
     Test the case where an overlapping polygon (Zone 2) has a hole in its center.
@@ -91,7 +115,7 @@ def test_gmsh_integration_overlapping_polygon_with_hole():
     # 1. Base Domain (Large Square) - Zone 1
     # 20x20 square
     domain = Polygon([(0, 0), (20, 0), (20, 20), (0, 20)])
-    cm.add_polygon(domain, zone_id=1, resolution=5.0, z_order=0)
+    cm.add_polygon(domain, zone_id=1, resolution=5.0, dist_max_out=25.0, z_order=0)
     
     # 2. Overlapping Polygon with Hole (Donut) - Zone 2
     # Outer: 5,5 to 15,15
@@ -100,7 +124,7 @@ def test_gmsh_integration_overlapping_polygon_with_hole():
     donut_hole = [(8, 8), (12, 8), (12, 12), (8, 12)]
     donut = Polygon(donut_shell, [donut_hole])
     
-    cm.add_polygon(donut, zone_id=2, resolution=2.0, z_order=1)
+    cm.add_polygon(donut, zone_id=2, resolution=2.0, dist_max_out=10.0, z_order=1)
     
     # 3. Generate Conceptual Mesh
     clean_polys, clean_lines, clean_points = cm.generate()

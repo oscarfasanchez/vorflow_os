@@ -41,7 +41,6 @@ class ConceptualMesh:
         zone_id,
         resolution=None,
         z_order=0,
-        mesh_refinement=True,
         dist_min=None,
         dist_max=None,
         dist_max_in=None,
@@ -61,8 +60,6 @@ class ConceptualMesh:
                 the background mesh size will be used.
             z_order (int): Stacking order for resolving overlaps. Higher values are
                 processed first and will "cut" into lower-order polygons.
-            mesh_refinement (bool): If True, this polygon will be used to control mesh
-                refinement. If False, it is used only for tagging the final cells.
             dist_min (float, optional): Distance from the polygon boundary where the mesh
                 size is held constant at the boundary's resolution.
             dist_max (float, optional): Legacy alias for `dist_max_out`.
@@ -97,12 +94,23 @@ class ConceptualMesh:
         if densify is True and (resolution is None or resolution <= 0):
             raise ValueError("densify=True for polygons requires a positive `resolution` (lc).")
 
+        if resolution is not None and resolution <= 0:
+            raise ValueError(f"resolution must be positive (or None). Got {resolution}.")
+
         # For backward compatibility, allow 'dist_max' to function as 'dist_max_out'.
         if dist_max is not None and dist_max_out is None:
             dist_max_out = dist_max
 
-        if dist_max_out is not None and dist_max_out > 0:
-            final_fields.append(ThresholdField(resolution, d_min, dist_max_out))
+        if dist_max_out is not None and dist_max_out < 0:
+            raise ValueError(f"dist_max_out must be non-negative (or None). Got {dist_max_out}.")
+
+        # No defaults: when a polygon provides an explicit resolution, require an
+        # explicit exterior transition length to avoid sharp size jumps.
+        if resolution is not None and (dist_max_out is None or dist_max_out <= 0):
+            raise ValueError(
+                "Polygons with an explicit `resolution` must provide `dist_max_out > 0` "
+                "to ensure a smooth size transition across the boundary."
+            )
 
 
         self.raw_polygons.append(
@@ -111,7 +119,6 @@ class ConceptualMesh:
                 "zone_id": zone_id,
                 "lc": resolution,
                 "z_order": z_order,
-                "refine": mesh_refinement,
                 "dist_min": dist_min,
                 "dist_max_in": dist_max_in,
                 "dist_max_out": dist_max_out,
@@ -175,7 +182,7 @@ class ConceptualMesh:
             'dist_max': dist_max,
             'straddle_width': straddle_width,
             'fields': fields,
-            'embed': embed,,
+            'embed': embed,
             'densify': densify,
             'simplify_tolerance': simplify_tolerance
         })
@@ -210,7 +217,7 @@ class ConceptualMesh:
             'dist_min': dist_min,
             'dist_max': dist_max,
             'fields': fields,
-            'embed': embed,,
+            'embed': embed,
             'simplify_tolerance': simplify_tolerance
         })
     def _apply_simplification(self):
@@ -334,12 +341,13 @@ class ConceptualMesh:
                     "zone_id",
                     "lc",
                     "z_order",
-                    "refine",
                     "dist_min",
                     "dist_max_in",
                     "dist_max_out",
                     "densify",
                     "simplify_tolerance",
+                    "fields",
+                    "embed",
                 ],
                 crs=self.crs,
             )
@@ -457,13 +465,31 @@ class ConceptualMesh:
         if self.raw_lines:
             self.clean_lines = gpd.GeoDataFrame(self.raw_lines, crs=self.crs)
         else:
-            self.clean_lines = gpd.GeoDataFrame(columns=['geometry', 'line_id', 'lc', 'is_barrier', 'dist_min', 'dist_max', 'straddle_width'], crs=self.crs)
+            self.clean_lines = gpd.GeoDataFrame(
+                columns=[
+                    'geometry',
+                    'line_id',
+                    'lc',
+                    'is_barrier',
+                    'dist_min',
+                    'dist_max',
+                    'straddle_width',
+                    'fields',
+                    'embed',
+                    'densify',
+                    'simplify_tolerance',
+                ],
+                crs=self.crs,
+            )
    
         # Clean Points
         if self.raw_points:
             self.clean_points = gpd.GeoDataFrame(self.raw_points, crs=self.crs)
         else:
-            self.clean_points = gpd.GeoDataFrame(columns=['geometry', 'point_id', 'lc', 'dist_min', 'dist_max'], crs=self.crs)
+            self.clean_points = gpd.GeoDataFrame(
+                columns=['geometry', 'point_id', 'lc', 'dist_min', 'dist_max', 'fields', 'embed', 'simplify_tolerance'],
+                crs=self.crs,
+            )
 
         print("Densifying geometry...")
         self._apply_densification()

@@ -84,18 +84,31 @@ class MeshGenerator:
         pre-processes barrier features before fragmenting all geometries to
         create a consistent topological model.
         """
-        input_tag_info = {} 
+        input_tag_info = {}
+
+        field_only_points = {}
+        field_only_lines = {}
+        field_only_poly_curves = {}
         
         def to_key(dim, tag):
             return (int(dim), int(tag))
+
+        def is_embedded(row) -> bool:
+            val = row.get('embed', True)
+            if pd.isna(val):
+                return True
+            return bool(val)
         
         # Add all point features to the Gmsh model first.
-        all_point_tags = []
+        embedded_point_tags = []
         for idx, row in points_gdf.iterrows():
             tag = gmsh.model.occ.addPoint(row.geometry.x, row.geometry.y, 0)
             key = to_key(0, tag)
-            input_tag_info[key] = {'type': 'point', 'id': idx}
-            all_point_tags.append(key)
+            if is_embedded(row):
+                input_tag_info[key] = {'type': 'point', 'id': idx}
+                embedded_point_tags.append(key)
+            else:
+                field_only_points.setdefault(int(idx), []).append(key)
             
         # Create a buffer zone around barrier lines. This is used to trim back
         # other lines, preventing their endpoints from interfering with the
@@ -129,8 +142,8 @@ class MeshGenerator:
                 print(f"Constructed Barrier Zone from {len(barrier_buffers)} barriers.")
 
         # Add line features to the model, handling barriers and standard lines differently.
-        all_line_tags = []
-        all_surface_tags = [] 
+        embedded_line_tags = []
+        embedded_surface_tags = []
         
         for idx, row in lines_gdf.iterrows():
             val = row.get('is_barrier', False)
@@ -139,6 +152,8 @@ class MeshGenerator:
             lc = max(row.get('lc', 10.0), 0.001)
             
             use_virtual_straddle = is_barrier or (straddle is not None and straddle > 0)
+
+            embedded = is_embedded(row)
             
             if use_virtual_straddle:
                 # For barriers or "straddle" lines, we don't add the line itself.
@@ -174,14 +189,20 @@ class MeshGenerator:
                     lx, ly = p.x + nx*epsilon, p.y + ny*epsilon
                     lt = gmsh.model.occ.addPoint(lx, ly, 0)
                     k_l = to_key(0, lt)
-                    input_tag_info[k_l] = {'type': 'point', 'id': idx}
-                    all_point_tags.append(k_l)
+                    if embedded:
+                        input_tag_info[k_l] = {'type': 'point', 'id': idx}
+                        embedded_point_tags.append(k_l)
+                    else:
+                        field_only_points.setdefault(int(idx), []).append(k_l)
                     
                     rx, ry = p.x - nx*epsilon, p.y - ny*epsilon
                     rt = gmsh.model.occ.addPoint(rx, ry, 0)
                     k_r = to_key(0, rt)
-                    input_tag_info[k_r] = {'type': 'point', 'id': idx}
-                    all_point_tags.append(k_r)
+                    if embedded:
+                        input_tag_info[k_r] = {'type': 'point', 'id': idx}
+                        embedded_point_tags.append(k_r)
+                    else:
+                        field_only_points.setdefault(int(idx), []).append(k_r)
 
             else:
                 # This is a standard line feature that will act as a constraint
@@ -225,13 +246,17 @@ class MeshGenerator:
                         l = gmsh.model.occ.addLine(pt_tags[i], pt_tags[i+1])
                         
                         key = to_key(1, l)
-                        all_line_tags.append(key)
-                        input_tag_info[key] = {'type': 'line', 'id': idx}
+                        if embedded:
+                            embedded_line_tags.append(key)
+                            input_tag_info[key] = {'type': 'line', 'id': idx}
+                        else:
+                            field_only_lines.setdefault(int(idx), []).append(key)
 
         # Add polygon features to the model.
         if not polygons_gdf.empty:
             print(f"Adding {len(polygons_gdf)} polygons to Gmsh...")
             for idx, row in polygons_gdf.iterrows():
+                embedded = is_embedded(row)
                 geom = row['geometry']
                 if geom.geom_type == 'Polygon':
                     polys = [geom]
@@ -282,14 +307,15 @@ class MeshGenerator:
                                 return None
                         
                         try:
-                            return gmsh.model.occ.addCurveLoop(l_tags)
+                            loop_tag = gmsh.model.occ.addCurveLoop(l_tags)
+                            return loop_tag, l_tags
                         except Exception as e:
                             print(f"Error adding curve loop: {e}")
-                            return None
+                            return None, []
 
                     # 1. Exterior Boundary
                     ext_coords = list(poly.exterior.coords)
-                    exterior_loop_tag = create_loop(ext_coords)
+                    exterior_loop_tag, exterior_lines = create_loop(ext_coords)
                     
                     if exterior_loop_tag is None:
                         print(f"Warning: Skipping degenerate polygon {idx}")
@@ -297,31 +323,48 @@ class MeshGenerator:
 
                     # 2. Interior Boundaries (Holes)
                     loops = [exterior_loop_tag]
+                    boundary_curve_tags = list(exterior_lines)
                     for interior in poly.interiors:
                         int_coords = list(interior.coords)
-                        interior_loop_tag = create_loop(int_coords)
+                        interior_loop_tag, interior_lines = create_loop(int_coords)
                         if interior_loop_tag is not None:
                             loops.append(interior_loop_tag)
+                            boundary_curve_tags.extend(interior_lines)
 
-                    # Create plane surface with holes
-                    try:
-                        s_tag = gmsh.model.occ.addPlaneSurface(loops)
-                    except Exception as e:
-                        print(f"Error creating surface for polygon {idx}: {e}")
-                        continue
-                    
-                    key = to_key(2, s_tag)
-                    input_tag_info[key] = {'type': 'surface', 'id': idx}
-                    all_surface_tags.append(key)
+                    if embedded:
+                        # Create plane surface with holes (embedded polygons participate in fragment)
+                        try:
+                            s_tag = gmsh.model.occ.addPlaneSurface(loops)
+                        except Exception as e:
+                            print(f"Error creating surface for polygon {idx}: {e}")
+                            continue
+
+                        key = to_key(2, s_tag)
+                        input_tag_info[key] = {'type': 'surface', 'id': idx}
+                        embedded_surface_tags.append(key)
+                    else:
+                        # Field-only polygons are represented by their boundary curves only.
+                        # These curves are NOT included in fragment, so they won't cut the domain.
+                        if boundary_curve_tags:
+                            field_only_poly_curves.setdefault(int(idx), []).extend(
+                                [to_key(1, t) for t in boundary_curve_tags]
+                            )
 
         # "Fragment" combines all the individual geometries into a single,
         # topologically consistent model. This is where intersections are
         # calculated and new, smaller entities are created at overlaps.
-        object_tags = all_surface_tags + all_line_tags + all_point_tags 
+        # Only embedded geometry participates in fragmentation.
+        object_tags = embedded_surface_tags + embedded_line_tags + embedded_point_tags
         
         if not object_tags:
             print("Warning: No geometry to mesh.")
-            return {'points': {}, 'lines': {}, 'surfaces': {}, 'straddle_surfs': {}}
+            return {
+                'points': field_only_points,
+                'lines': field_only_lines,
+                'surfaces': {},
+                'straddle_surfs': {},
+                'poly_curves': field_only_poly_curves,
+            }
 
         print(f"Fragmenting {len(object_tags)} objects...")
         out_dt, out_map = gmsh.model.occ.fragment(object_tags, [])
@@ -329,7 +372,13 @@ class MeshGenerator:
         
         # After fragmentation, we need to rebuild our map of which original
         # feature corresponds to which new Gmsh tags.
-        final_map = {'points': {}, 'lines': {}, 'surfaces': {}, 'straddle_surfs': {}}
+        final_map = {
+            'points': dict(field_only_points),
+            'lines': dict(field_only_lines),
+            'surfaces': {},
+            'straddle_surfs': {},
+            'poly_curves': dict(field_only_poly_curves),
+        }
         
         print(f"Reconstructing Map (Input Tags: {len(object_tags)}, Out Map Len: {len(out_map)})...")
         
@@ -571,6 +620,26 @@ class MeshGenerator:
                         
                         fid_grad = add_refinement(1, curve_tags, boundary_lc, d_min, d_max_out, size_max_limit=global_max_lc)
                         if fid_grad: field_list.append(fid_grad)
+
+            # Field-only polygons: treat as boundary curves only (line-like distance field).
+            elif idx in gmsh_map.get('poly_curves', {}):
+                curve_dimtags = gmsh_map['poly_curves'][idx]
+                curve_tags = extract_tags(curve_dimtags)
+
+                target_lc = get_row_param(row, 'lc', global_max_lc)
+
+                densify_val = row.get("densify", None)
+                if isinstance(densify_val, (int, float)) and not isinstance(densify_val, bool) and densify_val > 0:
+                    boundary_lc = min(target_lc, float(densify_val))
+                else:
+                    boundary_lc = target_lc
+
+                d_max_out = get_row_param(row, 'dist_max_out', 0.0)
+                if curve_tags and d_max_out > 0 and boundary_lc < global_max_lc:
+                    d_min = get_row_param(row, 'dist_min', 0.0)
+                    fid_grad = add_refinement(1, curve_tags, boundary_lc, d_min, d_max_out, size_max_limit=global_max_lc)
+                    if fid_grad:
+                        field_list.append(fid_grad)
 
         # 4. Straddle surfaces (placeholder for future transfinite enforcement).
         for idx, tags in gmsh_map.get('straddle_surfs', {}).items():
