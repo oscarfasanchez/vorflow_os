@@ -3,8 +3,9 @@ from .engine import MeshGenerator
 from .tessellator import VoronoiTessellator
 from .fields import (MeshField, ThresholdField,
                      ExponentialField, AutoLinearField,
-                       AutoExponentialField)
+                       AutoExponentialField, ConstantField, RestrictField, MinField)
 
 __all__ = ["ConceptualMesh", "MeshGenerator", "VoronoiTessellator",
            "MeshField", "ThresholdField", "ExponentialField",
-           "AutoLinearField", "AutoExponentialField"]
+           "AutoLinearField", "AutoExponentialField", "ConstantField",
+           "RestrictField", "MinField"]

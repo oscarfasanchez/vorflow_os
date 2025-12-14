@@ -6,6 +6,7 @@ import gmsh
 from vorflow.blueprint import ConceptualMesh
 from vorflow.engine import MeshGenerator
 from vorflow.tessellator import VoronoiTessellator
+from vorflow.fields import ExponentialField
 
 @pytest.fixture(autouse=True)
 def ensure_gmsh_finalized():
@@ -103,6 +104,35 @@ def test_gmsh_integration_with_field_only_line_refinement():
     assert not grid.empty
 
     # Still expect refinement from the line-based size field.
+    assert len(grid) > 10
+
+
+def test_gmsh_integration_with_custom_field_recipe_on_line():
+    """Explicit `fields` recipes should be honored and still refine the mesh."""
+    cm = ConceptualMesh(crs="EPSG:3857")
+    square = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
+    cm.add_polygon(square, zone_id=1, resolution=5.0, dist_max_out=25.0)
+
+    # Provide an explicit exponential distance-based refinement around the line.
+    line = LineString([(1, 1), (9, 9)])
+    cm.add_line(
+        line,
+        line_id="fault",
+        resolution=1.0,
+        fields=[ExponentialField(size_min=1.0, decay_length=2.0, size_max=5.0)],
+    )
+
+    clean_polys, clean_lines, clean_points = cm.generate()
+
+    mg = MeshGenerator(background_lc=5.0, verbosity=1)
+    success = mg.generate(clean_polys, clean_lines, clean_points)
+    assert success
+
+    vt = VoronoiTessellator(mg, cm, clip_to_boundary=True)
+    grid = vt.generate()
+    assert not grid.empty
+
+    # Still expect refinement compared to a coarse-only domain.
     assert len(grid) > 10
 
 def test_gmsh_integration_overlapping_polygon_with_hole():
