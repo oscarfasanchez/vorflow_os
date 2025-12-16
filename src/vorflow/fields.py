@@ -25,6 +25,35 @@ class MeshField:
         # Create a tuple of sorted item pairs to ensure consistent hashing
         return hash((self.__class__.__name__, tuple(sorted(self.__dict__.items()))))
 
+
+class DistanceField(MeshField):
+    """Creates a Gmsh Distance field from points/lines/surfaces tags."""
+
+    def __init__(self, include_surfaces=True):
+        self.include_surfaces = bool(include_surfaces)
+
+    def create(self, gmsh_api, tags_dict, sampling=10):
+        f_dist = gmsh_api.model.mesh.field.add("Distance")
+
+        has_entities = False
+        if tags_dict.get('points'):
+            gmsh_api.model.mesh.field.setNumbers(f_dist, "PointsList", tags_dict['points'])
+            has_entities = True
+        if tags_dict.get('lines'):
+            gmsh_api.model.mesh.field.setNumbers(f_dist, "CurvesList", tags_dict['lines'])
+            gmsh_api.model.mesh.field.setNumbers(f_dist, 'Sampling', sampling)
+            has_entities = True
+        if self.include_surfaces and tags_dict.get('surfaces'):#TODO check if loops needed
+            gmsh_api.model.mesh.field.setNumbers(f_dist, "SurfacesList", tags_dict['surfaces'])
+            gmsh_api.model.mesh.field.setNumbers(f_dist, 'Sampling', sampling)
+            has_entities = True
+
+        if not has_entities:
+            gmsh_api.model.mesh.field.remove(f_dist)
+            return None
+
+        return f_dist
+
 # --- Manual Fields ---
 
 class ConstantField(MeshField):
@@ -33,7 +62,7 @@ class ConstantField(MeshField):
 
     def create(self, gmsh_api, tags_dict, background_lc, feature_lc=None):
         const = gmsh_api.model.mesh.field.add("Constant")
-        gmsh_api.model.mesh.field.setNumber(const, "VIn", background_lc)
+        gmsh_api.model.mesh.field.setNumber(const, "VIn", self.size)
         gmsh_api.model.mesh.field.setNumber(const, "VOut", background_lc)
 
 
@@ -44,23 +73,12 @@ class ThresholdField(MeshField):
         self.dist_max = float(dist_max)
         self.size_max = float(size_max) if size_max is not None else None
 
-    def create(self, gmsh_api, tags_dict, background_lc, feature_lc=None):
+    def create(self, gmsh_api, tags_dict, background_lc, feature_lc=None, sampling=10):
         # 1. Distance Field (can combine points, curves, surfaces)
-        f_dist = gmsh_api.model.mesh.field.add("Distance")
-        
-        has_entities = False
-        if tags_dict.get('points'):
-            gmsh_api.model.mesh.field.setNumbers(f_dist, "PointsList", tags_dict['points'])
-            has_entities = True
-        if tags_dict.get('lines'):
-            gmsh_api.model.mesh.field.setNumbers(f_dist, "CurvesList", tags_dict['lines'])
-            has_entities = True
-        if tags_dict.get('surfaces'):
-            gmsh_api.model.mesh.field.setNumbers(f_dist, "SurfacesList", tags_dict['surfaces'])
-            has_entities = True
-            
-        if not has_entities:
-            gmsh_api.model.mesh.field.remove(f_dist)
+        f_dist = DistanceField(include_surfaces=True).create(
+            gmsh_api, tags_dict, background_lc, feature_lc=feature_lc, sampling=sampling
+        )
+        if f_dist is None:
             return None
 
         # 2. Threshold Field
@@ -79,19 +97,11 @@ class ExponentialField(MeshField):
         self.decay_length = float(decay_length)
         self.size_max = float(size_max) if size_max is not None else None
 
-    def create(self, gmsh_api, tags_dict, background_lc, feature_lc=None):
-        f_dist = gmsh_api.model.mesh.field.add("Distance")
-        
-        has_entities = False
-        if tags_dict.get('points'):
-            gmsh_api.model.mesh.field.setNumbers(f_dist, "PointsList", tags_dict['points'])
-            has_entities = True
-        if tags_dict.get('lines'):
-            gmsh_api.model.mesh.field.setNumbers(f_dist, "CurvesList", tags_dict['lines'])
-            has_entities = True
-            
-        if not has_entities:
-            gmsh_api.model.mesh.field.remove(f_dist)
+    def create(self, gmsh_api, tags_dict, background_lc, feature_lc=None, sampling=10):
+        f_dist = DistanceField(include_surfaces=False).create(
+            gmsh_api, tags_dict, background_lc, feature_lc=feature_lc, sampling=sampling
+        )
+        if f_dist is None:
             return None
 
         s_max = self.size_max if self.size_max else background_lc
@@ -107,7 +117,7 @@ class AutoLinearField(MeshField):
     def __init__(self, growth_factor=1.2):
         self.fac = float(growth_factor)
 
-    def create(self, gmsh_api, tags_dict, background_lc, feature_lc=None):
+    def create(self, gmsh_api, tags_dict, background_lc, feature_lc=None, sampling=10):
         if feature_lc is None: return None
         
         cs = float(feature_lc)
@@ -127,13 +137,13 @@ class AutoLinearField(MeshField):
         # Delegate to ThresholdField logic
         # We create a temporary ThresholdField to reuse its create logic
         temp_field = ThresholdField(cs, dist_min, dist_max, cs_dom)
-        return temp_field.create(gmsh_api, tags_dict, background_lc)
+        return temp_field.create(gmsh_api, tags_dict, background_lc, sampling=sampling)
 
 class AutoExponentialField(MeshField):
     def __init__(self, growth_factor=1.1):
         self.fac = float(growth_factor)
 
-    def create(self, gmsh_api, tags_dict, background_lc, feature_lc=None):
+    def create(self, gmsh_api, tags_dict, background_lc, feature_lc=None, sampling=10):
         if feature_lc is None: return None
         
         cs = float(feature_lc)
@@ -141,17 +151,10 @@ class AutoExponentialField(MeshField):
         
         if fac <= 1.0: raise ValueError("Growth factor must be > 1.0")
 
-        f_dist = gmsh_api.model.mesh.field.add("Distance")
-        has_entities = False
-        if tags_dict.get('points'):
-            gmsh_api.model.mesh.field.setNumbers(f_dist, "PointsList", tags_dict['points'])
-            has_entities = True
-        if tags_dict.get('lines'):
-            gmsh_api.model.mesh.field.setNumbers(f_dist, "CurvesList", tags_dict['lines'])
-            has_entities = True
-            
-        if not has_entities:
-            gmsh_api.model.mesh.field.remove(f_dist)
+        f_dist = DistanceField(include_surfaces=False).create(
+            gmsh_api, tags_dict, background_lc, feature_lc=feature_lc, sampling=sampling
+        )
+        if f_dist is None:
             return None
 
         f_math = gmsh_api.model.mesh.field.add("MathEval")

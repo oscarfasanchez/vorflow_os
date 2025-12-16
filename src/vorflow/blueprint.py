@@ -43,8 +43,6 @@ class ConceptualMesh:
         z_order=0,
         dist_min=None,
         dist_max=None,
-        dist_max_in=None,
-        dist_max_out=None,
         densify=None,
         fields=None,
         embed=True,
@@ -62,11 +60,9 @@ class ConceptualMesh:
                 processed first and will "cut" into lower-order polygons.
             dist_min (float, optional): Distance from the polygon boundary where the mesh
                 size is held constant at the boundary's resolution.
-            dist_max (float, optional): Legacy alias for `dist_max_out`.
-            dist_max_in (float, optional): Distance inside the polygon over which the mesh
-                transitions from the boundary resolution to the internal resolution.
-            dist_max_out (float, optional): Distance outside the polygon over which the
-                mesh transitions to the background resolution.
+            dist_max (float, optional): Distance from the polygon boundary over which the mesh
+                transitions to the background resolution.
+            
             densify (float|bool|None, optional): Controls polygon boundary densification:
                 - If False, disables densification.
                 - If True, densifies using `resolution` (lc). Requires `resolution` to be set.
@@ -103,12 +99,15 @@ class ConceptualMesh:
 
         if dist_max_out is not None and dist_max_out < 0:
             raise ValueError(f"dist_max_out must be non-negative (or None). Got {dist_max_out}.")
+        
+        if dist_max_in or dist_max_out is not None or dist_max is not None or dist_min is not None:
+            
 
         # No defaults: when a polygon provides an explicit resolution, require an
         # explicit exterior transition length to avoid sharp size jumps.
-        if resolution is not None and (dist_max_out is None or dist_max_out <= 0):
+        if resolution is None and (dist_max_out is None or dist_max_out <= 0):
             raise ValueError(
-                "Polygons with an explicit `resolution` must provide `dist_max_out > 0` "
+                "Polygons without an explicit `resolution` must provide `dist_max_out > 0` "
                 "to ensure a smooth size transition across the boundary."
             )
 

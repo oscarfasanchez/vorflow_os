@@ -6,7 +6,7 @@ import pandas as pd
 from shapely.geometry import Point, LineString, Polygon
 from shapely.ops import unary_union
 from shapely.validation import make_valid
-from .fields import ThresholdField, ExponentialField, AutoLinearField, AutoExponentialField, ConstantField
+from .fields import MeshField, ThresholdField, ExponentialField, AutoLinearField, AutoExponentialField, ConstantField
 
 class MeshGenerator:
     def __init__(self, background_lc=None,verbosity=0, mesh_algorithm=6, smoothing_steps=10, optimization_cycles=2):
@@ -331,7 +331,7 @@ class MeshGenerator:
                             loops.append(interior_loop_tag)
                             boundary_curve_tags.extend(interior_lines)
 
-                    if embedded:
+                    if embedded:#TODO check if I should add not embedded for fields
                         # Create plane surface with holes (embedded polygons participate in fragment)
                         try:
                             s_tag = gmsh.model.occ.addPlaneSurface(loops)
@@ -462,212 +462,233 @@ class MeshGenerator:
         def get_row_param(row, key, default):
             if key in row and not pd.isna(row[key]): return float(row[key])
             return float(default)
-
-        def add_refinement(entity_dim, entity_tags, size_target, dist_min, dist_max, size_max_limit=None):
-            if not entity_tags: return None
-            valid_tags = [float(t) for t in entity_tags]
-            
-            if size_max_limit is None:
-                size_max_limit = global_max_lc
-
-            # To ensure the meshing algorithm converges efficiently, the rate of
-            # change in element size must be controlled. This heuristic enforces
-            # a minimum transition distance to prevent the mesh size gradient
-            # from becoming too steep, which can stall the mesher.
-            size_diff = size_max_limit - size_target
-            if size_diff > 0:
-                min_span_required = size_diff / (0.5 * size_target)
-                
-                current_span = dist_max - dist_min
-                if current_span < min_span_required:
-                    dist_max = dist_min + min_span_required
-
-            if dist_max <= dist_min:
-                dist_max = dist_min + max(size_target, 1e-3)
-            
-            # Create a `Distance` field, which calculates the distance from the specified entities.
-            f_dist = gmsh.model.mesh.field.add("Distance")
-            if entity_dim == 0: gmsh.model.mesh.field.setNumbers(f_dist, "PointsList", valid_tags)
-            elif entity_dim == 1: gmsh.model.mesh.field.setNumbers(f_dist, "CurvesList", valid_tags)
-            
-            # Create a `Threshold` field, which uses the `Distance` field to
-            # define a mesh size that varies linearly from `SizeMin` to `SizeMax`
-            # over the range `DistMin` to `DistMax`. This is more efficient than `MathEval`.
-            f_thresh = gmsh.model.mesh.field.add("Threshold")
-            gmsh.model.mesh.field.setNumber(f_thresh, "InField", f_dist)
-            gmsh.model.mesh.field.setNumber(f_thresh, "SizeMin", float(size_target))
-            gmsh.model.mesh.field.setNumber(f_thresh, "SizeMax", float(size_max_limit))
-            gmsh.model.mesh.field.setNumber(f_thresh, "DistMin", float(dist_min))
-            gmsh.model.mesh.field.setNumber(f_thresh, "DistMax", float(dist_max))
-            
-            return f_thresh
-
-       # 1. Point-based refinement fields.
-        for idx, row in points_gdf.iterrows():
-            if idx in gmsh_map['points']:
-                tags = extract_tags(gmsh_map['points'][idx])
-                lc = max(get_row_param(row, 'lc', 5.0), 0.001)
-                d_min = get_row_param(row, 'dist_min', lc * 2.0)
-                d_max = get_row_param(row, 'dist_max', global_max_lc * 1.5)
-                
-                fid = add_refinement(0, tags, lc, d_min, d_max)
-                if fid: field_list.append(fid)
-
-        # 2. Line-based refinement fields (including straddle barriers).
-        for idx, row in lines_gdf.iterrows():
-            # Standard lines that exist as curves in Gmsh.
-            if idx in gmsh_map['lines']:
-                tags = extract_tags(gmsh_map['lines'][idx])
-                lc = max(get_row_param(row, 'lc', 10.0), 0.001)
-                d_min = get_row_param(row, 'dist_min', lc * 1.0)
-                d_max = get_row_param(row, 'dist_max', global_max_lc * 1.5)
-                
-                fid = add_refinement(1, tags, lc, d_min, d_max)
-                if fid: field_list.append(fid)
-            
-            # "Straddle" lines, which were converted into pairs of points.
-            # Refinement must be applied to these points to resolve the gap.
-            elif idx in gmsh_map['points']:
-                is_barrier = row.get('is_barrier', False)
-                straddle = row.get('straddle_width', 0)
-                if is_barrier or (straddle and straddle > 0):
-                    tags = extract_tags(gmsh_map['points'][idx])
-                    lc = max(get_row_param(row, 'lc', 10.0), 0.001)
-                    
-                    d_min = get_row_param(row, 'dist_min', lc * 2.0)
-                    d_max = get_row_param(row, 'dist_max', global_max_lc * 1.5)
-                    
-                    fid = add_refinement(0, tags, lc, d_min, d_max)
-                    if fid: field_list.append(fid)
-
-        # 3. Polygon-based refinement fields.
-        for idx, row in polygons_gdf.iterrows():
-            if idx in gmsh_map['surfaces']:
-                tags = extract_tags(gmsh_map['surfaces'][idx])
-
-                target_lc = get_row_param(row, 'lc', global_max_lc)
-
-                densify_val = row.get("densify", None)
-                if isinstance(densify_val, (int, float)) and not isinstance(densify_val, bool) and densify_val > 0:
-                    boundary_lc = min(target_lc, float(densify_val))
-                else:
-                    boundary_lc = target_lc
-
-                if self.verbosity > 1:
-                    print(f"Poly {idx}: Target={target_lc}, Border={boundary_lc}, Global={global_max_lc}")
-
-                # Set up a field for the polygon's interior.
-                if boundary_lc < global_max_lc or target_lc < global_max_lc:
-                    
-                    dim_tags = [(2, int(t)) for t in tags]
-                    boundaries = gmsh.model.getBoundary(dim_tags, combined=True, oriented=False, recursive=False)
-                    curve_tags = [b[1] for b in boundaries if b[0] == 1]
-                    
-                    f_inner = None
-                    
-                    if curve_tags and boundary_lc < target_lc:
-                        # Create a gradient from the finer boundary to the coarser interior.
-                        d_min = get_row_param(row, 'dist_min', 0.0)
-                        d_max_in = get_row_param(row, 'dist_max_in', -1.0)
-                        
-                        if d_max_in > d_min:
-                            d_max_inner = d_max_in
-                        else:
-                            d_max_inner = d_min + (boundary_lc * 5.0)
-                            d_max_inner = max(d_max_inner, d_min + (target_lc - boundary_lc) * 0.2)
-                        
-                        if self.verbosity > 1:
-                            print(f"  -> Grading Interior: DistMin={d_min}, DistMax={d_max_inner}, SizeMax={target_lc}")
-
-                        f_inner = add_refinement(1, curve_tags, boundary_lc, d_min, d_max_inner, size_max_limit=target_lc)
-                        
-                    else:
-                        # Apply a constant mesh size throughout the interior.
-                        if self.verbosity > 1:
-                            print(f"  -> Constant Interior: Size={target_lc}")
-                        
-                        f_dist_inner = gmsh.model.mesh.field.add("Distance")
-                        gmsh.model.mesh.field.setNumbers(f_dist_inner, "CurvesList", curve_tags)
-                        
-                        f_const = gmsh.model.mesh.field.add("Threshold")
-                        gmsh.model.mesh.field.setNumber(f_const, "InField", f_dist_inner)
-                        gmsh.model.mesh.field.setNumber(f_const, "SizeMin", target_lc)
-                        gmsh.model.mesh.field.setNumber(f_const, "SizeMax", target_lc)
-                        gmsh.model.mesh.field.setNumber(f_const, "DistMin", 1e22)
-                        gmsh.model.mesh.field.setNumber(f_const, "DistMax", 1e22)
-                        
-                        f_inner = f_const
-
-                    # Restrict this field to apply only inside the polygon surface.
-                    if f_inner:
-                        f_rest = gmsh.model.mesh.field.add("Restrict")
-                        gmsh.model.mesh.field.setNumber(f_rest, "IField", f_inner)
-                        gmsh.model.mesh.field.setNumbers(f_rest, "SurfacesList", [float(t) for t in tags])
-                        field_list.append(f_rest)
-
-                # Set up a field for the polygon's exterior, grading to the global size.
-                d_max_out = get_row_param(row, 'dist_max_out', 0.0)
-                
-                if d_max_out > 0:
-                    dim_tags = [(2, int(t)) for t in tags]
-                    boundaries = gmsh.model.getBoundary(dim_tags, combined=True, oriented=False, recursive=False)
-                    curve_tags = [b[1] for b in boundaries if b[0] == 1]
-                    
-                    if curve_tags:
-                        d_min = get_row_param(row, 'dist_min', 0.0)
-                        if self.verbosity > 1:
-                            print(f"  -> Grading Exterior: DistMax={d_max_out}")
-                        
-                        fid_grad = add_refinement(1, curve_tags, boundary_lc, d_min, d_max_out, size_max_limit=global_max_lc)
-                        if fid_grad: field_list.append(fid_grad)
-
-            # Field-only polygons: treat as boundary curves only (line-like distance field).
-            elif idx in gmsh_map.get('poly_curves', {}):
-                curve_dimtags = gmsh_map['poly_curves'][idx]
-                curve_tags = extract_tags(curve_dimtags)
-
-                target_lc = get_row_param(row, 'lc', global_max_lc)
-
-                densify_val = row.get("densify", None)
-                if isinstance(densify_val, (int, float)) and not isinstance(densify_val, bool) and densify_val > 0:
-                    boundary_lc = min(target_lc, float(densify_val))
-                else:
-                    boundary_lc = target_lc
-
-                d_max_out = get_row_param(row, 'dist_max_out', 0.0)
-                if curve_tags and d_max_out > 0 and boundary_lc < global_max_lc:
-                    d_min = get_row_param(row, 'dist_min', 0.0)
-                    fid_grad = add_refinement(1, curve_tags, boundary_lc, d_min, d_max_out, size_max_limit=global_max_lc)
-                    if fid_grad:
-                        field_list.append(fid_grad)
-
-        # 4. Straddle surfaces (placeholder for future transfinite enforcement).
-        for idx, tags in gmsh_map.get('straddle_surfs', {}).items():
-            clean_tags = extract_tags(tags)
-            for s_tag in clean_tags:
-                pass
-
-        # 5. Set the final background field. This is a constant field that
-        # provides the mesh size for any area not covered by other fields.
-        f_bg = gmsh.model.mesh.field.add("MathEval")
-        gmsh.model.mesh.field.setString(f_bg, "F", str(global_max_lc))
-        field_list.append(f_bg)
-
-        # 6. Combine all fields using a `Min` field. At any point in the
-        # domain, the mesh size will be the minimum of all active fields.
-        if field_list:
-            min_field = gmsh.model.mesh.field.add("Min")
-            field_list = [float(f) for f in field_list]
-            gmsh.model.mesh.field.setNumbers(min_field, "FieldsList", field_list)
-            gmsh.model.mesh.field.setAsBackgroundMesh(min_field)
         
-        # Disable Gmsh's default size-setting mechanisms. We want our fields
-        # to have complete control over the mesh size.
-        gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
-        gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0)
-        gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)
+        #we are gonna set the fields using the field objects defined in fields.py and provided by the user
+        #we need to grop by field/object type(class and parameters) and by geometry type(points, lines, surfaces)
+        #lets get all the unique fields first
+        field_objects = {}#TODO check if loops are required for non embedded surfaces
+        for gdf, geom_type in [(points_gdf, 'points'), (lines_gdf, 'lines'), (polygons_gdf, 'surfaces')]:
+            for idx, row in gdf.iterrows():
+                field = row.get('field', None)
+                if field is not None and isinstance(field, MeshField):
+                    key = (field.__class__.__name__, tuple(sorted(field.__dict__.items())))
+                    if key not in field_objects:
+                        field_objects[key] = {
+                            'field': field,
+                            'geom_type': geom_type,
+                            'feature_ids': []
+                        }
+                    field_objects[key]['feature_ids'].append(int(idx))
 
-    def generate(self, clean_polys, clean_lines, clean_points, output_file=None):
+
+
+        
+
+    #     def add_refinement(entity_dim, entity_tags, size_target, dist_min, dist_max, size_max_limit=None):
+    #         if not entity_tags: return None
+    #         valid_tags = [float(t) for t in entity_tags]
+            
+    #         if size_max_limit is None:
+    #             size_max_limit = global_max_lc
+
+    #         # To ensure the meshing algorithm converges efficiently, the rate of
+    #         # change in element size must be controlled. This heuristic enforces
+    #         # a minimum transition distance to prevent the mesh size gradient
+    #         # from becoming too steep, which can stall the mesher.
+    #         size_diff = size_max_limit - size_target
+    #         if size_diff > 0:
+    #             min_span_required = size_diff / (0.5 * size_target)
+                
+    #             current_span = dist_max - dist_min
+    #             if current_span < min_span_required:
+    #                 dist_max = dist_min + min_span_required
+
+    #         if dist_max <= dist_min:
+    #             dist_max = dist_min + max(size_target, 1e-3)
+            
+    #         # Create a `Distance` field, which calculates the distance from the specified entities.
+    #         f_dist = gmsh.model.mesh.field.add("Distance")
+    #         if entity_dim == 0: gmsh.model.mesh.field.setNumbers(f_dist, "PointsList", valid_tags)
+    #         elif entity_dim == 1: gmsh.model.mesh.field.setNumbers(f_dist, "CurvesList", valid_tags)
+            
+    #         # Create a `Threshold` field, which uses the `Distance` field to
+    #         # define a mesh size that varies linearly from `SizeMin` to `SizeMax`
+    #         # over the range `DistMin` to `DistMax`. This is more efficient than `MathEval`.
+    #         f_thresh = gmsh.model.mesh.field.add("Threshold")
+    #         gmsh.model.mesh.field.setNumber(f_thresh, "InField", f_dist)
+    #         gmsh.model.mesh.field.setNumber(f_thresh, "SizeMin", float(size_target))
+    #         gmsh.model.mesh.field.setNumber(f_thresh, "SizeMax", float(size_max_limit))
+    #         gmsh.model.mesh.field.setNumber(f_thresh, "DistMin", float(dist_min))
+    #         gmsh.model.mesh.field.setNumber(f_thresh, "DistMax", float(dist_max))
+            
+    #         return f_thresh
+
+    #    # 1. Point-based refinement fields.
+    #     for idx, row in points_gdf.iterrows():
+    #         if idx in gmsh_map['points']:
+    #             tags = extract_tags(gmsh_map['points'][idx])
+    #             lc = max(get_row_param(row, 'lc', 5.0), 0.001)
+    #             d_min = get_row_param(row, 'dist_min', lc * 2.0)
+    #             d_max = get_row_param(row, 'dist_max', global_max_lc * 1.5)
+                
+    #             fid = add_refinement(0, tags, lc, d_min, d_max)
+    #             if fid: field_list.append(fid)
+
+    #     # 2. Line-based refinement fields (including straddle barriers).
+    #     for idx, row in lines_gdf.iterrows():
+    #         # Standard lines that exist as curves in Gmsh.
+    #         if idx in gmsh_map['lines']:
+    #             tags = extract_tags(gmsh_map['lines'][idx])
+    #             lc = max(get_row_param(row, 'lc', 10.0), 0.001)
+    #             d_min = get_row_param(row, 'dist_min', lc * 1.0)
+    #             d_max = get_row_param(row, 'dist_max', global_max_lc * 1.5)
+                
+    #             fid = add_refinement(1, tags, lc, d_min, d_max)
+    #             if fid: field_list.append(fid)
+            
+    #         # "Straddle" lines, which were converted into pairs of points.
+    #         # Refinement must be applied to these points to resolve the gap.
+    #         elif idx in gmsh_map['points']:
+    #             is_barrier = row.get('is_barrier', False)
+    #             straddle = row.get('straddle_width', 0)
+    #             if is_barrier or (straddle and straddle > 0):
+    #                 tags = extract_tags(gmsh_map['points'][idx])
+    #                 lc = max(get_row_param(row, 'lc', 10.0), 0.001)
+                    
+    #                 d_min = get_row_param(row, 'dist_min', lc * 2.0)
+    #                 d_max = get_row_param(row, 'dist_max', global_max_lc * 1.5)
+                    
+    #                 fid = add_refinement(0, tags, lc, d_min, d_max)
+    #                 if fid: field_list.append(fid)
+
+    #     # 3. Polygon-based refinement fields.
+    #     for idx, row in polygons_gdf.iterrows():
+    #         if idx in gmsh_map['surfaces']:
+    #             tags = extract_tags(gmsh_map['surfaces'][idx])
+
+    #             target_lc = get_row_param(row, 'lc', global_max_lc)
+
+    #             densify_val = row.get("densify", None)
+    #             if isinstance(densify_val, (int, float)) and not isinstance(densify_val, bool) and densify_val > 0:
+    #                 boundary_lc = min(target_lc, float(densify_val))
+    #             else:
+    #                 boundary_lc = target_lc
+
+    #             if self.verbosity > 1:
+    #                 print(f"Poly {idx}: Target={target_lc}, Border={boundary_lc}, Global={global_max_lc}")
+
+    #             # Set up a field for the polygon's interior.
+    #             if boundary_lc < global_max_lc or target_lc < global_max_lc:
+                    
+    #                 dim_tags = [(2, int(t)) for t in tags]
+    #                 boundaries = gmsh.model.getBoundary(dim_tags, combined=True, oriented=False, recursive=False)
+    #                 curve_tags = [b[1] for b in boundaries if b[0] == 1]
+                    
+    #                 f_inner = None
+                    
+    #                 if curve_tags and boundary_lc < target_lc:
+    #                     # Create a gradient from the finer boundary to the coarser interior.
+    #                     d_min = get_row_param(row, 'dist_min', 0.0)
+    #                     d_max_in = get_row_param(row, 'dist_max_in', -1.0)
+                        
+    #                     if d_max_in > d_min:
+    #                         d_max_inner = d_max_in
+    #                     else:
+    #                         d_max_inner = d_min + (boundary_lc * 5.0)
+    #                         d_max_inner = max(d_max_inner, d_min + (target_lc - boundary_lc) * 0.2)
+                        
+    #                     if self.verbosity > 1:
+    #                         print(f"  -> Grading Interior: DistMin={d_min}, DistMax={d_max_inner}, SizeMax={target_lc}")
+
+    #                     f_inner = add_refinement(1, curve_tags, boundary_lc, d_min, d_max_inner, size_max_limit=target_lc)
+                        
+    #                 else:
+    #                     # Apply a constant mesh size throughout the interior.
+    #                     if self.verbosity > 1:
+    #                         print(f"  -> Constant Interior: Size={target_lc}")
+                        
+    #                     f_dist_inner = gmsh.model.mesh.field.add("Distance")
+    #                     gmsh.model.mesh.field.setNumbers(f_dist_inner, "CurvesList", curve_tags)
+                        
+    #                     f_const = gmsh.model.mesh.field.add("Threshold")
+    #                     gmsh.model.mesh.field.setNumber(f_const, "InField", f_dist_inner)
+    #                     gmsh.model.mesh.field.setNumber(f_const, "SizeMin", target_lc)
+    #                     gmsh.model.mesh.field.setNumber(f_const, "SizeMax", target_lc)
+    #                     gmsh.model.mesh.field.setNumber(f_const, "DistMin", 1e22)
+    #                     gmsh.model.mesh.field.setNumber(f_const, "DistMax", 1e22)
+                        
+    #                     f_inner = f_const
+
+    #                 # Restrict this field to apply only inside the polygon surface.
+    #                 if f_inner:
+    #                     f_rest = gmsh.model.mesh.field.add("Restrict")
+    #                     gmsh.model.mesh.field.setNumber(f_rest, "IField", f_inner)
+    #                     gmsh.model.mesh.field.setNumbers(f_rest, "SurfacesList", [float(t) for t in tags])
+    #                     field_list.append(f_rest)
+
+    #             # Set up a field for the polygon's exterior, grading to the global size.
+    #             d_max_out = get_row_param(row, 'dist_max_out', 0.0)
+                
+    #             if d_max_out > 0:
+    #                 dim_tags = [(2, int(t)) for t in tags]
+    #                 boundaries = gmsh.model.getBoundary(dim_tags, combined=True, oriented=False, recursive=False)
+    #                 curve_tags = [b[1] for b in boundaries if b[0] == 1]
+                    
+    #                 if curve_tags:
+    #                     d_min = get_row_param(row, 'dist_min', 0.0)
+    #                     if self.verbosity > 1:
+    #                         print(f"  -> Grading Exterior: DistMax={d_max_out}")
+                        
+    #                     fid_grad = add_refinement(1, curve_tags, boundary_lc, d_min, d_max_out, size_max_limit=global_max_lc)
+    #                     if fid_grad: field_list.append(fid_grad)
+
+    #         # Field-only polygons: treat as boundary curves only (line-like distance field).
+    #         elif idx in gmsh_map.get('poly_curves', {}):
+    #             curve_dimtags = gmsh_map['poly_curves'][idx]
+    #             curve_tags = extract_tags(curve_dimtags)
+
+    #             target_lc = get_row_param(row, 'lc', global_max_lc)
+
+    #             densify_val = row.get("densify", None)
+    #             if isinstance(densify_val, (int, float)) and not isinstance(densify_val, bool) and densify_val > 0:
+    #                 boundary_lc = min(target_lc, float(densify_val))
+    #             else:
+    #                 boundary_lc = target_lc
+
+    #             d_max_out = get_row_param(row, 'dist_max_out', 0.0)
+    #             if curve_tags and d_max_out > 0 and boundary_lc < global_max_lc:
+    #                 d_min = get_row_param(row, 'dist_min', 0.0)
+    #                 fid_grad = add_refinement(1, curve_tags, boundary_lc, d_min, d_max_out, size_max_limit=global_max_lc)
+    #                 if fid_grad:
+    #                     field_list.append(fid_grad)
+
+    #     # 4. Straddle surfaces (placeholder for future transfinite enforcement).
+    #     for idx, tags in gmsh_map.get('straddle_surfs', {}).items():
+    #         clean_tags = extract_tags(tags)
+    #         for s_tag in clean_tags:
+    #             pass
+
+    #     # 5. Set the final background field. This is a constant field that
+    #     # provides the mesh size for any area not covered by other fields.
+    #     f_bg = gmsh.model.mesh.field.add("MathEval")
+    #     gmsh.model.mesh.field.setString(f_bg, "F", str(global_max_lc))
+    #     field_list.append(f_bg)
+
+    #     # 6. Combine all fields using a `Min` field. At any point in the
+    #     # domain, the mesh size will be the minimum of all active fields.
+    #     if field_list:
+    #         min_field = gmsh.model.mesh.field.add("Min")
+    #         field_list = [float(f) for f in field_list]
+    #         gmsh.model.mesh.field.setNumbers(min_field, "FieldsList", field_list)
+    #         gmsh.model.mesh.field.setAsBackgroundMesh(min_field)
+        
+    #     # Disable Gmsh's default size-setting mechanisms. We want our fields
+    #     # to have complete control over the mesh size.
+    #     gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
+    #     gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0)
+    #     gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)
+
+    def generate(self, clean_polys, clean_lines, clean_points, output_file=None, launch_gmsh_gui=False):
         """
         Executes the full mesh generation workflow.
 
@@ -684,6 +705,9 @@ class MeshGenerator:
             clean_lines (GeoDataFrame): Snapped and cleaned lines.
             clean_points (GeoDataFrame): Snapped and cleaned points.
             output_file (str, optional): If provided, saves the mesh to this path.
+            launch_gmsh_gui (Boolean, optional): This allow to see triangular mesh results
+                using the GMSH GUI, and allow to review visually the fields and the triangular
+                mesh quality
 
         Returns:
             bool: True if generation was successful.
@@ -730,7 +754,8 @@ class MeshGenerator:
             self.nodes = nodes_3d[:, :2]
             self.node_tags = node_tags
             self.zones_gdf = clean_polys
-            
+            if launch_gmsh_gui:
+                gmsh.fltk.run()
             self._finalize_gmsh()
             return True
 
