@@ -62,7 +62,6 @@ class ConceptualMesh:
                 size is held constant at the boundary's resolution.
             dist_max (float, optional): Distance from the polygon boundary over which the mesh
                 transitions to the background resolution.
-            
             densify (float|bool|None, optional): Controls polygon boundary densification:
                 - If False, disables densification.
                 - If True, densifies using `resolution` (lc). Requires `resolution` to be set.
@@ -93,24 +92,14 @@ class ConceptualMesh:
         if resolution is not None and resolution <= 0:
             raise ValueError(f"resolution must be positive (or None). Got {resolution}.")
 
-        # For backward compatibility, allow 'dist_max' to function as 'dist_max_out'.
-        if dist_max is not None and dist_max_out is None:
-            dist_max_out = dist_max
+        if dist_max is not None and dist_max < 0:
+            raise ValueError(f"dist_max must be non-negative (or None). Got {dist_max}.")
+    
+        if dist_min is not None and dist_min < 0:
+            raise ValueError(f"dist_min must be non-negative (or None). Got {dist_min}.")
 
-        if dist_max_out is not None and dist_max_out < 0:
-            raise ValueError(f"dist_max_out must be non-negative (or None). Got {dist_max_out}.")
-        
-        if dist_max_in or dist_max_out is not None or dist_max is not None or dist_min is not None:
-            
-
-        # No defaults: when a polygon provides an explicit resolution, require an
-        # explicit exterior transition length to avoid sharp size jumps.
-        if resolution is None and (dist_max_out is None or dist_max_out <= 0):
-            raise ValueError(
-                "Polygons without an explicit `resolution` must provide `dist_max_out > 0` "
-                "to ensure a smooth size transition across the boundary."
-            )
-
+        if fields is None:
+            fields = []
 
         self.raw_polygons.append(
             {
@@ -119,8 +108,7 @@ class ConceptualMesh:
                 "lc": resolution,
                 "z_order": z_order,
                 "dist_min": dist_min,
-                "dist_max_in": dist_max_in,
-                "dist_max_out": dist_max_out,
+                "dist_max": dist_max,
                 "densify": densify,
                 "simplify_tolerance": simplify_tolerance,
                 'fields': fields,
@@ -171,6 +159,9 @@ class ConceptualMesh:
         
         if isinstance(densify, (int, float)) and not isinstance(densify, bool) and densify <= 0:
             raise ValueError(f"densify must be positive when specified as a float. Got {densify}.")
+
+        if fields is None:
+            fields = []
         
         self.raw_lines.append({
             'geometry': geometry,
@@ -209,6 +200,9 @@ class ConceptualMesh:
             )
         if isinstance(simplify_tolerance, (int, float)) and simplify_tolerance < 0:
             raise ValueError(f"simplify_tolerance must be non-negative. Got {simplify_tolerance}.")
+
+        if fields is None:
+            fields = []
         self.raw_points.append({
             'geometry': geometry,
             'point_id': point_id,
