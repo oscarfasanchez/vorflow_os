@@ -335,8 +335,7 @@ class ConceptualMesh:
                     "lc",
                     "z_order",
                     "dist_min",
-                    "dist_max_in",
-                    "dist_max_out",
+                    "dist_max",
                     "densify",
                     "simplify_tolerance",
                     "fields",
@@ -448,6 +447,17 @@ class ConceptualMesh:
         print("Applying optional geometry simplification...")
         self._apply_simplification()
 
+        # --- Embed semantics for polygons ---
+        # Polygons with embed=True define the actual meshing domain and therefore
+        # participate in the cookie-cutter (overlap resolution) process.
+        # Polygons with embed=False are refinement-only (field-only) regions and
+        # must NOT affect domain topology.
+        embedded_polys = [p for p in self.raw_polygons if bool(p.get("embed", True))]
+        field_only_polys = [p for p in self.raw_polygons if not bool(p.get("embed", True))]
+
+        # Only embedded polygons are used to build the domain partition.
+        self.raw_polygons = embedded_polys
+
         print("Resolving polygon overlaps...")
         self._resolve_overlaps()
         
@@ -483,6 +493,38 @@ class ConceptualMesh:
                 columns=['geometry', 'point_id', 'lc', 'dist_min', 'dist_max', 'fields', 'embed', 'simplify_tolerance'],
                 crs=self.crs,
             )
+
+        # Clip field-only polygons to the final embedded domain.
+        # Field-only polygons should not extend outside the domain, but they also
+        # should not cut/modify domain topology.
+        if field_only_polys and not self.clean_polygons.empty:
+            domain_union = unary_union(self.clean_polygons.geometry)
+            domain_union = make_valid(domain_union)
+
+            clipped_features = []
+            for poly_data in field_only_polys:
+                geom = poly_data.get("geometry")
+                if geom is None or geom.is_empty:
+                    continue
+                geom = make_valid(geom)
+                try:
+                    clipped = geom.intersection(domain_union)
+                except Exception:
+                    clipped = make_valid(geom).intersection(make_valid(domain_union))
+
+                if clipped.is_empty:
+                    continue
+
+                feat = poly_data.copy()
+                feat["geometry"] = make_valid(clipped)
+                clipped_features.append(feat)
+
+            if clipped_features:
+                field_only_gdf = gpd.GeoDataFrame(clipped_features, crs=self.crs)
+                self.clean_polygons = gpd.GeoDataFrame(
+                    pd.concat([self.clean_polygons, field_only_gdf], ignore_index=True),
+                    crs=self.crs,
+                )
 
         print("Densifying geometry...")
         self._apply_densification()
