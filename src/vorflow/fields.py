@@ -140,8 +140,8 @@ class AutoLinearField(MeshField):
 
         # Delegate to ThresholdField logic
         # We create a temporary ThresholdField to reuse its create logic
-        temp_field = ThresholdField(cs, dist_min, dist_max, cs_dom)
-        return temp_field.create(gmsh_api, tags_dict, background_lc, sampling=sampling)
+        temp_field = ThresholdField(cs, dist_min, dist_max, cs_dom, sampling=self.sampling)
+        return temp_field.create(gmsh_api, tags_dict, background_lc)
 
 class AutoExponentialField(MeshField):
     def __init__(self, growth_factor=1.1):
@@ -155,9 +155,8 @@ class AutoExponentialField(MeshField):
         
         if fac <= 1.0: raise ValueError("Growth factor must be > 1.0")
 
-        # DistanceField.create() signature is (gmsh_api, tags_dict, sampling=10)
-        f_dist = DistanceField(include_surfaces=False).create(
-            gmsh_api, tags_dict, sampling=sampling
+        f_dist = DistanceField(include_surfaces=False, sampling=int(sampling)).create(
+            gmsh_api, tags_dict
         )
         if f_dist is None:
             return None
