@@ -752,11 +752,90 @@ class MeshGenerator:
             
             if output_file:
                 gmsh.write(output_file)
-                
-            node_tags, coords, _ = gmsh.model.mesh.getNodes()
-            nodes_3d = np.array(coords).reshape(-1, 3)
-            self.nodes = nodes_3d[:, :2]
-            self.node_tags = node_tags
+
+            # --- Node extraction (domain-only) ---
+            # Do NOT use gmsh.model.mesh.getNodes() without args here.
+            # That returns nodes from all entities, including standalone 1D meshes
+            # on curves (e.g. field-only rivers) and any non-fragmented 2D surfaces.
+            # Those extra nodes can unintentionally constrain downstream Voronoi
+            # tessellation.
+
+            def _is_embedded_row(row) -> bool:
+                val = row.get('embed', True)
+                if pd.isna(val):
+                    return True
+                return bool(val)
+
+            def _accumulate_nodes(dim: int, ent_tag: int, include_boundary: bool, tag_to_xy: dict[int, tuple[float, float]]):
+                nt, nc, _ = gmsh.model.mesh.getNodes(dim, int(ent_tag), includeBoundary=bool(include_boundary))
+                if len(nt) == 0:
+                    return
+                pts = np.array(nc, dtype=float).reshape(-1, 3)
+                for t, p in zip(nt, pts):
+                    tt = int(t)
+                    if tt not in tag_to_xy:
+                        tag_to_xy[tt] = (float(p[0]), float(p[1]))
+
+            tag_to_xy: dict[int, tuple[float, float]] = {}
+
+            # 1) Domain surfaces: embedded polygons only
+            domain_surface_tags: list[int] = []
+            if clean_polys is not None and not clean_polys.empty and 'embed' in clean_polys.columns:
+                embedded_poly_ids = [int(i) for i, r in clean_polys.iterrows() if _is_embedded_row(r)]
+            elif clean_polys is not None and not clean_polys.empty:
+                # Historical behavior: polygons were all embedded.
+                embedded_poly_ids = [int(i) for i in clean_polys.index]
+            else:
+                embedded_poly_ids = []
+
+            for fid in embedded_poly_ids:
+                if fid in gmsh_map.get('surfaces', {}):
+                    for dimtag in gmsh_map['surfaces'][fid]:
+                        if isinstance(dimtag, (tuple, list)) and len(dimtag) >= 2 and int(dimtag[0]) == 2:
+                            domain_surface_tags.append(int(dimtag[1]))
+
+            # If we cannot determine domain surfaces from the map, fall back to
+            # all 2D nodes (still avoids 1D-only nodes).
+            if not domain_surface_tags:
+                node_tags, coords, _ = gmsh.model.mesh.getNodes(2, -1, includeBoundary=True)
+                nodes_3d = np.array(coords, dtype=float).reshape(-1, 3)
+                self.nodes = nodes_3d[:, :2]
+                self.node_tags = node_tags
+            else:
+                for s in domain_surface_tags:
+                    _accumulate_nodes(2, s, True, tag_to_xy)
+
+                # 2) Embedded constraints (optional safety)
+                if clean_points is not None and not clean_points.empty and 'embed' in clean_points.columns:
+                    for fid, row in clean_points.iterrows():
+                        if not _is_embedded_row(row):
+                            continue
+                        if int(fid) in gmsh_map.get('points', {}):
+                            for dimtag in gmsh_map['points'][int(fid)]:
+                                if isinstance(dimtag, (tuple, list)) and len(dimtag) >= 2 and int(dimtag[0]) == 0:
+                                    _accumulate_nodes(0, int(dimtag[1]), True, tag_to_xy)
+
+                if clean_lines is not None and not clean_lines.empty and 'embed' in clean_lines.columns:
+                    for fid, row in clean_lines.iterrows():
+                        if not _is_embedded_row(row):
+                            continue
+
+                        if int(fid) in gmsh_map.get('lines', {}):
+                            for dimtag in gmsh_map['lines'][int(fid)]:
+                                if isinstance(dimtag, (tuple, list)) and len(dimtag) >= 2 and int(dimtag[0]) == 1:
+                                    _accumulate_nodes(1, int(dimtag[1]), True, tag_to_xy)
+                        # Straddle/barrier lines may have been converted into points.
+                        elif int(fid) in gmsh_map.get('points', {}):
+                            for dimtag in gmsh_map['points'][int(fid)]:
+                                if isinstance(dimtag, (tuple, list)) and len(dimtag) >= 2 and int(dimtag[0]) == 0:
+                                    _accumulate_nodes(0, int(dimtag[1]), True, tag_to_xy)
+
+                # Finalize de-duplicated node arrays
+                node_tags = np.array(list(tag_to_xy.keys()), dtype=np.uint64)
+                nodes_xy = np.array([tag_to_xy[int(t)] for t in node_tags], dtype=float)
+                self.nodes = nodes_xy
+                self.node_tags = node_tags
+
             self.zones_gdf = clean_polys
             if launch_gmsh_gui:
                 gmsh.fltk.run()
