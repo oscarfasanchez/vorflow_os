@@ -54,13 +54,6 @@ polys = {
     "lower-right": lr,
 }
 
-# Base line geometry (simplified)
-fault_base = LineString([(100, 0), (100, 200)])
-faults = {
-    "fault-left": translate(fault_base, xoff=-40, yoff=0),
-    "fault-center": translate(fault_base, xoff=80, yoff=0),
-    "fault-right": translate(fault_base, xoff=200, yoff=0),
-}
 # A gentle sine-wave river
 xs = np.linspace(-10, 430, 45)
 river_y = 140 + 18 * np.sin(0.06 * xs)
@@ -102,8 +95,8 @@ blueprint.add_polygon(
     zone_id="upper-left",
     resolution=feature_lc/5,
     z_order=10,
-    dist_min=feature_lc,
-    dist_max=background_lc * 3.0,
+    dist_min=feature_lc/2,
+    dist_max=background_lc * 5.0,
 )
 
 blueprint.add_polygon(
@@ -124,12 +117,12 @@ blueprint.add_polygon(
 )
 
 
-blueprint.add_polygon(
-    polys["lower-left"].boundary(),#TODO change to boundary only
-    zone_id="lower-left",
+blueprint.add_line(
+    polys["lower-left"].boundary,#TODO change to boundary only
+    line_id='lower-left',# zone_id="lower-left",
     resolution=feature_lc/5,
-    z_order=5,
-    dist_min=feature_lc,
+    # z_order=5,
+    dist_min=feature_lc/2,
     dist_max=background_lc * 1.5,
     fields=[auto_linear],
     embed=False,  # field-only polygon
@@ -149,34 +142,7 @@ blueprint.add_polygon(
     resolution=feature_lc/5,
     z_order=5,
     fields=[threshold],
-)
-
-# Lines (IDs are location-based)
-# Colors: fault-left -> 'tab:red', fault-center -> 'tab:purple', fault-right -> 'tab:blue', river-center -> 'tab:cyan'
-blueprint.add_line(
-    faults["fault-left"],
-    line_id="fault-left",
-    resolution=feature_lc,
-    is_barrier=False,
-    dist_min=feature_lc,
-    dist_max=background_lc * 5.0,
-)
-
-blueprint.add_line(
-    faults["fault-center"],
-    line_id="fault-center",
-    resolution=feature_lc,
-    is_barrier=True,
-    straddle_width=4.0,
-    fields=[auto_exp],
-)
-
-blueprint.add_line(
-    faults["fault-right"],
-    line_id="fault-right",
-    resolution=feature_lc,
-    is_barrier=False,
-    fields=[auto_linear],
+    embed=False,  # field-only polygon
 )
 
 blueprint.add_line(
@@ -261,12 +227,6 @@ for name, poly in plot_polys.items():
         label=label,
     )
 
-# Lines
-plot_faults = {
-    "fault-left": faults["fault-left"],
-    "fault-center": faults["fault-center"],
-    "fault-right": faults["fault-right"],
-}
 line_colors = {
     "fault-left": "tab:red",
     "fault-center": "tab:purple",
@@ -274,8 +234,7 @@ line_colors = {
     "river-center-up": "tab:cyan",
     "river-center-down": "tab:cyan",
 }
-for name, ln in plot_faults.items():
-    ax.plot(*ln.xy, lw=1, color=line_colors.get(name), label=name)
+
 ax.plot(
     *rivers["river-center-up"].xy,
     lw=1,
