@@ -354,7 +354,10 @@ class MeshGenerator:
                         nonembedded_poly_curve_tags.setdefault(int(idx), []).extend(
                             [(1, int(t)) for t in boundary_curve_tags]
                         )
-
+        #call the gui before fragmentation for debugging
+        if self.verbosity > 1:
+            gmsh.model.occ.synchronize()
+            gmsh.fltk.run()
 
         # "Fragment" combines all the individual geometries into a single,
         # topologically consistent model. This is where intersections are
@@ -692,6 +695,125 @@ class MeshGenerator:
         gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)
 
 
+    def _embed_features(self, gmsh_map, polygons_gdf, lines_gdf, points_gdf):
+        """
+        Explicitly embeds features into domain surfaces to ensure mesh conformity.
+        
+        This handles cases where fragmentation splits surfaces, requiring
+        geometric discovery to find the correct surface for points/lines.
+        """
+        if self.verbosity > 0:
+            print("Explicitly embedding features into domain surfaces...")
+
+        def is_embedded(row):
+            val = row.get('embed', True)
+            if pd.isna(val): return True
+            return bool(val)
+
+        # 1. Collect Domain Surfaces (Candidate Pool)
+        domain_surface_tags = set()
+        if not polygons_gdf.empty:
+            for idx, row in polygons_gdf.iterrows():
+                if is_embedded(row) and idx in gmsh_map.get('surfaces', {}):
+                    for dt in gmsh_map['surfaces'][idx]:
+                        # Ensure we are tracking actual surfaces (dim=2)
+                        if isinstance(dt, (tuple, list)) and len(dt) >= 2 and dt[0] == 2:
+                            domain_surface_tags.add(dt[1])
+
+        if not domain_surface_tags:
+            return 
+
+        # Helper for geometric embedding search and application
+        def embed_entity(dim, tag):
+            # 1. Get Bounding Box
+            try:
+                bbox = gmsh.model.getBoundingBox(dim, tag)
+            except Exception:
+                return # Entity might not exist or be invalid
+            
+            xmin, ymin, zmin, xmax, ymax, zmax = bbox
+            
+            # Expand slightly to find touching surfaces
+            eps = 1e-4 
+            
+            # 2. Find Candidate Surfaces
+            candidates = gmsh.model.getEntitiesInBoundingBox(
+                xmin - eps, ymin - eps, zmin - eps,
+                xmax + eps, ymax + eps, zmax + eps,
+                dim=2
+            )
+            
+            # 3. Filter candidates to only include our domain surfaces
+            valid_candidates = [
+                c[1] for c in candidates 
+                if c[0] == 2 and c[1] in domain_surface_tags
+            ]
+            
+            if not valid_candidates:
+                return
+
+            # 4. Correctness Check: Verify entity is actually on the surface
+            target_matches = []
+            
+            check_x, check_y, check_z = 0.0, 0.0, 0.0
+            
+            if dim == 0: # Point
+                # For a point, the bbox center is the point
+                check_x = (xmin + xmax) / 2.0
+                check_y = (ymin + ymax) / 2.0
+                check_z = (zmin + zmax) / 2.0
+            elif dim == 1: # Line
+                # Use Midpoint for valid check (avoid endpoints that might touch multiple surfaces)
+                pmin, pmax = gmsh.model.getParametrizationBounds(1, tag)
+                pmid = (pmin + pmax) / 2.0
+                val = gmsh.model.getValue(1, tag, [pmid])
+                check_x, check_y, check_z = val[0], val[1], val[2]
+
+            for surf_tag in valid_candidates:
+                # Project testing point to surface
+                cp_coords, _ = gmsh.model.getClosestPoint(2, surf_tag, [check_x, check_y, check_z])
+                
+                # Calculate Euclidean distance
+                dist = math.sqrt(
+                    (check_x - cp_coords[0])**2 + 
+                    (check_y - cp_coords[1])**2 + 
+                    (check_z - cp_coords[2])**2
+                )
+                
+                if dist < 1e-6:
+                    target_matches.append(surf_tag)
+
+            # 5. Embed the entity into the verified surfaces
+            if target_matches:
+                # Deduplicate tags
+                target_matches = list(set(target_matches))
+                for st in target_matches:
+                    gmsh.model.mesh.embed(dim, [tag], 2, st)
+
+        # Iterate and Embed Points
+        if points_gdf is not None and not points_gdf.empty:
+            for idx, row in points_gdf.iterrows():
+                if is_embedded(row) and idx in gmsh_map.get('points', {}):
+                    for dt in gmsh_map['points'][idx]:
+                        if dt[0] == 0:
+                            embed_entity(0, dt[1])
+
+        # Iterate and Embed Lines
+        if lines_gdf is not None and not lines_gdf.empty:
+            for idx, row in lines_gdf.iterrows():
+                if is_embedded(row):
+                    # Standard Lines
+                    if idx in gmsh_map.get('lines', {}):
+                        for dt in gmsh_map['lines'][idx]:
+                            if dt[0] == 1:
+                                embed_entity(1, dt[1])
+                    # Barrier/Straddle Points (these are points derived from lines)
+                    if idx in gmsh_map.get('points', {}): 
+                        for dt in gmsh_map['points'][idx]:
+                            if dt[0] == 0:
+                                embed_entity(0, dt[1])
+
+
     def generate(self, clean_polys, clean_lines, clean_points, output_file=None, launch_gmsh_gui=False):
         """
         Executes the full mesh generation workflow.
@@ -723,6 +845,9 @@ class MeshGenerator:
         try:
             print("Transferring Geometry to Gmsh...")
             gmsh_map = self._add_geometry(clean_polys, clean_lines, clean_points)
+            
+            # Ensure features are correctly embedded in surfaces before meshing
+            self._embed_features(gmsh_map, clean_polys, clean_lines, clean_points)
             
             print("Setting up Resolution Fields...")
             self._setup_fields(gmsh_map, clean_polys, clean_lines, clean_points)
