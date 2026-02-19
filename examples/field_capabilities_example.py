@@ -117,15 +117,9 @@ blueprint.add_polygon(
 )
 
 
-<<<<<<< HEAD
 blueprint.add_line(
     polys["lower-left"].boundary,#TODO change to boundary only
     line_id='lower-left',# zone_id="lower-left",
-=======
-blueprint.add_polygon(
-    polys["lower-left"].boundary, #TODO change to boundary only
-    zone_id="lower-left",
->>>>>>> 87ca5b1766ae58e4f8faf5346fd2bdc2cbf62fbe
     resolution=feature_lc/5,
     # z_order=5,
     dist_min=feature_lc/2,
