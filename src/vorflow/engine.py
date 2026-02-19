@@ -359,6 +359,17 @@ class MeshGenerator:
             gmsh.model.occ.synchronize()
             gmsh.fltk.run()
 
+        # >>> DIAG: Pre-fragment inventory (summary)
+        if self.verbosity >= 2:
+            _line_feats = sorted(set(
+                input_tag_info.get(to_key(dt[0], dt[1]), {}).get('id', '?')
+                for dt in embedded_line_tags
+            )) if embedded_line_tags else []
+            print(f"\n[DIAG] Pre-fragment: {len(embedded_surface_tags)} surfs, "
+                  f"{len(embedded_line_tags)} lines, {len(embedded_point_tags)} pts "
+                  f"| line features: {_line_feats}")
+        # <<< DIAG
+
         # "Fragment" combines all the individual geometries into a single,
         # topologically consistent model. This is where intersections are
         # calculated and new, smaller entities are created at overlaps.
@@ -378,6 +389,60 @@ class MeshGenerator:
         print(f"Fragmenting {len(object_tags)} objects...")
         out_dt, out_map = gmsh.model.occ.fragment(object_tags, [])
         gmsh.model.occ.synchronize()
+
+        # >>> DIAG: Post-fragment summary
+        if self.verbosity >= 2:
+            all_surfs_post = gmsh.model.getEntities(2)
+            all_lines_post = gmsh.model.getEntities(1)
+            all_pts_post   = gmsh.model.getEntities(0)
+
+            # Classify line fragments: boundary vs interior vs orphan
+            _n_boundary, _n_interior, _n_orphan, _n_dim0 = 0, 0, 0, 0
+            _boundary_feats = set()  # feature names whose lines became boundaries
+            for i, input_dimtag in enumerate(object_tags):
+                key = to_key(input_dimtag[0], input_dimtag[1])
+                info = input_tag_info.get(key, {})
+                if info.get('type') != 'line':
+                    continue
+                res = out_map[i] if i < len(out_map) else [input_dimtag]
+                for dt in res:
+                    dim_r, tag_r = int(dt[0]), int(dt[1])
+                    if dim_r == 0:
+                        _n_dim0 += 1
+                        continue
+                    try:
+                        gmsh.model.getBoundingBox(dim_r, tag_r)
+                        up, _ = gmsh.model.getAdjacencies(1, tag_r)
+                        if len(up) > 0:
+                            _n_boundary += 1
+                            _boundary_feats.add(info.get('id', '?'))
+                        else:
+                            _n_interior += 1
+                    except Exception:
+                        _n_orphan += 1
+
+            # Count auto-embeddings
+            _n_auto = sum(
+                1 for s in all_surfs_post
+                if (lambda: (gmsh.model.mesh.getEmbedded(2, s[1]) or None) is not None)()
+            ) if False else 0  # placeholder
+            _n_auto = 0
+            for s in all_surfs_post:
+                try:
+                    if gmsh.model.mesh.getEmbedded(2, s[1]):
+                        _n_auto += 1
+                except Exception:
+                    pass
+
+            print(f"[DIAG] Post-fragment: {len(all_surfs_post)} surfs, "
+                  f"{len(all_lines_post)} lines, {len(all_pts_post)} pts")
+            print(f"[DIAG] Line fragments: {_n_interior} interior, "
+                  f"{_n_boundary} BOUNDARY, {_n_orphan} orphan, "
+                  f"{_n_dim0} became-points | auto-embed surfs: {_n_auto}")
+            if _boundary_feats:
+                print(f"[DIAG] *** Lines from these features became BOUNDARIES: "
+                      f"{sorted(_boundary_feats)} ***")
+        # <<< DIAG
         
         # After fragmentation, we need to rebuild our map of which original
         # feature corresponds to which new Gmsh tags.
@@ -720,75 +785,130 @@ class MeshGenerator:
                         if isinstance(dt, (tuple, list)) and len(dt) >= 2 and dt[0] == 2:
                             domain_surface_tags.add(dt[1])
 
+        # >>> DIAG: domain surface collection summary
+        if self.verbosity >= 2:
+            _gdf_idxs = list(polygons_gdf.index) if not polygons_gdf.empty else []
+            _map_keys = list(gmsh_map.get('surfaces', {}).keys())
+            _matching = [i for i in _gdf_idxs if i in gmsh_map.get('surfaces', {})]
+            print(f"[DIAG] Embed pool: GDF indices={_gdf_idxs}, map keys={_map_keys}, "
+                  f"matched={len(_matching)}, domain_surface_tags={sorted(domain_surface_tags)}")
+            # Dump bbox of ALL surfaces - shows which surfaces cover which area
+            _all_surfs = gmsh.model.getEntities(2)
+            for _s in _all_surfs:
+                _in_pool = "POOL" if _s[1] in domain_surface_tags else "----"
+                try:
+                    _sbb = gmsh.model.getBoundingBox(2, _s[1])
+                    print(f"[DIAG]   surf {_s[1]:3d} [{_in_pool}] "
+                          f"x=[{_sbb[0]:7.1f},{_sbb[3]:7.1f}] "
+                          f"y=[{_sbb[1]:7.1f},{_sbb[4]:7.1f}]")
+                except Exception:
+                    print(f"[DIAG]   surf {_s[1]:3d} [{_in_pool}] bbox FAILED")
+            # Which feature id maps to which surface tags?
+            for _feat_id, _dts in gmsh_map.get('surfaces', {}).items():
+                _stags = [int(dt[1]) for dt in _dts if isinstance(dt, (tuple,list)) and dt[0]==2]
+                print(f"[DIAG]   map[surfaces][{_feat_id}] -> tags {_stags}")
+        # <<< DIAG
+
         if not domain_surface_tags:
             return 
 
-        # Helper for geometric embedding search and application
+        # >>> DIAG: Accumulator for embed summary
+        _elog = {'ok': 0, 'conflict': 0, 'skip_bbox': 0, 'skip_no_cand': 0,
+                 'skip_no_match': 0, 'failed': 0,
+                 'conflict_tags': [], 'fail_tags': []}
+        # <<< DIAG
+
+        # Helper for geometric embedding search and application.
+        # We pre-compute surface bboxes for a fast spatial filter, then confirm
+        # with getClosestPoint only on candidates whose bbox contains the entity.
+        # This replaces getEntitiesInBoundingBox which requires containment
+        # (not intersection) and fails for small entities inside large surfaces.
+        _surf_bboxes = {}
+        for _st in domain_surface_tags:
+            try:
+                _bb = gmsh.model.getBoundingBox(2, _st)
+                _surf_bboxes[_st] = _bb  # (xmin, ymin, zmin, xmax, ymax, zmax)
+            except Exception:
+                pass
+
         def embed_entity(dim, tag):
-            # 1. Get Bounding Box
+            # 1. Verify entity exists
             try:
                 bbox = gmsh.model.getBoundingBox(dim, tag)
             except Exception:
-                return # Entity might not exist or be invalid
+                _elog['skip_bbox'] += 1
+                return
             
             xmin, ymin, zmin, xmax, ymax, zmax = bbox
             
-            # Expand slightly to find touching surfaces
-            eps = 1e-4 
-            
-            # 2. Find Candidate Surfaces
-            candidates = gmsh.model.getEntitiesInBoundingBox(
-                xmin - eps, ymin - eps, zmin - eps,
-                xmax + eps, ymax + eps, zmax + eps,
-                dim=2
-            )
-            
-            # 3. Filter candidates to only include our domain surfaces
-            valid_candidates = [
-                c[1] for c in candidates 
-                if c[0] == 2 and c[1] in domain_surface_tags
-            ]
-            
-            if not valid_candidates:
-                return
+            # Check if line is already a boundary of some surface
+            is_boundary_of = set()
+            if dim == 1:
+                try:
+                    up, _down = gmsh.model.getAdjacencies(1, tag)
+                    is_boundary_of = set(up)
+                except Exception:
+                    pass
 
-            # 4. Correctness Check: Verify entity is actually on the surface
-            target_matches = []
-            
+            # 2. Get a representative point from the entity
             check_x, check_y, check_z = 0.0, 0.0, 0.0
-            
-            if dim == 0: # Point
-                # For a point, the bbox center is the point
+            if dim == 0:
                 check_x = (xmin + xmax) / 2.0
                 check_y = (ymin + ymax) / 2.0
                 check_z = (zmin + zmax) / 2.0
-            elif dim == 1: # Line
-                # Use Midpoint for valid check (avoid endpoints that might touch multiple surfaces)
+            elif dim == 1:
                 pmin, pmax = gmsh.model.getParametrizationBounds(1, tag)
-                pmid = (pmin + pmax) / 2.0
+                pmid = (float(pmin[0]) + float(pmax[0])) / 2.0
                 val = gmsh.model.getValue(1, tag, [pmid])
                 check_x, check_y, check_z = val[0], val[1], val[2]
 
-            for surf_tag in valid_candidates:
-                # Project testing point to surface
-                cp_coords, _ = gmsh.model.getClosestPoint(2, surf_tag, [check_x, check_y, check_z])
-                
-                # Calculate Euclidean distance
-                dist = math.sqrt(
-                    (check_x - cp_coords[0])**2 + 
-                    (check_y - cp_coords[1])**2 + 
-                    (check_z - cp_coords[2])**2
-                )
-                
-                if dist < 1e-6:
-                    target_matches.append(surf_tag)
+            # 3. Fast bbox pre-filter: only test surfaces whose bbox contains the check point
+            candidates = []
+            eps = 1e-4
+            for surf_tag, sbb in _surf_bboxes.items():
+                if (sbb[0] - eps <= check_x <= sbb[3] + eps and
+                    sbb[1] - eps <= check_y <= sbb[4] + eps):
+                    candidates.append(surf_tag)
+
+            if not candidates:
+                _elog['skip_no_match'] += 1
+                return
+
+            # 4. Confirm with getClosestPoint (only on bbox-filtered candidates)
+            target_matches = []
+            for surf_tag in candidates:
+                # Skip if entity is already a boundary of this surface
+                if surf_tag in is_boundary_of:
+                    continue
+                try:
+                    cp_coords, _ = gmsh.model.getClosestPoint(2, surf_tag, [check_x, check_y, check_z])
+                    dist = math.sqrt(
+                        (check_x - cp_coords[0])**2 + 
+                        (check_y - cp_coords[1])**2 + 
+                        (check_z - cp_coords[2])**2
+                    )
+                    if dist < 1e-6:
+                        target_matches.append(surf_tag)
+                except Exception:
+                    pass
 
             # 5. Embed the entity into the verified surfaces
             if target_matches:
-                # Deduplicate tags
                 target_matches = list(set(target_matches))
                 for st in target_matches:
-                    gmsh.model.mesh.embed(dim, [tag], 2, st)
+                    try:
+                        gmsh.model.mesh.embed(dim, [tag], 2, st)
+                        _elog['ok'] += 1
+                    except Exception as e:
+                        _elog['failed'] += 1
+                        _elog['fail_tags'].append((tag, str(e)[:60]))
+            else:
+                # All candidates were boundaries or didn't match
+                if is_boundary_of & set(candidates):
+                    _elog['conflict'] += 1
+                    _elog['conflict_tags'].append(tag)
+                else:
+                    _elog['skip_no_match'] += 1
 
         # Iterate and Embed Points
         if points_gdf is not None and not points_gdf.empty:
@@ -812,6 +932,27 @@ class MeshGenerator:
                         for dt in gmsh_map['points'][idx]:
                             if dt[0] == 0:
                                 embed_entity(0, dt[1])
+
+        # >>> DIAG: Embed summary
+        if self.verbosity >= 2:
+            _filt = _elog.get('skip_filtered', 0)
+            print(f"[DIAG] Embed results: {_elog['ok']} OK, "
+                  f"{_elog['conflict']} boundary-conflicts, "
+                  f"{_elog['failed']} failed, "
+                  f"{_elog['skip_bbox']} no-bbox, "
+                  f"{_elog['skip_no_cand']} empty-bbox, "
+                  f"{_filt} filtered-out, "
+                  f"{_elog['skip_no_match']} no-match")
+            if _filt > 0:
+                print(f"[DIAG] *** {_filt} entities found nearby surfaces but NONE "
+                      f"were in domain_surface_tags — likely missing domain surface! ***")
+            if _elog['conflict_tags']:
+                uniq = sorted(set(_elog['conflict_tags']))
+                print(f"[DIAG] *** {len(uniq)} unique line tags had BOUNDARY CONFLICTS "
+                      f"(first 10): {uniq[:10]} ***")
+            if _elog['fail_tags']:
+                print(f"[DIAG] *** Failed embeds: {_elog['fail_tags'][:5]} ***")
+        # <<< DIAG
 
 
     def generate(self, clean_polys, clean_lines, clean_points, output_file=None, launch_gmsh_gui=False):
@@ -848,6 +989,42 @@ class MeshGenerator:
             
             # Ensure features are correctly embedded in surfaces before meshing
             self._embed_features(gmsh_map, clean_polys, clean_lines, clean_points)
+
+            # >>> DIAG: Post-embed summary
+            if self.verbosity >= 2:
+                all_surfs = gmsh.model.getEntities(2)
+                _with_emb, _without_emb, _total_emb = 0, 0, 0
+                for surf_dt in all_surfs:
+                    try:
+                        emb = gmsh.model.mesh.getEmbedded(2, surf_dt[1])
+                        if emb:
+                            _with_emb += 1
+                            _total_emb += len(emb)
+                        else:
+                            _without_emb += 1
+                    except Exception:
+                        _without_emb += 1
+                # Count line boundary vs interior in gmsh_map
+                _map_bnd, _map_int, _map_miss = 0, 0, 0
+                for feat_id, dimtags in gmsh_map.get('lines', {}).items():
+                    for dt in dimtags:
+                        if not (isinstance(dt, (tuple, list)) and len(dt) >= 2):
+                            continue
+                        if int(dt[0]) != 1:
+                            continue
+                        try:
+                            up, _ = gmsh.model.getAdjacencies(1, int(dt[1]))
+                            if len(up) > 0:
+                                _map_bnd += 1
+                            else:
+                                _map_int += 1
+                        except Exception:
+                            _map_miss += 1
+                print(f"[DIAG] Post-embed: {_with_emb}/{len(all_surfs)} surfaces have embeddings "
+                      f"({_total_emb} total entities) | "
+                      f"{_without_emb} surfaces empty")
+                print(f"[DIAG] Line map: {_map_int} interior, {_map_bnd} boundary, {_map_miss} missing")
+            # <<< DIAG
             
             print("Setting up Resolution Fields...")
             self._setup_fields(gmsh_map, clean_polys, clean_lines, clean_points)
