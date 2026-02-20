@@ -75,7 +75,7 @@ class MeshGenerator:
             gmsh.finalize()
             self.initialized = False
 
-    def _add_geometry(self, polygons_gdf, lines_gdf, points_gdf):
+    def _add_geometry(self, polygons_gdf, lines_gdf, points_gdf, launch_gmsh_gui=False):
         """
         Transfers Shapely geometries from GeoDataFrames into the Gmsh model.
 
@@ -355,7 +355,7 @@ class MeshGenerator:
                             [(1, int(t)) for t in boundary_curve_tags]
                         )
         #call the gui before fragmentation for debugging
-        if self.verbosity > 1:
+        if self.verbosity > 1 and launch_gmsh_gui==True:
             gmsh.model.occ.synchronize()
             gmsh.fltk.run()
 
@@ -985,7 +985,7 @@ class MeshGenerator:
         self._initialize_gmsh()
         try:
             print("Transferring Geometry to Gmsh...")
-            gmsh_map = self._add_geometry(clean_polys, clean_lines, clean_points)
+            gmsh_map = self._add_geometry(clean_polys, clean_lines, clean_points, launch_gmsh_gui=launch_gmsh_gui)
             
             # Ensure features are correctly embedded in surfaces before meshing
             self._embed_features(gmsh_map, clean_polys, clean_lines, clean_points)
