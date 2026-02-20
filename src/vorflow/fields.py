@@ -101,7 +101,7 @@ class ExponentialField(MeshField):
         self.sampling = int(sampling)
 
     def create(self, gmsh_api, tags_dict, background_lc, feature_lc=None):
-        f_dist = DistanceField(include_surfaces=False, sampling=self.sampling).create(
+        f_dist = DistanceField(include_surfaces=True, sampling=self.sampling).create(
             gmsh_api, tags_dict
         )
         if f_dist is None:
@@ -155,7 +155,7 @@ class AutoExponentialField(MeshField):
         
         if fac <= 1.0: raise ValueError("Growth factor must be > 1.0")
 
-        f_dist = DistanceField(include_surfaces=False, sampling=int(sampling)).create(
+        f_dist = DistanceField(include_surfaces=True, sampling=int(sampling)).create(
             gmsh_api, tags_dict
         )
         if f_dist is None:
