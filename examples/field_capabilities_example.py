@@ -29,7 +29,7 @@ from vorflow.fields import (
     AutoLinearField,
     ThresholdField,
 )
-
+from vorflow.utils import calculate_mesh_quality, summarize_quality
 
 #%%
 # Geometry
@@ -95,7 +95,7 @@ blueprint.add_polygon(
     zone_id="upper-left",
     resolution=feature_lc/5,
     z_order=10,
-    dist_min=feature_lc/2,
+    dist_min=feature_lc/2,#using the implicit threshold approach here (instead of an explicit ThresholdField) to validate both code paths
     dist_max=background_lc * 5.0,
 )
 
@@ -118,7 +118,7 @@ blueprint.add_polygon(
 
 
 blueprint.add_line(
-    polys["lower-left"].boundary,#TODO change to boundary only
+    polys["lower-left"].boundary,
     line_id='lower-left',# zone_id="lower-left",
     resolution=feature_lc/5,
     # z_order=5,
@@ -156,7 +156,7 @@ blueprint.add_line(
 blueprint.add_line(
     rivers["river-center-down"],
     line_id="river-center-down",
-    resolution=feature_lc/2,
+    resolution=feature_lc/4,
     is_barrier=False,
     fields=[auto_exp],
     embed=False,  # field-only line
@@ -167,7 +167,7 @@ blueprint.add_line(
 blueprint.add_point(
     points["pt-lower-left"],
     point_id="pt-lower-left",
-    resolution=feature_lc,
+    resolution=feature_lc/5,
     dist_min=feature_lc/5,
     dist_max=background_lc * 1.5,
 )
@@ -189,8 +189,8 @@ blueprint.add_point(
 
 clean_polys, clean_lines, clean_pts = blueprint.generate()
 
-mesher = MeshGenerator(background_lc=background_lc, verbosity=5)
-mesher.generate(clean_polys, clean_lines, clean_pts, launch_gmsh_gui=True)
+mesher = MeshGenerator(background_lc=background_lc, verbosity=0)
+mesher.generate(clean_polys, clean_lines, clean_pts, launch_gmsh_gui=False)
 
 tessellator = VoronoiTessellator(mesher, blueprint, clip_to_boundary=True)
 grid_gdf = tessellator.generate()
@@ -277,4 +277,13 @@ ax.set_title("Voronoi cell area (proxy for refinement)")
 fig.tight_layout()
 plt.show()
 
+# %%
+quality_gdf = calculate_mesh_quality(grid_gdf, calc_ortho=True)
+summarize_quality(quality_gdf)
+
+# Plot Orthogonality Error
+fig, ax = plt.subplots(figsize=(10, 8))
+quality_gdf.plot(column='ortho_error', ax=ax, legend=True, cmap='Reds', vmin=0, vmax=1)
+plt.title("Orthogonality Error (Degrees)")
+plt.show()
 # %%
