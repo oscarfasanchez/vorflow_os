@@ -299,7 +299,7 @@ class MeshGenerator:
                             
                         if len(clean_coords) < 3:
                             # A polygon must have at least 3 points (triangle)
-                            return None
+                            return None, []
 
                         p_tags = [gmsh.model.occ.addPoint(x, y, 0) for x, y in clean_coords]
                         l_tags = []
@@ -310,7 +310,7 @@ class MeshGenerator:
                                 l_tags.append(gmsh.model.occ.addLine(p1, p2))
                             except Exception as e:
                                 print(f"Error adding line {p1}-{p2}: {e}")
-                                return None
+                                return None, []
                         
                         try:
                             loop_tag = gmsh.model.occ.addCurveLoop(l_tags)
@@ -321,7 +321,11 @@ class MeshGenerator:
 
                     # 1. Exterior Boundary
                     ext_coords = list(poly.exterior.coords)
-                    exterior_loop_tag, exterior_lines = create_loop(ext_coords)
+                    exterior_result = create_loop(ext_coords)
+                    if exterior_result is None:
+                        print(f"Warning: Skipping degenerate polygon {idx}")
+                        continue
+                    exterior_loop_tag, exterior_lines = exterior_result
                     
                     if exterior_loop_tag is None:
                         print(f"Warning: Skipping degenerate polygon {idx}")
