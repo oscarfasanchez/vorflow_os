@@ -9,10 +9,23 @@ from shapely.strtree import STRtree
 
 # Constants for geometry simplification and reporting
 SIGNIFICANT_REDUCTION_PCT = 1.0
-DEFAULT_TOLERANCE = 1e-3
+DEFAULT_CONNECTIVITY_TOLERANCE = 1e-3
+
+def _coerce_connectivity_tolerance(value, parameter_name="connectivity_tolerance"):
+    if isinstance(value, bool):
+        raise ValueError(
+            f"{parameter_name} must be a non-negative number. Boolean values are not supported."
+        )
+    if not isinstance(value, (int, float)):
+        raise TypeError(
+            f"{parameter_name} must be a non-negative number. Got {type(value).__name__}."
+        )
+    if value < 0:
+        raise ValueError(f"{parameter_name} must be non-negative. Got {value}.")
+    return float(value)
 
 class ConceptualMesh:
-    def __init__(self, crs="EPSG:4326"):
+    def __init__(self, crs="EPSG:4326", connectivity_tolerance=DEFAULT_CONNECTIVITY_TOLERANCE):
         """
         Initializes the conceptual model, which holds raw geometric inputs.
 
@@ -22,8 +35,12 @@ class ConceptualMesh:
 
         Args:
             crs: The coordinate reference system for the project (e.g., "EPSG:4326").
+            connectivity_tolerance (float, optional): Default snapping tolerance used
+                during topology cleanup in generate(). Larger values make lines and
+                points connect more aggressively to nearby geometry.
         """
         self.crs = crs
+        self.connectivity_tolerance = _coerce_connectivity_tolerance(connectivity_tolerance)
         # Store raw geometric inputs before processing.
         self.raw_polygons = [] 
         self.raw_lines = []
@@ -393,13 +410,18 @@ class ConceptualMesh:
 
         self.clean_polygons = gpd.GeoDataFrame(final_features, crs=self.crs)
 
-    def _enforce_connectivity(self, tolerance=DEFAULT_TOLERANCE):
+    def _enforce_connectivity(self, connectivity_tolerance=None):
         """
         Snaps features together to ensure they are topologically connected before
         being passed to the mesher. This is crucial for Gmsh to correctly
 
         interpret shared boundaries.
         """
+        if connectivity_tolerance is None:
+            tolerance = self.connectivity_tolerance
+        else:
+            tolerance = _coerce_connectivity_tolerance(connectivity_tolerance)
+
         # 1. Collect all polygon boundaries into a single geometry.
         # We snap to the linear boundaries, not the polygon areas.
         if not self.clean_polygons.empty:
@@ -438,11 +460,15 @@ class ConceptualMesh:
                     self.raw_points[i]['geometry'] = snapped_point
 
 
-    def generate(self):
+    def generate(self, connectivity_tolerance=None):
         """
         Runs the full preprocessing workflow: resolves polygon overlaps,
         ensures topological connectivity, and prepares clean GeoDataFrames
         for the mesher.
+
+        Args:
+            connectivity_tolerance (float, optional): Override for the instance's
+                default topology snapping tolerance during this preprocessing run.
         """
         print("Applying optional geometry simplification...")
         self._apply_simplification()
@@ -462,7 +488,7 @@ class ConceptualMesh:
         self._resolve_overlaps()
         
         print("Enforcing strict topology...")
-        self._enforce_connectivity()
+        self._enforce_connectivity(connectivity_tolerance=connectivity_tolerance)
         
         # Promote the processed raw geometries to final "clean" GeoDataFrames.
         if self.raw_lines:
