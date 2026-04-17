@@ -9,7 +9,12 @@ from shapely.validation import make_valid
 from .fields import MeshField, ThresholdField, ExponentialField, AutoLinearField, AutoExponentialField, ConstantField
 
 class MeshGenerator:
-    def __init__(self, background_lc=None,verbosity=0, mesh_algorithm=6, smoothing_steps=10, optimization_cycles=2):
+    def __init__(self, background_lc=None, verbosity=0, mesh_algorithm=6,
+                 smoothing_steps=10, optimization_cycles=2,
+                 tolerance_initial_delaunay=1e-8,
+                 heal_shapes=False, heal_tolerance=1e-8,
+                 heal_fix_degenerated=True, heal_fix_small_edges=True,
+                 heal_fix_small_faces=True):
         """
         Initializes the Gmsh-based mesh generator.
 
@@ -26,12 +31,34 @@ class MeshGenerator:
                 performed by Gmsh during mesh generation.
             optimization_cycles (int): Number of explicit optimization passes
                 (e.g., Relocate2D, Laplace2D) to run after the initial mesh is generated.
+            tolerance_initial_delaunay (float): Tolerance for the initial Delaunay
+                point insertion. Increase this (e.g. 1e-4, 1e-2) to handle
+                "Could not insert point" errors caused by near-degenerate geometry
+                after fragmentation. This is a meshing-phase tolerance — it does NOT
+                alter the CAD topology, so no surfaces or lines are lost.
+                Default is 1e-8 (Gmsh default).
+            heal_shapes (bool): If True, run OCC topology healing after
+                fragmentation. This can fix degenerate geometry that causes
+                meshing failures, but may also merge or delete small entities.
+                Use with caution on complex models — keep heal_tolerance small.
+                Default is False.
+            heal_tolerance (float): Size threshold for healShapes. Entities
+                smaller than this may be removed or merged. Default 1e-8. only works if heal_shapes=True.
+            heal_fix_degenerated (bool): Fix degenerated edges/faces. Default True. Only works if heal_shapes=True.
+            heal_fix_small_edges (bool): Remove edges smaller than tolerance. Default True. Only works if heal_shapes=True.
+            heal_fix_small_faces (bool): Remove faces smaller than tolerance. Default True. Only works if heal_shapes=True.
         """
         self.background_lc = background_lc
         self.verbosity = verbosity
         self.mesh_algorithm = mesh_algorithm
         self.smoothing_steps = smoothing_steps
         self.optimization_cycles = optimization_cycles
+        self.tolerance_initial_delaunay = tolerance_initial_delaunay
+        self.heal_shapes = heal_shapes
+        self.heal_tolerance = heal_tolerance
+        self.heal_fix_degenerated = heal_fix_degenerated
+        self.heal_fix_small_edges = heal_fix_small_edges
+        self.heal_fix_small_faces = heal_fix_small_faces
 
         self.initialized = False
         self.nodes = None
@@ -62,13 +89,16 @@ class MeshGenerator:
         return Polygon(poly.exterior, new_interiors)
 
     def _initialize_gmsh(self):
-        if not gmsh.is_initialized():
-            gmsh.initialize()
-            gmsh.option.setNumber("General.Verbosity", self.verbosity)
-            gmsh.option.setNumber("Geometry.Tolerance", 1e-6)
-            gmsh.option.setNumber("Geometry.OCCBooleanPreserveNumbering", 1)
-            gmsh.model.add("mesh_model")
-            self.initialized = True
+        # If Gmsh is already initialized (e.g. leftover from a previous failed
+        # run in the same Jupyter kernel), tear it down first so we start clean.
+        if gmsh.is_initialized():
+            gmsh.finalize()
+        gmsh.initialize()
+        gmsh.option.setNumber("General.Verbosity", self.verbosity)
+        gmsh.option.setNumber("Geometry.Tolerance", 1e-6)
+        gmsh.option.setNumber("Geometry.OCCBooleanPreserveNumbering", 1)
+        gmsh.model.add("mesh_model")
+        self.initialized = True
 
     def _finalize_gmsh(self):
         if gmsh.is_initialized():
@@ -392,7 +422,240 @@ class MeshGenerator:
 
         print(f"Fragmenting {len(object_tags)} objects...")
         out_dt, out_map = gmsh.model.occ.fragment(object_tags, [])
+
+        # Remove geometrically coincident (duplicate) entities left by
+        # fragmentation.  Unlike healShapes this does NOT delete or merge
+        # entities based on a size tolerance, so it cannot destroy surfaces
+        # or convert interior lines into boundaries.
+        #
+        # Because removeAllDuplicates() can merge entities (changing tags)
+        # without returning a mapping, we snapshot the coordinates of all
+        # out_map entries beforehand and remap any that disappear.
+        _pre_dedup_coords = {}  # (dim, tag) -> (x, y, z)  for dim-0 entries
+        for i in range(len(out_map)):
+            for dt in out_map[i]:
+                d, t = int(dt[0]), int(dt[1])
+                if d == 0 and (d, t) not in _pre_dedup_coords:
+                    try:
+                        bb = gmsh.model.occ.getBoundingBox(0, t)
+                        _pre_dedup_coords[(d, t)] = (bb[0], bb[1], bb[2])
+                    except Exception:
+                        pass
+
+        gmsh.model.occ.removeAllDuplicates()
+
+        # Refresh out_map: replace tags killed by removeAllDuplicates with
+        # the surviving entity at the same location.
+        if len(out_map) > 0:
+            occ_alive = set()
+            _alive_pts_by_coord = {}  # (round_x, round_y, round_z) -> tag
+            for dim in range(3):
+                for dt in gmsh.model.occ.getEntities(dim):
+                    d, t = int(dt[0]), int(dt[1])
+                    occ_alive.add((d, t))
+                    if d == 0:
+                        try:
+                            bb = gmsh.model.occ.getBoundingBox(0, t)
+                            # Round to ~nm precision to match coordinates
+                            coord_key = (round(bb[0], 6), round(bb[1], 6), round(bb[2], 6))
+                            _alive_pts_by_coord[coord_key] = t
+                        except Exception:
+                            pass
+
+            _dup_pruned = 0
+            _dup_remapped = 0
+            for i in range(len(out_map)):
+                new_entries = []
+                for dt in out_map[i]:
+                    d, t = int(dt[0]), int(dt[1])
+                    if (d, t) in occ_alive:
+                        new_entries.append(dt)
+                    elif d == 0 and (d, t) in _pre_dedup_coords:
+                        # Tag was killed by dedup — find the surviving point
+                        x, y, z = _pre_dedup_coords[(d, t)]
+                        coord_key = (round(x, 6), round(y, 6), round(z, 6))
+                        new_tag = _alive_pts_by_coord.get(coord_key)
+                        if new_tag is not None:
+                            new_entries.append((0, new_tag))
+                            _dup_remapped += 1
+                        else:
+                            _dup_pruned += 1
+                    else:
+                        _dup_pruned += 1
+                out_map[i] = new_entries
+            if _dup_pruned > 0 or _dup_remapped > 0:
+                print(f"removeAllDuplicates: remapped {_dup_remapped}, pruned {_dup_pruned} tag(s) from fragment map.")
+
+            # DIAG: Per-feature point tracking after dedup
+            if self.verbosity >= 2:
+                _pt_feat_status = []
+                for i, input_dimtag in enumerate(object_tags):
+                    key = to_key(input_dimtag[0], input_dimtag[1])
+                    info = input_tag_info.get(key, {})
+                    if info.get('type') == 'point':
+                        feat_id = info['id']
+                        dim0 = [dt for dt in (out_map[i] if i < len(out_map) else [])
+                                if int(dt[0]) == 0]
+                        alive = [(d, t) for d, t in dim0 if (int(d), int(t)) in occ_alive]
+                        _pt_feat_status.append((feat_id, len(dim0), len(alive)))
+                _n_empty = sum(1 for _, n, a in _pt_feat_status if a == 0)
+                print(f"[DIAG] Post-dedup point features: {len(_pt_feat_status)} total, "
+                      f"{_n_empty} with 0 alive tags")
+                if _n_empty > 0:
+                    for fid, nd, na in _pt_feat_status:
+                        if na == 0:
+                            print(f"  [DIAG] Point feat_id={fid}: {nd} map entries, 0 alive")
+
+        if self.heal_shapes:
+            # Snapshot coordinates of ALL out_map entities before heal so we
+            # can remap tags that healShapes renumbers.
+            _pre_heal_coords = {}  # (dim, tag) -> (x, y, z) for dim-0 entries
+            for i in range(len(out_map)):
+                for dt in out_map[i]:
+                    d, t = int(dt[0]), int(dt[1])
+                    if d == 0 and (d, t) not in _pre_heal_coords:
+                        try:
+                            bb = gmsh.model.occ.getBoundingBox(0, t)
+                            _pre_heal_coords[(d, t)] = (bb[0], bb[1], bb[2])
+                        except Exception:
+                            pass
+                    elif d == 1 and (d, t) not in _pre_heal_coords:
+                        try:
+                            bb = gmsh.model.occ.getBoundingBox(1, t)
+                            _pre_heal_coords[(d, t)] = (bb[0], bb[1], bb[2], bb[3], bb[4], bb[5])
+                        except Exception:
+                            pass
+                    elif d == 2 and (d, t) not in _pre_heal_coords:
+                        try:
+                            bb = gmsh.model.occ.getBoundingBox(2, t)
+                            _pre_heal_coords[(d, t)] = (bb[0], bb[1], bb[2], bb[3], bb[4], bb[5])
+                        except Exception:
+                            pass
+
+            pre_heal = set()
+            for dim in range(3):
+                for dt in gmsh.model.occ.getEntities(dim):
+                    pre_heal.add((int(dt[0]), int(dt[1])))
+
+            if self.heal_tolerance > 1e-2:
+                print(f"WARNING: heal_tolerance={self.heal_tolerance} is large. "
+                      f"This may destroy fragment boundaries and lose surfaces/lines. "
+                      f"Consider values <= 1e-3.")
+            print(f"Healing OCC shapes (tolerance={self.heal_tolerance}, "
+                  f"degenerated={self.heal_fix_degenerated}, "
+                  f"small_edges={self.heal_fix_small_edges}, "
+                  f"small_faces={self.heal_fix_small_faces})...")
+            gmsh.model.occ.healShapes(
+                [], tolerance=self.heal_tolerance,
+                fixDegenerated=self.heal_fix_degenerated,
+                fixSmallEdges=self.heal_fix_small_edges,
+                fixSmallFaces=self.heal_fix_small_faces,
+                sewFaces=False,
+                makeSolids=False,
+            )
+
         gmsh.model.occ.synchronize()
+
+        # After healing, entity tags may have been renumbered (healShapes
+        # rebuilds OCC topology even when all fix flags are off).
+        # Remap out_map entries using coordinate matching, similar to dedup.
+        if self.heal_shapes and len(out_map) > 0:
+            surviving = set()
+            # Build coordinate lookup for surviving entities per dimension.
+            # healShapes introduces ~1e-6 coordinate drift, so we round to
+            # 4 decimal places (0.1 mm) — enough to distinguish any two
+            # intentionally distinct points while absorbing the drift.
+            _HEAL_ROUND = 4
+            _heal_alive_by_dim = {0: {}, 1: {}, 2: {}}  # dim -> coord_key -> tag
+            for dim in range(3):
+                for dt in gmsh.model.getEntities(dim):
+                    d, t = int(dt[0]), int(dt[1])
+                    surviving.add((d, t))
+                    try:
+                        bb = gmsh.model.getBoundingBox(d, t)
+                        if d == 0:
+                            coord_key = (round(bb[0], _HEAL_ROUND), round(bb[1], _HEAL_ROUND), round(bb[2], _HEAL_ROUND))
+                        else:
+                            coord_key = (round(bb[0], _HEAL_ROUND), round(bb[1], _HEAL_ROUND), round(bb[2], _HEAL_ROUND),
+                                         round(bb[3], _HEAL_ROUND), round(bb[4], _HEAL_ROUND), round(bb[5], _HEAL_ROUND))
+                        _heal_alive_by_dim[d][coord_key] = t
+                    except Exception:
+                        pass
+
+            # healShapes can reuse the same tag number for a DIFFERENT entity,
+            # so we must ALWAYS remap by coordinates — never trust tag identity.
+            _heal_remapped = 0
+            _heal_pruned = 0
+            _heal_kept = 0
+            for i in range(len(out_map)):
+                new_entries = []
+                for dt in out_map[i]:
+                    d, t = int(dt[0]), int(dt[1])
+                    if (d, t) not in _pre_heal_coords:
+                        # Entity wasn't snapshotted (shouldn't happen); keep if alive
+                        if (d, t) in surviving:
+                            new_entries.append(dt)
+                            _heal_kept += 1
+                        else:
+                            _heal_pruned += 1
+                        continue
+
+                    # Look up the old coordinates and find the matching new tag
+                    old_coords = _pre_heal_coords[(d, t)]
+                    if d == 0:
+                        coord_key = (round(old_coords[0], _HEAL_ROUND),
+                                     round(old_coords[1], _HEAL_ROUND),
+                                     round(old_coords[2], _HEAL_ROUND))
+                    else:
+                        coord_key = (round(old_coords[0], _HEAL_ROUND), round(old_coords[1], _HEAL_ROUND),
+                                     round(old_coords[2], _HEAL_ROUND), round(old_coords[3], _HEAL_ROUND),
+                                     round(old_coords[4], _HEAL_ROUND), round(old_coords[5], _HEAL_ROUND))
+                    new_tag = _heal_alive_by_dim.get(d, {}).get(coord_key)
+                    if new_tag is not None:
+                        if new_tag == t:
+                            new_entries.append(dt)
+                            _heal_kept += 1
+                        else:
+                            new_entries.append((d, new_tag))
+                            _heal_remapped += 1
+                    else:
+                        _heal_pruned += 1
+                out_map[i] = new_entries
+
+            if _heal_remapped > 0 or _heal_pruned > 0:
+                print(f"Heal post-processing: remapped {_heal_remapped}, pruned {_heal_pruned} tag(s) from fragment map.")
+
+            # DIAG: Per-feature point tracking after heal
+            if self.verbosity >= 2:
+                _pt_feat_heal = []
+                for i, input_dimtag in enumerate(object_tags):
+                    key = to_key(input_dimtag[0], input_dimtag[1])
+                    info = input_tag_info.get(key, {})
+                    if info.get('type') == 'point':
+                        feat_id = info['id']
+                        dim0 = [dt for dt in (out_map[i] if i < len(out_map) else [])
+                                if int(dt[0]) == 0]
+                        alive = [(d, t) for d, t in dim0
+                                 if (int(d), int(t)) in surviving]
+                        _pt_feat_heal.append((feat_id, len(dim0), len(alive)))
+                _n_empty_h = sum(1 for _, n, a in _pt_feat_heal if a == 0)
+                print(f"[DIAG] Post-heal point features: {len(_pt_feat_heal)} total, "
+                      f"{_n_empty_h} with 0 alive tags (remapped {_heal_remapped}, pruned {_heal_pruned})")
+                if _n_empty_h > 0:
+                    for fid, nd, na in _pt_feat_heal:
+                        if na == 0:
+                            print(f"  [DIAG] Point feat_id={fid}: {nd} map entries, 0 alive after heal")
+                # Report what heal removed/added
+                heal_removed = pre_heal - surviving
+                heal_added = surviving - pre_heal
+                dim0_removed = [(d, t) for d, t in heal_removed if d == 0]
+                dim0_added = [(d, t) for d, t in heal_added if d == 0]
+                if dim0_removed or dim0_added:
+                    print(f"[DIAG] Heal dim-0 changes: removed {len(dim0_removed)}, added {len(dim0_added)}")
+                    if dim0_removed:
+                        print(f"  [DIAG] Removed point tags: {sorted(t for _, t in dim0_removed)}")
+                    if dim0_added:
+                        print(f"  [DIAG] Added point tags: {sorted(t for _, t in dim0_added)}")
 
         # >>> DIAG: Post-fragment summary
         if self.verbosity >= 2:
@@ -495,6 +758,30 @@ class MeshGenerator:
                     final_map['straddle_surfs'][feat_id].extend(res_tags)
             else:
                 print(f"Warning: Tag {key} lost during fragmentation mapping.")
+
+        # DIAG: Final map point summary
+        if self.verbosity >= 2:
+            _n_pt_feats = len(final_map.get('points', {}))
+            _empty_feats = []
+            _stale_feats = []
+            model_ents = set()
+            for dim in range(3):
+                for dt in gmsh.model.getEntities(dim):
+                    model_ents.add((int(dt[0]), int(dt[1])))
+            for fid, dimtags in final_map.get('points', {}).items():
+                dim0 = [dt for dt in dimtags if isinstance(dt, (tuple, list)) and int(dt[0]) == 0]
+                if not dim0:
+                    _empty_feats.append(fid)
+                else:
+                    for dt in dim0:
+                        if (int(dt[0]), int(dt[1])) not in model_ents:
+                            _stale_feats.append((fid, int(dt[1])))
+            print(f"[DIAG] Final map: {_n_pt_feats} point features, "
+                  f"{len(_empty_feats)} empty, {len(_stale_feats)} with stale tags")
+            if _empty_feats:
+                print(f"  [DIAG] Empty point feat_ids: {sorted(_empty_feats)}")
+            if _stale_feats:
+                print(f"  [DIAG] Stale point (feat_id, tag): {_stale_feats}")
 
         return final_map
     
@@ -1038,6 +1325,10 @@ class MeshGenerator:
             
             # Set the number of internal smoothing steps.
             gmsh.option.setNumber("Mesh.Smoothing", self.smoothing_steps)
+
+            # Tolerance for the initial Delaunay insertion — helps with
+            # "Could not insert point" from near-degenerate geometry.
+            gmsh.option.setNumber("Mesh.ToleranceInitialDelaunay", self.tolerance_initial_delaunay)
 
             print("Generating Triangular Mesh...")
             gmsh.model.mesh.generate(2)

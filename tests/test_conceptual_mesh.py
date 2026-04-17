@@ -3,6 +3,7 @@ import pytest
 from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
 
+import vorflow.blueprint as blueprint_module
 from vorflow.blueprint import ConceptualMesh
 
 
@@ -26,7 +27,7 @@ def test_resolve_overlaps_respects_z_order():
 
 
 def test_lines_and_points_snap_to_polygons():
-    cm = ConceptualMesh()
+    cm = ConceptualMesh(connectivity_tolerance=1.0)
 
     square = Polygon([(0, 0), (2, 0), (2, 2), (0, 2)])
     cm.add_polygon(square, zone_id=1)
@@ -49,6 +50,48 @@ def test_lines_and_points_snap_to_polygons():
     tolerance = 1e-3
     assert snapped_line.distance(boundary) <= tolerance
     assert snapped_point.distance(boundary) <= tolerance
+
+
+def test_generate_uses_constructor_connectivity_tolerance(monkeypatch):
+    cm = ConceptualMesh(connectivity_tolerance=0.25)
+    square = Polygon([(0, 0), (2, 0), (2, 2), (0, 2)])
+
+    cm.add_polygon(square, zone_id=1)
+    cm.add_line(LineString([(0, 0), (1, 0)]), line_id="river", resolution=0.1, densify=False)
+    cm.add_point(Point(0.1, 0.1), point_id="well", resolution=0.1)
+
+    recorded_tolerances = []
+
+    def fake_snap(geometry, reference_geometry, tolerance):
+        recorded_tolerances.append(tolerance)
+        return geometry
+
+    monkeypatch.setattr(blueprint_module, "snap", fake_snap)
+
+    cm.generate()
+
+    assert recorded_tolerances == [pytest.approx(0.25), pytest.approx(0.25)]
+
+
+def test_generate_can_override_connectivity_tolerance(monkeypatch):
+    cm = ConceptualMesh(connectivity_tolerance=1.0)
+    square = Polygon([(0, 0), (2, 0), (2, 2), (0, 2)])
+
+    cm.add_polygon(square, zone_id=1)
+    cm.add_line(LineString([(0, 0), (1, 0)]), line_id="river", resolution=0.1, densify=False)
+    cm.add_point(Point(0.1, 0.1), point_id="well", resolution=0.1)
+
+    recorded_tolerances = []
+
+    def fake_snap(geometry, reference_geometry, tolerance):
+        recorded_tolerances.append(tolerance)
+        return geometry
+
+    monkeypatch.setattr(blueprint_module, "snap", fake_snap)
+
+    cm.generate(connectivity_tolerance=0.05)
+
+    assert recorded_tolerances == [pytest.approx(0.05), pytest.approx(0.05)]
 
 def test_polygon_simplification():
     """Test that polygons are simplified when tolerance is provided."""
@@ -158,3 +201,9 @@ def test_simplify_tolerance_bool_is_rejected(bool_tol):
     pt = Point(0, 0)
     with pytest.raises(ValueError):
         cm.add_point(pt, point_id="p1", resolution=0.1, simplify_tolerance=bool_tol)
+
+
+@pytest.mark.parametrize("bad_tolerance", [True, False, -1])
+def test_connectivity_tolerance_validation(bad_tolerance):
+    with pytest.raises(ValueError):
+        ConceptualMesh(connectivity_tolerance=bad_tolerance)
