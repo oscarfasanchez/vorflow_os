@@ -5,6 +5,7 @@ import gmsh
 
 from vorflow.blueprint import ConceptualMesh
 from vorflow.engine import MeshGenerator
+from vorflow.fields import AutoExponentialField
 from vorflow.tessellator import VoronoiTessellator
 
 @pytest.fixture(autouse=True)
@@ -82,6 +83,44 @@ def test_gmsh_integration_with_internal_line():
     assert len(grid) > 10
 
 
+def test_gmsh_integration_tolerates_duplicate_line_vertices():
+    """Duplicate consecutive line vertices should not crash mesh generation."""
+    cm = ConceptualMesh(crs="EPSG:3857")
+    square = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
+    cm.add_polygon(square, zone_id=1, resolution=4.0, dist_max=20.0)
+
+    line = LineString([(1, 1), (5, 5), (5, 5), (9, 9)])
+    cm.add_line(line, line_id="duplicate_vertices", resolution=1.0)
+
+    clean_polys, clean_lines, clean_points = cm.generate()
+
+    mg = MeshGenerator(background_lc=4.0, verbosity=0)
+    success = mg.generate(clean_polys, clean_lines, clean_points)
+
+    assert success
+    assert mg.nodes is not None
+    assert len(mg.nodes) > 0
+
+
+def test_gmsh_integration_tolerates_near_duplicate_line_vertices():
+    """Near-zero segments should be cleaned before OCC line creation."""
+    cm = ConceptualMesh(crs="EPSG:3857")
+    square = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
+    cm.add_polygon(square, zone_id=1, resolution=4.0, dist_max=20.0)
+
+    line = LineString([(1, 8), (5, 8), (5 + 1e-9, 8), (9, 8)])
+    cm.add_line(line, line_id="near_duplicate_vertices", resolution=1.0)
+
+    clean_polys, clean_lines, clean_points = cm.generate()
+
+    mg = MeshGenerator(background_lc=4.0, verbosity=0)
+    success = mg.generate(clean_polys, clean_lines, clean_points)
+
+    assert success
+    assert mg.nodes is not None
+    assert len(mg.nodes) > 0
+
+
 def test_gmsh_integration_with_field_only_line_refinement():
     """A non-embedded (field-only) line should refine the mesh without partitioning it."""
     cm = ConceptualMesh(crs="EPSG:3857")
@@ -104,6 +143,48 @@ def test_gmsh_integration_with_field_only_line_refinement():
 
     # Still expect refinement from the line-based size field.
     assert len(grid) > 10
+
+
+def test_embedded_polygon_field_has_restricted_constant_interior():
+    """Embedded polygon size fields should stay constant inside the surface."""
+    cm = ConceptualMesh(crs="EPSG:3857")
+    domain = Polygon([(0, 0), (20, 0), (20, 20), (0, 20)])
+    inner = Polygon([(5, 5), (15, 5), (15, 15), (5, 15)])
+
+    cm.add_polygon(domain, zone_id=1, resolution=10.0, z_order=0)
+    cm.add_polygon(
+        inner,
+        zone_id=2,
+        resolution=2.0,
+        z_order=1,
+        fields=[AutoExponentialField(growth_factor=1.2)],
+    )
+    clean_polys, clean_lines, clean_points = cm.generate()
+
+    mg = MeshGenerator(background_lc=10.0, verbosity=0)
+    gmsh.initialize()
+    try:
+        gmsh.model.add("embedded_polygon_field")
+        gmsh_map = mg._add_geometry(clean_polys, clean_lines, clean_points)
+        mg._setup_fields(gmsh_map, clean_polys, clean_lines, clean_points)
+
+        inner_idx = int(clean_polys.index[clean_polys["zone_id"] == 2][0])
+        inner_surfaces = set(gmsh_map["surfaces"][inner_idx])
+        inner_surface_tags = {
+            float(tag) for dim, tag in inner_surfaces if int(dim) == 2
+        }
+
+        restrict_fields = []
+        for field_id in gmsh.model.mesh.field.list():
+            if gmsh.model.mesh.field.getType(field_id) != "Restrict":
+                continue
+            surfaces = set(gmsh.model.mesh.field.getNumbers(field_id, "SurfacesList"))
+            if surfaces == inner_surface_tags:
+                restrict_fields.append(field_id)
+
+        assert restrict_fields, "Expected a constant field restricted to the embedded polygon surface"
+    finally:
+        gmsh.finalize()
 
 def test_gmsh_integration_overlapping_polygon_with_hole():
     """

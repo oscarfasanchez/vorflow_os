@@ -14,7 +14,7 @@ class MeshGenerator:
                  tolerance_initial_delaunay=1e-8,
                  heal_shapes=False, heal_tolerance=1e-8,
                  heal_fix_degenerated=True, heal_fix_small_edges=True,
-                 heal_fix_small_faces=True):
+                 heal_fix_small_faces=True, diagnose=False):
         """
         Initializes the Gmsh-based mesh generator.
 
@@ -47,6 +47,8 @@ class MeshGenerator:
             heal_fix_degenerated (bool): Fix degenerated edges/faces. Default True. Only works if heal_shapes=True.
             heal_fix_small_edges (bool): Remove edges smaller than tolerance. Default True. Only works if heal_shapes=True.
             heal_fix_small_faces (bool): Remove faces smaller than tolerance. Default True. Only works if heal_shapes=True.
+            diagnose (bool): If True, retain structured diagnostic details from
+                geometry transfer, embedding, and meshing steps.
         """
         self.background_lc = background_lc
         self.verbosity = verbosity
@@ -59,11 +61,41 @@ class MeshGenerator:
         self.heal_fix_degenerated = heal_fix_degenerated
         self.heal_fix_small_edges = heal_fix_small_edges
         self.heal_fix_small_faces = heal_fix_small_faces
+        self.diagnose = bool(diagnose)
 
         self.initialized = False
         self.nodes = None
         self.node_tags = None
         self.zones_gdf = None
+        self.diagnostics = {}
+
+    def _sanitize_coords(self, coords, *, min_spacing=1e-5, require_closed=False, min_points=2):
+        """Remove invalid and near-duplicate coordinates before OCC creation."""
+        clean_coords = []
+        for pt in coords:
+            if len(pt) < 2:
+                continue
+            x = float(pt[0])
+            y = float(pt[1])
+            if not (math.isfinite(x) and math.isfinite(y)):
+                continue
+            if clean_coords:
+                dist = math.sqrt((x - clean_coords[-1][0])**2 + (y - clean_coords[-1][1])**2)
+                if dist <= min_spacing:
+                    continue
+            clean_coords.append((x, y))
+
+        if require_closed and len(clean_coords) > 1:
+            dist = math.sqrt(
+                (clean_coords[0][0] - clean_coords[-1][0])**2 +
+                (clean_coords[0][1] - clean_coords[-1][1])**2
+            )
+            if dist <= min_spacing:
+                clean_coords.pop()
+
+        if len(clean_coords) < min_points:
+            return []
+        return clean_coords
     
     def _force_close_polygon(self, poly):
         """Ensure a polygon's exterior and interior rings are closed."""
@@ -124,6 +156,7 @@ class MeshGenerator:
         # For non-embedded polygons, we track their boundary curves so size
         # fields can be applied without forcing the polygon to cut/fragment the domain.
         nonembedded_poly_curve_tags = {}
+        pending_nonembedded_polys = []
 
         # Embedded geometry DOES participate in fragmentation.
         embedded_point_tags = []
@@ -138,6 +171,62 @@ class MeshGenerator:
             if pd.isna(val):
                 return True
             return bool(val)
+
+        def create_polygon_surface(poly):
+            """Create a Gmsh plane surface and return its tag plus boundary curves."""
+            if poly.is_empty:
+                return None, []
+
+            poly = self._force_close_polygon(poly)
+
+            def create_loop(coords):
+                clean_coords = self._sanitize_coords(
+                    coords,
+                    min_spacing=1e-5,
+                    require_closed=True,
+                    min_points=3,
+                )
+
+                if len(clean_coords) < 3:
+                    return None, []
+
+                p_tags = [gmsh.model.occ.addPoint(x, y, 0) for x, y in clean_coords]
+                l_tags = []
+                for i in range(len(p_tags)):
+                    p1 = p_tags[i]
+                    p2 = p_tags[(i + 1) % len(p_tags)]
+                    try:
+                        l_tags.append(gmsh.model.occ.addLine(p1, p2))
+                    except Exception as e:
+                        print(f"Error adding line {p1}-{p2}: {e}")
+                        return None, []
+
+                try:
+                    loop_tag = gmsh.model.occ.addCurveLoop(l_tags)
+                    return loop_tag, l_tags
+                except Exception as e:
+                    print(f"Error adding curve loop: {e}")
+                    return None, []
+
+            exterior_loop_tag, exterior_lines = create_loop(list(poly.exterior.coords))
+            if exterior_loop_tag is None:
+                return None, []
+
+            loops = [exterior_loop_tag]
+            boundary_curve_tags = list(exterior_lines)
+            for interior in poly.interiors:
+                interior_loop_tag, interior_lines = create_loop(list(interior.coords))
+                if interior_loop_tag is not None:
+                    loops.append(interior_loop_tag)
+                    boundary_curve_tags.extend(interior_lines)
+
+            try:
+                s_tag = gmsh.model.occ.addPlaneSurface(loops)
+            except Exception as e:
+                print(f"Error creating surface: {e}")
+                return None, []
+
+            return s_tag, boundary_curve_tags
         
         # Add all point features to the Gmsh model first.
         for idx, row in points_gdf.iterrows():
@@ -272,21 +361,37 @@ class MeshGenerator:
                 for part in parts:
                     # Filter out tiny fragments that might remain after trimming.
                     if part.length < 1e-6: continue
-                    
-                    coords = list(part.coords)
-                    if len(coords) < 2: continue
-                    
+
+                    coords = self._sanitize_coords(list(part.coords), min_points=2)
+                    if len(coords) < 2:
+                        if self.verbosity > 0:
+                            print(f"Warning: Skipping degenerate line part for feature {idx} after coordinate cleanup.")
+                        continue
+
                     # Add each segment of the line to Gmsh.
                     pt_tags = [gmsh.model.occ.addPoint(x, y, 0) for x, y in coords]
+                    created_segments = 0
                     for i in range(len(pt_tags) - 1):
-                        l = gmsh.model.occ.addLine(pt_tags[i], pt_tags[i+1])
-                        
+                        try:
+                            l = gmsh.model.occ.addLine(pt_tags[i], pt_tags[i+1])
+                        except Exception as e:
+                            if self.verbosity > 0:
+                                print(
+                                    f"Warning: Skipping invalid line segment {i} for feature {idx} "
+                                    f"between {coords[i]} and {coords[i+1]}: {e}"
+                                )
+                            continue
+
                         key = to_key(1, l)
+                        created_segments += 1
                         if embedded:
                             embedded_line_tags.append(key)
                             input_tag_info[key] = {'type': 'line', 'id': idx}
                         else:
                             nonembedded_line_tags.setdefault(int(idx), []).append(key)
+
+                    if created_segments == 0 and self.verbosity > 0:
+                        print(f"Warning: No valid line segments were created for feature {idx}.")
 
         # Add polygon features to the model.
         if not polygons_gdf.empty:
@@ -304,90 +409,24 @@ class MeshGenerator:
                 for poly in polys:
                     if poly.is_empty:
                         continue
-                        
-                    # Ensure the polygon is valid and closed before processing.
-                    poly = self._force_close_polygon(poly)
 
-                    def create_loop(coords):
-                        # Remove consecutive duplicates and points that are too close
-                        clean_coords = []
-                        for pt in coords:
-                            if not clean_coords:
-                                clean_coords.append(pt)
-                                continue
-                            
-                            # Check distance to last point
-                            dist = math.sqrt((pt[0]-clean_coords[-1][0])**2 + (pt[1]-clean_coords[-1][1])**2)
-                            if dist > 1e-5: # Slightly larger than Gmsh tolerance to be safe
-                                clean_coords.append(pt)
-                        
-                        # Check closure with first point
-                        if len(clean_coords) > 1:
-                             dist = math.sqrt((clean_coords[0][0]-clean_coords[-1][0])**2 + (clean_coords[0][1]-clean_coords[-1][1])**2)
-                             if dist < 1e-5:
-                                 clean_coords.pop()
-                            
-                        if len(clean_coords) < 3:
-                            # A polygon must have at least 3 points (triangle)
-                            return None, []
-
-                        p_tags = [gmsh.model.occ.addPoint(x, y, 0) for x, y in clean_coords]
-                        l_tags = []
-                        for i in range(len(p_tags)):
-                            p1 = p_tags[i]
-                            p2 = p_tags[(i + 1) % len(p_tags)]
-                            try:
-                                l_tags.append(gmsh.model.occ.addLine(p1, p2))
-                            except Exception as e:
-                                print(f"Error adding line {p1}-{p2}: {e}")
-                                return None, []
-                        
-                        try:
-                            loop_tag = gmsh.model.occ.addCurveLoop(l_tags)
-                            return loop_tag, l_tags
-                        except Exception as e:
-                            print(f"Error adding curve loop: {e}")
-                            return None, []
-
-                    # 1. Exterior Boundary
-                    ext_coords = list(poly.exterior.coords)
-                    exterior_result = create_loop(ext_coords)
-                    if exterior_result is None:
-                        print(f"Warning: Skipping degenerate polygon {idx}")
-                        continue
-                    exterior_loop_tag, exterior_lines = exterior_result
-                    
-                    if exterior_loop_tag is None:
-                        print(f"Warning: Skipping degenerate polygon {idx}")
+                    if not embedded:
+                        # Defer field-only polygon creation until after
+                        # fragmentation/dedup/healing. If these overlapping
+                        # surfaces exist during global OCC cleanup they can cut
+                        # or renumber embedded domain surfaces, which violates
+                        # embed=False semantics.
+                        pending_nonembedded_polys.append((int(idx), poly))
                         continue
 
-                    # 2. Interior Boundaries (Holes)
-                    loops = [exterior_loop_tag]
-                    boundary_curve_tags = list(exterior_lines)
-                    for interior in poly.interiors:
-                        int_coords = list(interior.coords)
-                        interior_loop_tag, interior_lines = create_loop(int_coords)
-                        if interior_loop_tag is not None:
-                            loops.append(interior_loop_tag)
-                            boundary_curve_tags.extend(interior_lines)
-
-                    # Create plane surface with holes (embedded polygons participate in fragment)
-                    try:
-                        s_tag = gmsh.model.occ.addPlaneSurface(loops)
-                    except Exception as e:
-                        print(f"Error creating surface for polygon {idx}: {e}")
+                    s_tag, boundary_curve_tags = create_polygon_surface(poly)
+                    if s_tag is None:
+                        print(f"Warning: Skipping degenerate polygon {idx}")
                         continue
 
                     key = to_key(2, s_tag)
-                    if embedded:  # TODO check if I should add not embedded for fields
-                        input_tag_info[key] = {'type': 'surface', 'id': idx}
-                        embedded_surface_tags.append(key)
-                    else:
-                        # These surfaces/curves are NOT included in fragment, so they won't cut the domain.
-                        nonembedded_surface_tags.setdefault(int(idx), []).append(key)
-                        nonembedded_poly_curve_tags.setdefault(int(idx), []).extend(
-                            [(1, int(t)) for t in boundary_curve_tags]
-                        )
+                    input_tag_info[key] = {'type': 'surface', 'id': idx}
+                    embedded_surface_tags.append(key)
         #call the gui before fragmentation for debugging
         if self.verbosity > 1 and launch_gmsh_gui==True:
             gmsh.model.occ.synchronize()
@@ -710,6 +749,21 @@ class MeshGenerator:
                 print(f"[DIAG] *** Lines from these features became BOUNDARIES: "
                       f"{sorted(_boundary_feats)} ***")
         # <<< DIAG
+
+        if pending_nonembedded_polys:
+            if self.verbosity > 0:
+                print(f"Adding {len(pending_nonembedded_polys)} field-only polygon surface(s)...")
+            for idx, poly in pending_nonembedded_polys:
+                s_tag, boundary_curve_tags = create_polygon_surface(poly)
+                if s_tag is None:
+                    if self.verbosity > 0:
+                        print(f"Warning: Skipping degenerate field-only polygon {idx}")
+                    continue
+                nonembedded_surface_tags.setdefault(int(idx), []).append(to_key(2, s_tag))
+                nonembedded_poly_curve_tags.setdefault(int(idx), []).extend(
+                    [(1, int(t)) for t in boundary_curve_tags]
+                )
+            gmsh.model.occ.synchronize()
         
         # After fragmentation, we need to rebuild our map of which original
         # feature corresponds to which new Gmsh tags.
@@ -987,7 +1041,13 @@ class MeshGenerator:
             # For embed=False polygons, we keep their boundary curves under
             # gmsh_map['poly_curves'] so fields can still be applied without
             # cutting/fragmenting the domain.
-            tags_dict = { 'points': [], 'lines': [], 'surfaces': [] }
+            tags_dict = {
+                'points': [],
+                'lines': [],
+                'surfaces': [],
+                'embedded_surfaces': [],
+                'field_only_surfaces': [],
+            }
 
             # Points
             for fid in feature_ids_by_geom.get('points', []):
@@ -1005,7 +1065,19 @@ class MeshGenerator:
             # Surfaces
             for fid in feature_ids_by_geom.get('surfaces', []):
                 if fid in gmsh_map.get('surfaces', {}):
-                    tags_dict['surfaces'].extend(extract_tags(gmsh_map['surfaces'][fid]))
+                    surface_tags = extract_tags(gmsh_map['surfaces'][fid])
+                    tags_dict['surfaces'].extend(surface_tags)
+
+                    try:
+                        embed_val = polygons_gdf.loc[fid].get('embed', True)
+                        embedded = True if pd.isna(embed_val) else bool(embed_val)
+                    except Exception:
+                        embedded = True
+
+                    if embedded:
+                        tags_dict['embedded_surfaces'].extend(surface_tags)
+                    else:
+                        tags_dict['field_only_surfaces'].extend(surface_tags)
                 # Field-only polygons (embed=False): apply distance-based fields to boundary curves.
                 elif fid in gmsh_map.get('poly_curves', {}):
                     curve_dimtags = gmsh_map['poly_curves'][fid]
@@ -1105,15 +1177,18 @@ class MeshGenerator:
 
         # >>> DIAG: Accumulator for embed summary
         _elog = {'ok': 0, 'conflict': 0, 'skip_bbox': 0, 'skip_no_cand': 0,
-                 'skip_no_match': 0, 'failed': 0,
-                 'conflict_tags': [], 'fail_tags': []}
+                 'skip_no_match': 0, 'failed': 0, 'boundary_skip': 0,
+                 'multi_match': 0, 'inside_failed': 0,
+                 'conflict_tags': [], 'fail_tags': [], 'boundary_tags': [],
+                 'multi_tags': [], 'inside_fail_tags': [], 'records': []}
         # <<< DIAG
 
         # Helper for geometric embedding search and application.
         # We pre-compute surface bboxes for a fast spatial filter, then confirm
-        # with getClosestPoint only on candidates whose bbox contains the entity.
-        # This replaces getEntitiesInBoundingBox which requires containment
-        # (not intersection) and fails for small entities inside large surfaces.
+        # against trimmed surfaces with gmsh.model.isInside(). Do not use
+        # getClosestPoint() here: for coplanar OCC surfaces it can project onto
+        # the support plane outside the trimmed face, causing false multi-surface
+        # embeds and over-constraining Gmsh.
         _surf_bboxes = {}
         for _st in domain_surface_tags:
             try:
@@ -1121,6 +1196,52 @@ class MeshGenerator:
                 _surf_bboxes[_st] = _bb  # (xmin, ymin, zmin, xmax, ymax, zmax)
             except Exception:
                 pass
+
+        def _bbox_contains_point(sbb, pt, eps=1e-4):
+            return (
+                sbb[0] - eps <= pt[0] <= sbb[3] + eps and
+                sbb[1] - eps <= pt[1] <= sbb[4] + eps and
+                sbb[2] - eps <= pt[2] <= sbb[5] + eps
+            )
+
+        def _entity_sample_points(dim, tag, bbox):
+            xmin, ymin, zmin, xmax, ymax, zmax = bbox
+            if dim == 0:
+                return [((xmin + xmax) / 2.0, (ymin + ymax) / 2.0, (zmin + zmax) / 2.0)]
+            if dim != 1:
+                return []
+
+            pmin, pmax = gmsh.model.getParametrizationBounds(1, tag)
+            lo = float(pmin[0])
+            hi = float(pmax[0])
+            if not (math.isfinite(lo) and math.isfinite(hi)):
+                return []
+            if hi < lo:
+                lo, hi = hi, lo
+
+            # Avoid exact endpoints: line ends commonly lie on partition
+            # boundaries and are ambiguous. Interior samples identify the
+            # trimmed surface that actually owns the line fragment.
+            params = [lo + (hi - lo) * f for f in (0.25, 0.5, 0.75)]
+            points = []
+            seen = set()
+            for param in params:
+                val = gmsh.model.getValue(1, tag, [param])
+                pt = (float(val[0]), float(val[1]), float(val[2]))
+                key = (round(pt[0], 8), round(pt[1], 8), round(pt[2], 8))
+                if key not in seen:
+                    seen.add(key)
+                    points.append(pt)
+            return points
+
+        def _surface_area(surf_tag):
+            try:
+                return float(gmsh.model.occ.getMass(2, int(surf_tag)))
+            except Exception:
+                try:
+                    return float(gmsh.model.getMass(2, int(surf_tag)))
+                except Exception:
+                    return float("inf")
 
         def embed_entity(dim, tag):
             # 1. Verify entity exists
@@ -1132,74 +1253,86 @@ class MeshGenerator:
             
             xmin, ymin, zmin, xmax, ymax, zmax = bbox
             
-            # Check if line is already a boundary of some surface
+            # Check if line is already a boundary of some surface. Boundary
+            # curves already constrain their adjacent surfaces; explicitly
+            # embedding them elsewhere duplicates constraints and can make Gmsh
+            # non-terminating on dense partitioned geometries.
             is_boundary_of = set()
             if dim == 1:
                 try:
                     up, _down = gmsh.model.getAdjacencies(1, tag)
-                    is_boundary_of = set(up)
+                    is_boundary_of = {int(v) for v in up}
                 except Exception:
                     pass
+                if is_boundary_of:
+                    _elog['boundary_skip'] += 1
+                    _elog['boundary_tags'].append((int(tag), sorted(is_boundary_of)))
+                    return
 
-            # 2. Get a representative point from the entity
-            check_x, check_y, check_z = 0.0, 0.0, 0.0
-            if dim == 0:
-                check_x = (xmin + xmax) / 2.0
-                check_y = (ymin + ymax) / 2.0
-                check_z = (zmin + zmax) / 2.0
-            elif dim == 1:
-                pmin, pmax = gmsh.model.getParametrizationBounds(1, tag)
-                pmid = (float(pmin[0]) + float(pmax[0])) / 2.0
-                val = gmsh.model.getValue(1, tag, [pmid])
-                check_x, check_y, check_z = val[0], val[1], val[2]
-
-            # 3. Fast bbox pre-filter: only test surfaces whose bbox contains the check point
-            candidates = []
-            eps = 1e-4
-            for surf_tag, sbb in _surf_bboxes.items():
-                if (sbb[0] - eps <= check_x <= sbb[3] + eps and
-                    sbb[1] - eps <= check_y <= sbb[4] + eps):
-                    candidates.append(surf_tag)
-
-            if not candidates:
+            # 2. Sample the entity inside its extent.
+            try:
+                sample_points = _entity_sample_points(dim, tag, bbox)
+            except Exception:
+                sample_points = []
+            if not sample_points:
                 _elog['skip_no_match'] += 1
                 return
 
-            # 4. Confirm with getClosestPoint (only on bbox-filtered candidates)
+            # 3. Fast bbox pre-filter: only test surfaces whose bbox contains at
+            # least one sampled point.
+            candidates = set()
+            eps = 1e-4
+            for surf_tag, sbb in _surf_bboxes.items():
+                if any(_bbox_contains_point(sbb, pt, eps=eps) for pt in sample_points):
+                    candidates.add(int(surf_tag))
+
+            if not candidates:
+                _elog['skip_no_cand'] += 1
+                return
+
+            # 4. Confirm with isInside(). For lines, require all interior sample
+            # points to be inside a single trimmed surface.
             target_matches = []
-            for surf_tag in candidates:
-                # Skip if entity is already a boundary of this surface
-                if surf_tag in is_boundary_of:
-                    continue
+            flat_points = []
+            for pt in sample_points:
+                flat_points.extend([pt[0], pt[1], pt[2]])
+            for surf_tag in sorted(candidates):
                 try:
-                    cp_coords, _ = gmsh.model.getClosestPoint(2, surf_tag, [check_x, check_y, check_z])
-                    dist = math.sqrt(
-                        (check_x - cp_coords[0])**2 + 
-                        (check_y - cp_coords[1])**2 + 
-                        (check_z - cp_coords[2])**2
-                    )
-                    if dist < 1e-6:
+                    inside_count = int(gmsh.model.isInside(2, int(surf_tag), flat_points))
+                    if inside_count == len(sample_points):
                         target_matches.append(surf_tag)
                 except Exception:
-                    pass
+                    _elog['inside_failed'] += 1
+                    _elog['inside_fail_tags'].append((int(tag), int(surf_tag)))
 
             # 5. Embed the entity into the verified surfaces
             if target_matches:
-                target_matches = list(set(target_matches))
+                target_matches = sorted(set(target_matches))
+                if len(target_matches) > 1:
+                    _elog['multi_match'] += 1
+                    _elog['multi_tags'].append((int(tag), list(target_matches)))
+                    # Nested or overlapping source polygons can still produce
+                    # multiple containing faces. Choose the smallest trimmed
+                    # surface as the most local owner instead of embedding the
+                    # same entity into every containing face.
+                    target_matches = [min(target_matches, key=_surface_area)]
                 for st in target_matches:
                     try:
                         gmsh.model.mesh.embed(dim, [tag], 2, st)
                         _elog['ok'] += 1
+                        if self.diagnose:
+                            _elog['records'].append({
+                                'dim': int(dim),
+                                'tag': int(tag),
+                                'surface': int(st),
+                                'bbox': tuple(float(v) for v in bbox),
+                                'sample_points': sample_points,
+                            })
                     except Exception as e:
                         _elog['failed'] += 1
                         _elog['fail_tags'].append((tag, str(e)[:60]))
             else:
-                # All candidates were boundaries or didn't match
-                if is_boundary_of & set(candidates):
-                    _elog['conflict'] += 1
-                    _elog['conflict_tags'].append(tag)
-                else:
-                    _elog['skip_no_match'] += 1
+                _elog['skip_no_match'] += 1
 
         # Iterate and Embed Points
         if points_gdf is not None and not points_gdf.empty:
@@ -1233,7 +1366,10 @@ class MeshGenerator:
                   f"{_elog['skip_bbox']} no-bbox, "
                   f"{_elog['skip_no_cand']} empty-bbox, "
                   f"{_filt} filtered-out, "
-                  f"{_elog['skip_no_match']} no-match")
+                  f"{_elog['skip_no_match']} no-match, "
+                  f"{_elog['boundary_skip']} boundary-skip, "
+                  f"{_elog['multi_match']} multi-match, "
+                  f"{_elog['inside_failed']} inside-failed")
             if _filt > 0:
                 print(f"[DIAG] *** {_filt} entities found nearby surfaces but NONE "
                       f"were in domain_surface_tags — likely missing domain surface! ***")
@@ -1243,7 +1379,29 @@ class MeshGenerator:
                       f"(first 10): {uniq[:10]} ***")
             if _elog['fail_tags']:
                 print(f"[DIAG] *** Failed embeds: {_elog['fail_tags'][:5]} ***")
+            if _elog['boundary_tags']:
+                uniq = _elog['boundary_tags'][:10]
+                print(f"[DIAG] Boundary line fragments skipped (first 10): {uniq}")
+            if _elog['multi_tags']:
+                print(f"[DIAG] Multi-surface embed candidates collapsed "
+                      f"(first 10): {_elog['multi_tags'][:10]}")
         # <<< DIAG
+
+        self.diagnostics['embedding'] = {
+            'ok': _elog['ok'],
+            'failed': _elog['failed'],
+            'skip_bbox': _elog['skip_bbox'],
+            'skip_no_cand': _elog['skip_no_cand'],
+            'skip_no_match': _elog['skip_no_match'],
+            'boundary_skip': _elog['boundary_skip'],
+            'multi_match': _elog['multi_match'],
+            'inside_failed': _elog['inside_failed'],
+            'boundary_tags': list(_elog['boundary_tags']),
+            'multi_tags': list(_elog['multi_tags']),
+            'fail_tags': list(_elog['fail_tags']),
+        }
+        if self.diagnose:
+            self.diagnostics['embedding']['records'] = list(_elog['records'])
 
 
     def generate(self, clean_polys, clean_lines, clean_points, output_file=None, launch_gmsh_gui=False):

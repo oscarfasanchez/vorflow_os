@@ -460,6 +460,69 @@ class ConceptualMesh:
                     self.raw_points[i]['geometry'] = snapped_point
 
 
+    def _clip_features_to_domain(self):
+        """Remove or trim line/point features that remain outside the meshing domain."""
+        if self.clean_polygons.empty:
+            return
+
+        domain_union = unary_union(self.clean_polygons.geometry)
+        if domain_union.is_empty:
+            return
+        domain_union = make_valid(domain_union)
+
+        clipped_lines = []
+        for line_data in self.raw_lines:
+            geom = line_data.get("geometry")
+            if geom is None or geom.is_empty:
+                continue
+            try:
+                clipped = geom.intersection(domain_union)
+            except Exception:
+                clipped = make_valid(geom).intersection(domain_union)
+
+            if clipped.is_empty:
+                continue
+
+            line_parts = []
+            if clipped.geom_type in ("LineString", "MultiLineString"):
+                line_parts = [clipped] if clipped.geom_type == "LineString" else list(clipped.geoms)
+            elif clipped.geom_type == "GeometryCollection":
+                line_parts = [
+                    part for part in clipped.geoms
+                    if part.geom_type in ("LineString", "MultiLineString") and not part.is_empty
+                ]
+
+            for part in line_parts:
+                if part.geom_type == "MultiLineString":
+                    for subpart in part.geoms:
+                        if subpart.length > 0:
+                            feat = line_data.copy()
+                            feat["geometry"] = subpart
+                            clipped_lines.append(feat)
+                elif part.length > 0:
+                    feat = line_data.copy()
+                    feat["geometry"] = part
+                    clipped_lines.append(feat)
+
+        removed_lines = len(self.raw_lines) - len(clipped_lines)
+        if removed_lines > 0:
+            print(f"Clipped/removed {removed_lines} line feature(s) outside the domain.")
+        self.raw_lines = clipped_lines
+
+        kept_points = []
+        for point_data in self.raw_points:
+            geom = point_data.get("geometry")
+            if geom is None or geom.is_empty:
+                continue
+            if domain_union.covers(geom):
+                kept_points.append(point_data)
+
+        removed_points = len(self.raw_points) - len(kept_points)
+        if removed_points > 0:
+            print(f"Removed {removed_points} point feature(s) outside the domain.")
+        self.raw_points = kept_points
+
+
     def generate(self, connectivity_tolerance=None):
         """
         Runs the full preprocessing workflow: resolves polygon overlaps,
@@ -489,6 +552,9 @@ class ConceptualMesh:
         
         print("Enforcing strict topology...")
         self._enforce_connectivity(connectivity_tolerance=connectivity_tolerance)
+
+        print("Clipping features to domain...")
+        self._clip_features_to_domain()
         
         # Promote the processed raw geometries to final "clean" GeoDataFrames.
         if self.raw_lines:

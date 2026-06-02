@@ -33,7 +33,7 @@ def test_lines_and_points_snap_to_polygons():
     cm.add_polygon(square, zone_id=1)
 
     line = LineString([(-0.5, 1.0), (0.5, 1.0)])
-    point = Point(-0.0005, 0.5)
+    point = Point(-0.0005, 0.0)
 
     cm.add_line(line, line_id="river", resolution=0.1)
     cm.add_point(point, point_id="well", resolution=0.1)
@@ -50,6 +50,46 @@ def test_lines_and_points_snap_to_polygons():
     tolerance = 1e-3
     assert snapped_line.distance(boundary) <= tolerance
     assert snapped_point.distance(boundary) <= tolerance
+
+
+def test_points_outside_domain_are_removed_after_connectivity():
+    cm = ConceptualMesh(connectivity_tolerance=0.01)
+
+    square = Polygon([(0, 0), (2, 0), (2, 2), (0, 2)])
+    cm.add_polygon(square, zone_id=1)
+    cm.add_line(LineString([(0, 1), (2, 1)]), line_id="river", resolution=0.5, densify=False)
+    cm.add_point(Point(-0.05, 1), point_id="outside_well", resolution=0.05)
+
+    _, _, clean_points = cm.generate()
+
+    assert clean_points.empty
+
+
+def test_points_snapped_to_domain_boundary_are_kept():
+    cm = ConceptualMesh(connectivity_tolerance=0.1)
+
+    square = Polygon([(0, 0), (2, 0), (2, 2), (0, 2)])
+    cm.add_polygon(square, zone_id=1)
+    cm.add_line(LineString([(0, 1), (2, 1)]), line_id="river", resolution=0.5, densify=False)
+    cm.add_point(Point(-0.05, 1), point_id="snapped_well", resolution=0.05)
+
+    _, _, clean_points = cm.generate()
+
+    assert len(clean_points) == 1
+    assert clean_points.iloc[0].geometry.equals(Point(0, 1))
+
+
+def test_lines_are_clipped_to_domain_after_connectivity():
+    cm = ConceptualMesh(connectivity_tolerance=0.0)
+
+    square = Polygon([(0, 0), (2, 0), (2, 2), (0, 2)])
+    cm.add_polygon(square, zone_id=1)
+    cm.add_line(LineString([(-1, 1), (3, 1)]), line_id="crossing_line", resolution=0.5, densify=False)
+
+    _, clean_lines, _ = cm.generate()
+
+    assert len(clean_lines) == 1
+    assert clean_lines.iloc[0].geometry.equals(LineString([(0, 1), (2, 1)]))
 
 
 def test_generate_uses_constructor_connectivity_tolerance(monkeypatch):
