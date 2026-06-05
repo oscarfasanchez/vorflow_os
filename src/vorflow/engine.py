@@ -1085,6 +1085,10 @@ class MeshGenerator:
 
             if not any(tags_dict.values()):
                 continue
+
+            # Private metadata for built-in field helpers; custom MeshField
+            # implementations can ignore it because tag lists remain unchanged.
+            tags_dict['_verbosity'] = self.verbosity
             
             # Create the Gmsh field using the provided MeshField object.
             f_id = field.create(

@@ -125,7 +125,7 @@ blueprint.add_line(
     dist_min=feature_lc/2,
     dist_max=background_lc * 1.5,
     fields=[auto_linear],
-    embed=False,  # field-only polygon
+    embed=False,  # field-only boundary line
 )
 
 blueprint.add_polygon(
@@ -215,14 +215,18 @@ poly_colors = {
     "lower-center": "tab:brown",
     "lower-right": "tab:pink",
 }
-field_only_polys = {"upper-center", "lower-left"}
+field_only = {
+    "upper-center": "polygon",
+    "lower-left": "boundary line",
+    "lower-right": "polygon",
+}
 for name, poly in plot_polys.items():
-    is_field_only = name in field_only_polys
-    label = f"{name} (field-only)" if is_field_only else name
+    field_only_kind = field_only.get(name)
+    label = f"{name} (field-only {field_only_kind})" if field_only_kind else name
     ax.plot(
         *poly.exterior.xy,
         lw=1,
-        ls=":" if is_field_only else "--",
+        ls=":" if field_only_kind else "--",
         color=poly_colors.get(name),
         label=label,
     )

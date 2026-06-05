@@ -145,7 +145,26 @@ def test_gmsh_integration_with_field_only_line_refinement():
     assert len(grid) > 10
 
 
-def test_embedded_polygon_field_has_restricted_constant_interior():
+def _constant_fields_for_surfaces(surface_tags, expected_vin):
+    matches = []
+    expected_surfaces = {float(tag) for tag in surface_tags}
+
+    for field_id in gmsh.model.mesh.field.list():
+        if gmsh.model.mesh.field.getType(field_id) != "Constant":
+            continue
+
+        surfaces = set(gmsh.model.mesh.field.getNumbers(field_id, "SurfacesList"))
+        if surfaces != expected_surfaces:
+            continue
+
+        vin = gmsh.model.mesh.field.getNumber(field_id, "VIn")
+        if vin == pytest.approx(expected_vin):
+            matches.append(field_id)
+
+    return matches
+
+
+def test_embedded_polygon_field_has_constant_interior():
     """Embedded polygon size fields should stay constant inside the surface."""
     cm = ConceptualMesh(crs="EPSG:3857")
     domain = Polygon([(0, 0), (20, 0), (20, 20), (0, 20)])
@@ -174,17 +193,60 @@ def test_embedded_polygon_field_has_restricted_constant_interior():
             float(tag) for dim, tag in inner_surfaces if int(dim) == 2
         }
 
-        restrict_fields = []
-        for field_id in gmsh.model.mesh.field.list():
-            if gmsh.model.mesh.field.getType(field_id) != "Restrict":
-                continue
-            surfaces = set(gmsh.model.mesh.field.getNumbers(field_id, "SurfacesList"))
-            if surfaces == inner_surface_tags:
-                restrict_fields.append(field_id)
+        constant_fields = _constant_fields_for_surfaces(inner_surface_tags, 2.0)
 
-        assert restrict_fields, "Expected a constant field restricted to the embedded polygon surface"
+        assert constant_fields, "Expected a constant field inside the embedded polygon surface"
     finally:
         gmsh.finalize()
+
+
+def test_field_only_polygon_field_has_constant_interior_without_partitioning():
+    """Field-only polygons should get flat interior sizing without becoming domain zones."""
+    cm = ConceptualMesh(crs="EPSG:3857")
+    domain = Polygon([(0, 0), (20, 0), (20, 20), (0, 20)])
+    field_poly = Polygon([(5, 5), (15, 5), (15, 15), (5, 15)])
+
+    cm.add_polygon(domain, zone_id=1, resolution=10.0, z_order=0)
+    cm.add_polygon(
+        field_poly,
+        zone_id="field-only",
+        resolution=2.0,
+        fields=[AutoExponentialField(growth_factor=1.2)],
+        embed=False,
+    )
+    clean_polys, clean_lines, clean_points = cm.generate()
+
+    field_idx = int(clean_polys.index[clean_polys["zone_id"] == "field-only"][0])
+    domain_idx = int(clean_polys.index[clean_polys["zone_id"] == 1][0])
+    assert bool(clean_polys.loc[field_idx, "embed"]) is False
+
+    mg = MeshGenerator(background_lc=10.0, verbosity=0)
+    gmsh.initialize()
+    try:
+        gmsh.model.add("field_only_polygon_field")
+        gmsh_map = mg._add_geometry(clean_polys, clean_lines, clean_points)
+        mg._setup_fields(gmsh_map, clean_polys, clean_lines, clean_points)
+
+        field_surfaces = set(gmsh_map["surfaces"][field_idx])
+        field_surface_tags = {
+            float(tag) for dim, tag in field_surfaces if int(dim) == 2
+        }
+
+        constant_fields = _constant_fields_for_surfaces(field_surface_tags, 2.0)
+        assert constant_fields, "Expected a constant field inside the field-only polygon surface"
+
+        embedded_domain_ids = [
+            int(i)
+            for i, row in clean_polys.iterrows()
+            if bool(row.get("embed", True))
+        ]
+        assert embedded_domain_ids == [domain_idx]
+    finally:
+        gmsh.finalize()
+
+    assert mg.generate(clean_polys, clean_lines, clean_points)
+    assert len(mg.nodes) > 0
+
 
 def test_gmsh_integration_overlapping_polygon_with_hole():
     """

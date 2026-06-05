@@ -613,8 +613,30 @@ class ConceptualMesh:
 
             if clipped_features:
                 field_only_gdf = gpd.GeoDataFrame(clipped_features, crs=self.crs)
+                # Align schemas before concat to avoid pandas dtype inference warnings
+                # while preserving the canonical polygon columns.
+                polygon_columns = [
+                    'geometry',
+                    'zone_id',
+                    'lc',
+                    'z_order',
+                    'dist_min',
+                    'dist_max',
+                    'fields',
+                    'embed',
+                    'densify',
+                    'simplify_tolerance',
+                ]
+                self.clean_polygons = self.clean_polygons.reindex(columns=polygon_columns)
+                field_only_gdf = field_only_gdf.reindex(columns=polygon_columns)
+                # Drop all-null non-geometry columns only during concat; they are
+                # restored immediately after so the public GeoDataFrame shape is unchanged.
+                concat_frames = [
+                    frame.dropna(axis=1, how='all')
+                    for frame in (self.clean_polygons, field_only_gdf)
+                ]
                 self.clean_polygons = gpd.GeoDataFrame(
-                    pd.concat([self.clean_polygons, field_only_gdf], ignore_index=True),
+                    pd.concat(concat_frames, ignore_index=True).reindex(columns=polygon_columns),
                     crs=self.crs,
                 )
 

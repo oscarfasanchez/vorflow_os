@@ -81,66 +81,90 @@ def _surface_boundary_curves(gmsh_api, surface_tags):
     return curves
 
 
-def _distance_tags_for_growth(gmsh_api, tags_dict, sampling):
-    """Build tags for distance growth while keeping embedded polygon interiors flat."""
+def _polygon_surface_tags(tags_dict):
     embedded_surfaces = tags_dict.get("embedded_surfaces", None)
     if embedded_surfaces is None:
         embedded_surfaces = tags_dict.get("surfaces", [])
 
     field_only_surfaces = tags_dict.get("field_only_surfaces", [])
-    boundary_curves = _surface_boundary_curves(gmsh_api, embedded_surfaces)
+    seen = set()
+    surface_tags = []
+    for tag in list(embedded_surfaces) + list(field_only_surfaces):
+        tag = int(tag)
+        if tag not in seen:
+            seen.add(tag)
+            surface_tags.append(tag)
+    return surface_tags
+
+
+def _distance_tags_for_growth(gmsh_api, tags_dict, sampling):
+    """Build tags for distance growth while keeping polygon interiors flat."""
+    polygon_surfaces = _polygon_surface_tags(tags_dict)
+    boundary_curves = _surface_boundary_curves(gmsh_api, polygon_surfaces)
 
     growth_tags = {
         "points": list(tags_dict.get("points", [])),
         "lines": list(tags_dict.get("lines", [])) + boundary_curves,
-        "surfaces": list(field_only_surfaces),
+        "surfaces": [],
     }
 
     # If no boundary curves could be recovered, fall back to the old surface
     # distance behavior instead of dropping the field.
-    if embedded_surfaces and not boundary_curves:
-        growth_tags["surfaces"].extend(embedded_surfaces)
+    if polygon_surfaces and not boundary_curves:
+        if int(tags_dict.get("_verbosity", 0)) > 0:
+            print(
+                "Warning: could not recover boundary curves for a polygon size "
+                "field; falling back to surface-distance growth."
+            )
+        growth_tags["surfaces"].extend(polygon_surfaces)
 
     return DistanceField(include_surfaces=True, sampling=sampling).create(
         gmsh_api, growth_tags
     )
 
 
-def _restricted_surface_constant(gmsh_api, surface_tags, size):
+def _polygon_surface_constant(gmsh_api, surface_tags, size, background_lc):
     if not surface_tags:
         return None
 
-    const = gmsh_api.model.mesh.field.add("MathEval")
-    gmsh_api.model.mesh.field.setString(const, "F", str(float(size)))
-
-    restricted = gmsh_api.model.mesh.field.add("Restrict")
-    gmsh_api.model.mesh.field.setNumber(restricted, "IField", const)
+    const = gmsh_api.model.mesh.field.add("Constant")
+    gmsh_api.model.mesh.field.setNumber(const, "VIn", float(size))
+    gmsh_api.model.mesh.field.setNumber(const, "VOut", float(background_lc))
+    # Field-only polygon surfaces are not domain partitions, but Gmsh can
+    # still evaluate a spatial constant field inside their geometry.
     gmsh_api.model.mesh.field.setNumbers(
-        restricted, "SurfacesList", [float(t) for t in surface_tags]
+        const, "SurfacesList", [float(t) for t in surface_tags]
     )
-    return restricted
+    return const
 
 
-def _combine_with_embedded_surface_constant(gmsh_api, growth_field, tags_dict, size):
-    embedded_surfaces = tags_dict.get("embedded_surfaces", None)
-    if embedded_surfaces is None:
-        embedded_surfaces = tags_dict.get("surfaces", [])
-
-    restricted = _restricted_surface_constant(gmsh_api, embedded_surfaces, size)
-    if restricted is None:
+def _combine_with_polygon_surface_constant(
+    gmsh_api, growth_field, tags_dict, size, background_lc
+):
+    constant = _polygon_surface_constant(
+        gmsh_api, _polygon_surface_tags(tags_dict), size, background_lc
+    )
+    if constant is None:
         return growth_field
     if growth_field is None:
-        return restricted
+        return constant
 
     f_min = gmsh_api.model.mesh.field.add("Min")
     gmsh_api.model.mesh.field.setNumbers(
-        f_min, "FieldsList", [float(growth_field), float(restricted)]
+        f_min, "FieldsList", [float(growth_field), float(constant)]
     )
     return f_min
 
 # --- Manual Fields ---
 
 class ConstantField(MeshField):
+    """Public/manual constant field.
+
+    Polygon interior constants are handled by the internal
+    _polygon_surface_constant() helper because they need SurfacesList scoping
+    and are combined with a growth field.
+    """
+
     def __init__(self, size):
         self.size = float(size)
 
@@ -159,13 +183,13 @@ class ThresholdField(MeshField):
         self.size_max = float(size_max) if size_max is not None else None
         self.sampling = int(sampling)
     def create(self, gmsh_api, tags_dict, background_lc, feature_lc=None, constant_in=False):
-        # 1. Distance field for growth away from features. For embedded polygon
-        # surfaces, use their boundary curves for growth and add a restricted
-        # constant field below so the polygon interior remains flat.
+        # 1. Distance field for growth away from features. For polygon
+        # surfaces, use boundary curves for growth and add a spatial constant
+        # field below so the polygon interior remains flat.
         f_dist = _distance_tags_for_growth(gmsh_api, tags_dict, self.sampling)
         if f_dist is None:
-            return _combine_with_embedded_surface_constant(
-                gmsh_api, None, tags_dict, self.size_min
+            return _combine_with_polygon_surface_constant(
+                gmsh_api, None, tags_dict, self.size_min, background_lc
             )
 
         # 2. Threshold Field
@@ -176,8 +200,8 @@ class ThresholdField(MeshField):
         gmsh_api.model.mesh.field.setNumber(f_thresh, "DistMin", self.dist_min)
         gmsh_api.model.mesh.field.setNumber(f_thresh, "DistMax", self.dist_max)
 
-        return _combine_with_embedded_surface_constant(
-            gmsh_api, f_thresh, tags_dict, self.size_min
+        return _combine_with_polygon_surface_constant(
+            gmsh_api, f_thresh, tags_dict, self.size_min, background_lc
         )
 
 class ExponentialField(MeshField):
@@ -190,8 +214,8 @@ class ExponentialField(MeshField):
     def create(self, gmsh_api, tags_dict, background_lc, feature_lc=None):
         f_dist = _distance_tags_for_growth(gmsh_api, tags_dict, self.sampling)
         if f_dist is None:
-            return _combine_with_embedded_surface_constant(
-                gmsh_api, None, tags_dict, self.size_min
+            return _combine_with_polygon_surface_constant(
+                gmsh_api, None, tags_dict, self.size_min, background_lc
             )
 
         s_max = self.size_max if self.size_max else background_lc
@@ -199,8 +223,8 @@ class ExponentialField(MeshField):
         f_math = gmsh_api.model.mesh.field.add("MathEval")
         expr = f"{s_max} - ({s_max} - {self.size_min}) * Exp(-F{f_dist} / {self.decay_length})"
         gmsh_api.model.mesh.field.setString(f_math, "F", expr)
-        return _combine_with_embedded_surface_constant(
-            gmsh_api, f_math, tags_dict, self.size_min
+        return _combine_with_polygon_surface_constant(
+            gmsh_api, f_math, tags_dict, self.size_min, background_lc
         )
 
 # --- Auto Fields ---
@@ -246,8 +270,8 @@ class AutoExponentialField(MeshField):
 
         f_dist = _distance_tags_for_growth(gmsh_api, tags_dict, int(sampling))
         if f_dist is None:
-            return _combine_with_embedded_surface_constant(
-                gmsh_api, None, tags_dict, cs
+            return _combine_with_polygon_surface_constant(
+                gmsh_api, None, tags_dict, cs, background_lc
             )
 
         f_math = gmsh_api.model.mesh.field.add("MathEval")
@@ -255,4 +279,6 @@ class AutoExponentialField(MeshField):
         expr = f"{cs} * {fac}^(Log(1 + F{f_dist} * 2 * {log_fac} / {cs}) / {log_fac})"
 
         gmsh_api.model.mesh.field.setString(f_math, "F", expr)
-        return _combine_with_embedded_surface_constant(gmsh_api, f_math, tags_dict, cs)
+        return _combine_with_polygon_surface_constant(
+            gmsh_api, f_math, tags_dict, cs, background_lc
+        )
