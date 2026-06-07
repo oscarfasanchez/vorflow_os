@@ -28,6 +28,20 @@ TRIANGULAR_QUALITY_COLUMNS = [
     "maxEdge",
 ]
 
+ELEMENT_GRID_COLUMNS = [
+    "element_tag",
+    "element_type",
+    "element_name",
+    "is_triangle",
+    "is_quad",
+    "node_tags",
+    "centroid_x",
+    "centroid_y",
+    "geometry",
+    "zone_id",
+    "z_order",
+]
+
 
 @pytest.fixture(autouse=True)
 def ensure_gmsh_finalized():
@@ -222,6 +236,9 @@ def test_get_triangular_quality_requires_generation():
     with pytest.raises(RuntimeError, match="Call MeshGenerator.generate"):
         mesher.get_triangular_quality()
 
+    with pytest.raises(RuntimeError, match="Call MeshGenerator.generate"):
+        mesher.get_element_grid()
+
 
 def test_get_triangular_quality_returns_cached_gmsh_metrics_after_generate():
     cm = ConceptualMesh()
@@ -257,3 +274,98 @@ def test_get_triangular_quality_returns_cached_gmsh_metrics_after_generate():
     quality_copy = mesher.get_triangular_quality()
     quality_copy.loc[quality_copy.index[0], "gamma"] = -999.0
     assert mesher.get_triangular_quality()["gamma"].iloc[0] != -999.0
+
+
+def test_get_element_grid_returns_cached_gmsh_element_polygons_after_generate():
+    cm = ConceptualMesh(crs=None)
+    cm.add_polygon(
+        Polygon([(0, 0), (4, 0), (4, 4), (0, 4)]),
+        zone_id="domain",
+        resolution=2.0,
+        dist_max=4.0,
+    )
+    clean_polys, clean_lines, clean_points = cm.generate()
+
+    mesher = MeshGenerator(
+        background_lc=2.0,
+        verbosity=0,
+        smoothing_steps=0,
+        optimization_cycles=0,
+    )
+    assert mesher.generate(clean_polys, clean_lines, clean_points)
+
+    element_grid = mesher.get_element_grid()
+    quality = mesher.get_triangular_quality()
+
+    assert list(element_grid.columns) == ELEMENT_GRID_COLUMNS
+    assert not element_grid.empty
+    assert len(element_grid) == len(quality)
+    assert element_grid["element_tag"].is_unique
+    assert element_grid["element_tag"].tolist() == sorted(element_grid["element_tag"].tolist())
+    assert element_grid["is_triangle"].all()
+    assert not element_grid["is_quad"].any()
+    assert element_grid.geometry.is_valid.all()
+    assert (element_grid.geometry.area > 0).all()
+    assert element_grid["zone_id"].eq("domain").all()
+    assert "x" not in element_grid.columns
+    assert "y" not in element_grid.columns
+
+    triangle_grid = mesher.get_element_grid("triangles")
+    quad_grid = mesher.get_element_grid("quads")
+
+    assert len(triangle_grid) == len(element_grid)
+    assert quad_grid.empty
+
+    element_grid_copy = mesher.get_element_grid()
+    element_grid_copy.loc[element_grid_copy.index[0], "element_tag"] = -999
+    assert mesher.get_element_grid()["element_tag"].iloc[0] != -999
+
+
+def test_element_grid_supports_centroid_connectivity_without_generator_columns():
+    cm = ConceptualMesh(crs=None)
+    cm.add_polygon(
+        Polygon([(0, 0), (6, 0), (6, 4), (0, 4)]),
+        zone_id=1,
+        resolution=2.0,
+        dist_max=4.0,
+    )
+    clean_polys, clean_lines, clean_points = cm.generate()
+
+    mesher = MeshGenerator(
+        background_lc=2.0,
+        verbosity=0,
+        smoothing_steps=0,
+        optimization_cycles=0,
+    )
+    assert mesher.generate(clean_polys, clean_lines, clean_points)
+
+    element_grid = mesher.get_element_grid()
+    connectivity = build_connectivity(element_grid, center="centroid")
+    quality = calculate_mesh_quality(
+        element_grid,
+        calc_ortho=True,
+        calc_skewness=True,
+        connectivity=connectivity,
+    )
+
+    assert not connectivity.empty
+    assert connectivity["center_mode"].eq("centroid").all()
+    assert "ortho_error" in quality.columns
+    assert "skewness" in quality.columns
+    assert "drift_ratio" not in quality.columns
+
+
+def test_get_element_grid_validates_filter():
+    cm = ConceptualMesh(crs=None)
+    cm.add_polygon(
+        Polygon([(0, 0), (4, 0), (4, 4), (0, 4)]),
+        zone_id=1,
+        resolution=2.0,
+    )
+    clean_polys, clean_lines, clean_points = cm.generate()
+
+    mesher = MeshGenerator(background_lc=2.0, verbosity=0, smoothing_steps=0, optimization_cycles=0)
+    assert mesher.generate(clean_polys, clean_lines, clean_points)
+
+    with pytest.raises(ValueError, match="element_filter"):
+        mesher.get_element_grid("hexes")

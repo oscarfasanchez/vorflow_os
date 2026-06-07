@@ -3,6 +3,7 @@ import sys
 import math
 import numpy as np
 import pandas as pd
+import geopandas as gpd
 from shapely.geometry import Point, LineString, Polygon
 from shapely.ops import unary_union
 from shapely.validation import make_valid
@@ -68,6 +69,7 @@ class MeshGenerator:
         self.node_tags = None
         self.zones_gdf = None
         self.triangular_quality = None
+        self.element_grid = None
         self.diagnostics = {}
 
     def _sanitize_coords(self, coords, *, min_spacing=1e-5, require_closed=False, min_points=2):
@@ -196,6 +198,145 @@ class MeshGenerator:
                 "Triangular quality is not available. Call MeshGenerator.generate() first."
             )
         return self.triangular_quality.copy()
+
+    def _empty_element_grid(self, crs=None):
+        return gpd.GeoDataFrame(
+            columns=[
+                "element_tag",
+                "element_type",
+                "element_name",
+                "is_triangle",
+                "is_quad",
+                "node_tags",
+                "centroid_x",
+                "centroid_y",
+                "zone_id",
+                "z_order",
+                "geometry",
+            ],
+            geometry="geometry",
+            crs=crs,
+        )
+
+    def _collect_element_grid(self, zones_gdf=None):
+        """Collect gmsh 2D element polygons while the model is live."""
+        crs = getattr(zones_gdf, "crs", None)
+        element_types, element_tags, element_node_tags = gmsh.model.mesh.getElements(dim=2)
+        if len(element_tags) == 0:
+            return self._empty_element_grid(crs)
+
+        node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
+        coords_3d = np.asarray(node_coords, dtype=float).reshape(-1, 3)
+        node_xy = {
+            int(tag): (float(coord[0]), float(coord[1]))
+            for tag, coord in zip(node_tags, coords_3d)
+        }
+
+        records = []
+        for element_type, tags_for_type, nodes_for_type in zip(
+            element_types,
+            element_tags,
+            element_node_tags,
+        ):
+            element_name, _, _, num_nodes, _, num_primary_nodes = gmsh.model.mesh.getElementProperties(
+                int(element_type)
+            )
+            num_nodes = int(num_nodes)
+            num_primary_nodes = int(num_primary_nodes) if int(num_primary_nodes) > 0 else num_nodes
+            if num_nodes <= 0 or num_primary_nodes < 3:
+                continue
+
+            tags = np.asarray(tags_for_type, dtype=np.int64)
+            flat_nodes = np.asarray(nodes_for_type, dtype=np.int64)
+            if len(tags) == 0 or len(flat_nodes) == 0:
+                continue
+
+            connectivity = flat_nodes.reshape((len(tags), num_nodes))
+            element_name_lower = element_name.lower()
+            is_triangle = "triangle" in element_name_lower
+            is_quad = "quadrangle" in element_name_lower or "quadrilateral" in element_name_lower
+
+            for element_tag, element_nodes in zip(tags, connectivity):
+                primary_nodes = [int(tag) for tag in element_nodes[:num_primary_nodes]]
+                try:
+                    coords = [node_xy[int(tag)] for tag in primary_nodes]
+                except KeyError:
+                    continue
+
+                polygon = Polygon(coords)
+                if polygon.is_empty or polygon.area <= 0:
+                    continue
+                if not polygon.is_valid:
+                    polygon = make_valid(polygon)
+                if polygon.geom_type != "Polygon" or polygon.is_empty or polygon.area <= 0:
+                    continue
+
+                centroid = polygon.centroid
+                records.append(
+                    {
+                        "element_tag": int(element_tag),
+                        "element_type": int(element_type),
+                        "element_name": element_name,
+                        "is_triangle": bool(is_triangle),
+                        "is_quad": bool(is_quad),
+                        "node_tags": tuple(primary_nodes),
+                        "centroid_x": float(centroid.x),
+                        "centroid_y": float(centroid.y),
+                        "geometry": polygon,
+                    }
+                )
+
+        if not records:
+            return self._empty_element_grid(crs)
+
+        grid = gpd.GeoDataFrame(records, geometry="geometry", crs=crs)
+        grid = grid.sort_values("element_tag").reset_index(drop=True)
+
+        if zones_gdf is not None and not zones_gdf.empty and "zone_id" in zones_gdf.columns:
+            zone_cols = ["geometry", "zone_id"]
+            if "z_order" in zones_gdf.columns:
+                zone_cols.append("z_order")
+            zones = zones_gdf[zone_cols].copy()
+            centroids = gpd.GeoDataFrame(
+                {"element_tag": grid["element_tag"]},
+                geometry=gpd.points_from_xy(grid["centroid_x"], grid["centroid_y"]),
+                crs=grid.crs,
+            )
+            joined = gpd.sjoin(centroids, zones, how="left", predicate="intersects")
+            if "z_order" in joined.columns:
+                joined = joined.sort_values("z_order", ascending=False)
+            joined = joined.drop_duplicates(subset="element_tag")
+            merge_cols = ["element_tag", "zone_id"]
+            if "z_order" in joined.columns:
+                merge_cols.append("z_order")
+            grid = grid.merge(joined[merge_cols], on="element_tag", how="left")
+        else:
+            grid["zone_id"] = pd.NA
+            grid["z_order"] = pd.NA
+
+        return grid
+
+    def get_element_grid(self, element_filter="all"):
+        """
+        Return cached gmsh 2D element polygons for the generated mesh.
+
+        ``element_filter`` may be ``"all"``, ``"triangles"``, or ``"quads"``.
+        The exporter is independent of the Voronoi tessellator and can represent
+        mixed tri/quad meshes produced by future structured-buffer workflows.
+        """
+        if self.element_grid is None:
+            raise RuntimeError(
+                "Element grid is not available. Call MeshGenerator.generate() first."
+            )
+        if element_filter not in {"all", "triangles", "quads"}:
+            raise ValueError("element_filter must be one of 'all', 'triangles', or 'quads'.")
+
+        grid = self.element_grid
+        if element_filter == "triangles":
+            grid = grid[grid["is_triangle"]]
+        elif element_filter == "quads":
+            grid = grid[grid["is_quad"]]
+        return grid.copy()
 
     def _add_geometry(self, polygons_gdf, lines_gdf, points_gdf, launch_gmsh_gui=False):
         """
@@ -1496,6 +1637,7 @@ class MeshGenerator:
             Exception: If any step in the Gmsh process fails.
         """
         self.triangular_quality = None
+        self.element_grid = None
         self._initialize_gmsh()
         try:
             print("Transferring Geometry to Gmsh...")
@@ -1570,6 +1712,7 @@ class MeshGenerator:
                     gmsh.model.mesh.optimize("Laplace2D",niter=1)
 
             self.triangular_quality = self._collect_triangular_quality()
+            self.element_grid = self._collect_element_grid(clean_polys)
             
             if output_file:
                 gmsh.write(output_file)
