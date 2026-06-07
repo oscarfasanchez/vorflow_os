@@ -29,7 +29,7 @@ from vorflow.fields import (
     AutoLinearField,
     ThresholdField,
 )
-from vorflow.utils import calculate_mesh_quality, summarize_quality
+from vorflow.utils import build_connectivity, calculate_mesh_quality, summarize_quality
 
 #%%
 # Geometry
@@ -192,8 +192,72 @@ clean_polys, clean_lines, clean_pts = blueprint.generate()
 mesher = MeshGenerator(background_lc=background_lc, verbosity=0)
 mesher.generate(clean_polys, clean_lines, clean_pts, launch_gmsh_gui=False)
 
+#%% 3) Triangular quality + Voronoi conversion + quality reports
+
+tri_quality = mesher.get_triangular_quality()
+print("\nTriangular element quality summary:")
+print(tri_quality["element_name"].value_counts().to_string())
+
+tri_quality_metrics = [
+    "minSICN",
+    "minDetJac",
+    "maxDetJac",
+    "minSJ",
+    "minSIGE",
+    "gamma",
+    "innerRadius",
+    "outerRadius",
+    "minIsotropy",
+    "angleShape",
+    "minEdge",
+    "maxEdge",
+]
+print(
+    tri_quality[tri_quality_metrics]
+    .describe(percentiles=[0.05, 0.5, 0.95])
+    .T[["min", "5%", "50%", "95%", "max"]]
+)
+
 tessellator = VoronoiTessellator(mesher, blueprint, clip_to_boundary=True)
 grid_gdf = tessellator.generate()
+
+modflow_connectivity_report = build_connectivity(grid_gdf, center="centroid")
+voronoi_dual_connectivity_report = build_connectivity(grid_gdf, center="generator")
+
+print("\nMODFLOW-facing centroid connectivity summary:")
+print(
+    modflow_connectivity_report[["angle", "ortho_error", "skewness"]]
+    .describe(percentiles=[0.05, 0.5, 0.95])
+    .T[["min", "5%", "50%", "95%", "max"]]
+)
+
+print("\nVoronoi-dual generator connectivity summary:")
+print(
+    voronoi_dual_connectivity_report[["angle", "ortho_error", "skewness"]]
+    .describe(percentiles=[0.05, 0.5, 0.95])
+    .T[["min", "5%", "50%", "95%", "max"]]
+)
+
+worst_columns = [
+    col
+    for col in ["node_id_1", "node_id_2", "angle", "ortho_error", "skewness"]
+    if col in modflow_connectivity_report.columns
+]
+print("\nWorst MODFLOW-facing centroid connectivity pairs by orthogonality error:")
+print(
+    modflow_connectivity_report
+    .sort_values("ortho_error", ascending=False)
+    .head(10)[worst_columns]
+    .to_string(index=False)
+)
+
+quality_gdf = calculate_mesh_quality(
+    grid_gdf,
+    calc_ortho=True,
+    calc_skewness=True,
+    connectivity=modflow_connectivity_report,
+)
+summarize_quality(quality_gdf)
 
 
 #%%
@@ -270,24 +334,90 @@ plt.show()
 #%%
 # Quick check: smaller cells => smaller polygon areas (proxy for refinement)
 
-grid_gdf2 = grid_gdf.copy()
-grid_gdf2["area"] = grid_gdf2.geometry.area
-
 fig, ax = plt.subplots(1, 1, figsize=(14, 6))
 ax.set_aspect("equal")
 ax.plot(*domain.exterior.xy, color="black", lw=1)
-grid_gdf2.plot(ax=ax, column="area", cmap="viridis", legend=True, linewidth=0.0)
+quality_gdf.plot(ax=ax, column="area", cmap="viridis", legend=True, linewidth=0.0)
 ax.set_title("Voronoi cell area (proxy for refinement)")
 fig.tight_layout()
 plt.show()
 
-# %%
-quality_gdf = calculate_mesh_quality(grid_gdf, calc_ortho=True)
-summarize_quality(quality_gdf)
+#%% 5) Quality diagnostics plots
 
-# Plot Orthogonality Error
+fig, ax = plt.subplots(figsize=(10, 5))
+for element_name, group in tri_quality.groupby("element_name"):
+    group["gamma"].plot.hist(
+        ax=ax,
+        bins=40,
+        alpha=0.55,
+        label=element_name,
+    )
+ax.set_title("Gmsh 2D element quality: gamma")
+ax.set_xlabel("gamma (higher is better)")
+ax.legend()
+fig.tight_layout()
+plt.show()
+
 fig, ax = plt.subplots(figsize=(10, 8))
-quality_gdf.plot(column='ortho_error', ax=ax, legend=True, cmap='Reds', vmin=0, vmax=1)
-plt.title("Orthogonality Error (Degrees)")
+ax.set_aspect("equal")
+grid_gdf.plot(ax=ax, color="white", edgecolor="0.85", linewidth=0.2)
+modflow_connectivity_report.set_geometry("connector").plot(
+    ax=ax,
+    color="0.35",
+    linewidth=0.35,
+    alpha=0.35,
+)
+modflow_connectivity_report.plot(
+    column="ortho_error",
+    ax=ax,
+    legend=True,
+    cmap="Reds",
+    linewidth=1.2,
+    vmin=0,
+    vmax=1,
+)
+ax.plot(*domain.exterior.xy, color="black", lw=1)
+ax.set_title("MODFLOW-facing centroid connectivity: shared-face orthogonality error")
+fig.tight_layout()
+plt.show()
+
+fig, ax = plt.subplots(figsize=(10, 8))
+ax.set_aspect("equal")
+quality_gdf.plot(column="ortho_error", ax=ax, legend=True, cmap="Reds", vmin=0, vmax=1)
+ax.plot(*domain.exterior.xy, color="black", lw=1)
+ax.set_title("Per-cell orthogonality error (degrees)")
+fig.tight_layout()
+plt.show()
+
+fig, ax = plt.subplots(figsize=(10, 8))
+ax.set_aspect("equal")
+quality_gdf.plot(column="skewness", ax=ax, legend=True, cmap="Purples", vmin=0, vmax=0.5)
+ax.plot(*domain.exterior.xy, color="black", lw=1)
+ax.set_title("Per-cell skewness error |s - 0.5|")
+fig.tight_layout()
+plt.show()
+
+fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+dashboard_metrics = [
+    ("area", "Cell area", "viridis", None, None),
+    ("drift_ratio", "Generator drift ratio", "magma", None, None),
+    ("ortho_error", "Orthogonality error (degrees)", "Reds", 0, 1),
+    ("skewness", "Skewness error |s - 0.5|", "Purples", 0, 0.5),
+]
+for ax, (column, title, cmap, vmin, vmax) in zip(axes.ravel(), dashboard_metrics):
+    ax.set_aspect("equal")
+    quality_gdf.plot(
+        column=column,
+        ax=ax,
+        legend=True,
+        cmap=cmap,
+        vmin=vmin,
+        vmax=vmax,
+        linewidth=0.0,
+    )
+    ax.plot(*domain.exterior.xy, color="black", lw=0.8)
+    ax.set_title(title)
+    ax.set_axis_off()
+fig.tight_layout()
 plt.show()
 # %%
