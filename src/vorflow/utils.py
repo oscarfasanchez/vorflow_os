@@ -1,7 +1,244 @@
+from typing import Optional
+
 import numpy as np
 import geopandas as gpd
 import pandas as pd
-from shapely.geometry import LineString, Polygon, MultiPolygon
+from shapely.geometry import LineString, MultiLineString, Point, Polygon, MultiPolygon
+
+
+CONNECTIVITY_COLUMNS = [
+    "cell_id_1",
+    "cell_id_2",
+    "orig_index_1",
+    "orig_index_2",
+    "node_id_1",
+    "node_id_2",
+    "center_mode",
+    "center_1",
+    "center_2",
+    "angle",
+    "ortho_error",
+    "skewness",
+    "connector",
+    "shared_edge",
+]
+
+
+def _empty_connectivity(crs=None):
+    return gpd.GeoDataFrame(
+        columns=CONNECTIVITY_COLUMNS,
+        geometry="shared_edge",
+        crs=crs,
+    )
+
+
+def _longest_line(geom):
+    """Return the longest line component from a shared-boundary geometry."""
+    if geom.is_empty:
+        return None
+    if isinstance(geom, LineString):
+        return geom if geom.length > 0 else None
+    if isinstance(geom, MultiLineString):
+        lines = [line for line in geom.geoms if line.length > 0]
+        return max(lines, key=lambda line: line.length) if lines else None
+    if hasattr(geom, "geoms"):
+        lines = []
+        for part in geom.geoms:
+            line = _longest_line(part)
+            if line is not None:
+                lines.append(line)
+        return max(lines, key=lambda line: line.length) if lines else None
+    return None
+
+
+def _representative_point_on_geometry(geom):
+    """Return a point suitable for projection onto a connector line."""
+    if geom.is_empty:
+        return None
+    if isinstance(geom, Point):
+        return geom
+    if isinstance(geom, LineString):
+        return geom.interpolate(0.5, normalized=True)
+    if hasattr(geom, "geoms"):
+        for part in geom.geoms:
+            point = _representative_point_on_geometry(part)
+            if point is not None:
+                return point
+    centroid = geom.centroid
+    return centroid if isinstance(centroid, Point) and not centroid.is_empty else None
+
+
+def _center_point(row, center):
+    if center == "generator":
+        return Point(float(row["x"]), float(row["y"]))
+    if center == "centroid":
+        return row.geometry.centroid
+    raise ValueError("center must be either 'generator' or 'centroid'.")
+
+
+def build_connectivity(gdf: gpd.GeoDataFrame, center: str = "generator") -> gpd.GeoDataFrame:
+    """
+    Build a per-face connectivity report for a polygonal grid.
+
+    ``center="generator"`` uses the ``x`` and ``y`` columns and reports the
+    mathematical Voronoi-dual connectivity. ``center="centroid"`` uses polygon
+    centroids and reports MODFLOW-facing cell-center connectivity for exported
+    cells. ``angle`` is the connector-vs-shared-face angle in degrees, with an
+    ideal value of 90. ``ortho_error`` is the corresponding orthogonality error,
+    with an ideal value of 0. ``skewness`` is the fractional position along the
+    connector where the shared face crosses, with an ideal value of 0.5.
+    ``cell_id_1`` and ``cell_id_2`` are zero-based row positions in ``gdf`` and
+    are therefore unique even when the GeoDataFrame index is not. ``orig_index_1``
+    and ``orig_index_2`` preserve the input index for traceability. The active
+    geometry is ``shared_edge``; ``connector`` stores the center-to-center line.
+    """
+    if center not in {"generator", "centroid"}:
+        raise ValueError("center must be either 'generator' or 'centroid'.")
+
+    required = {"geometry"}
+    if center == "generator":
+        required.update({"x", "y"})
+    missing = required.difference(gdf.columns)
+    if missing:
+        raise ValueError(
+            f"build_connectivity missing required columns: {sorted(missing)}; "
+            f"required columns for center='{center}': {sorted(required)}"
+        )
+
+    if gdf.empty:
+        return _empty_connectivity(gdf.crs)
+
+    df = gdf.copy()
+    df["__cell_id"] = np.arange(len(df), dtype=np.int64)
+    df["__orig_index"] = df.index
+    df = df.reset_index(drop=True)
+
+    neighbors = gpd.sjoin(df, df, how="inner", predicate="touches")
+    pairs = neighbors[neighbors.index < neighbors.index_right].copy()
+
+    records = []
+    for left_idx, pair in pairs.iterrows():
+        right_idx = int(pair["index_right"])
+        left = df.loc[left_idx]
+        right = df.loc[right_idx]
+
+        shared_edge = _longest_line(left.geometry.intersection(right.geometry))
+        if shared_edge is None:
+            continue
+
+        center_1 = _center_point(left, center)
+        center_2 = _center_point(right, center)
+        if center_1.is_empty or center_2.is_empty:
+            continue
+
+        x1, y1 = float(center_1.x), float(center_1.y)
+        x2, y2 = float(center_2.x), float(center_2.y)
+        gx = x2 - x1
+        gy = y2 - y1
+        gmag = np.sqrt(gx * gx + gy * gy)
+        if gmag == 0:
+            continue
+
+        coords = list(shared_edge.coords)
+        if len(coords) < 2:
+            continue
+
+        ex = coords[-1][0] - coords[0][0]
+        ey = coords[-1][1] - coords[0][1]
+        emag = np.sqrt(ex * ex + ey * ey)
+        if emag == 0:
+            continue
+
+        cos_theta = abs(gx * ex + gy * ey) / (gmag * emag)
+        cos_theta = min(1.0, max(0.0, cos_theta))
+        angle = float(np.degrees(np.arccos(cos_theta)))
+        ortho_error = abs(90.0 - angle)
+
+        connector = LineString([(x1, y1), (x2, y2)])
+        crossing = connector.intersection(shared_edge)
+        point = _representative_point_on_geometry(crossing)
+        if point is None:
+            point = shared_edge.interpolate(0.5, normalized=True)
+        skewness = float(connector.project(point) / connector.length)
+
+        record = {
+            "cell_id_1": int(left["__cell_id"]),
+            "cell_id_2": int(right["__cell_id"]),
+            "orig_index_1": left["__orig_index"],
+            "orig_index_2": right["__orig_index"],
+            "center_mode": center,
+            "center_1": center_1,
+            "center_2": center_2,
+            "angle": angle,
+            "ortho_error": float(ortho_error),
+            "skewness": skewness,
+            "connector": connector,
+            "shared_edge": shared_edge,
+        }
+        if "node_id" in df.columns:
+            record["node_id_1"] = left["node_id"]
+            record["node_id_2"] = right["node_id"]
+        records.append(record)
+
+    if not records:
+        return _empty_connectivity(gdf.crs)
+
+    return gpd.GeoDataFrame(records, geometry="shared_edge", crs=gdf.crs)
+
+
+def _validate_connectivity_report(
+    connectivity: gpd.GeoDataFrame,
+    n_cells: int,
+    *,
+    require_ortho: bool = False,
+    require_skewness: bool = False,
+) -> None:
+    required = {"cell_id_1", "cell_id_2"}
+    if require_ortho:
+        required.add("ortho_error")
+    if require_skewness:
+        required.add("skewness")
+
+    missing = required.difference(connectivity.columns)
+    if missing:
+        raise ValueError(
+            f"connectivity missing required columns: {sorted(missing)}; "
+            f"required columns for requested metrics: {sorted(required)}"
+        )
+
+    if connectivity.empty:
+        return
+
+    cell_ids = pd.concat(
+        [connectivity["cell_id_1"], connectivity["cell_id_2"]],
+        ignore_index=True,
+    )
+    numeric_ids = pd.to_numeric(cell_ids, errors="coerce")
+    if numeric_ids.isna().any():
+        raise ValueError("connectivity cell_id_1/cell_id_2 must be integer row positions.")
+
+    int_ids = numeric_ids.astype(np.int64)
+    if not np.array_equal(numeric_ids.to_numpy(), int_ids.to_numpy()):
+        raise ValueError("connectivity cell_id_1/cell_id_2 must be integer row positions.")
+
+    if (int_ids < 0).any() or (int_ids >= n_cells).any():
+        raise ValueError(
+            "connectivity cell_id_1/cell_id_2 values must align to zero-based "
+            "row positions in the input GeoDataFrame."
+        )
+
+
+def _max_pair_metric_by_cell(connectivity: gpd.GeoDataFrame, metric: pd.Series, n_cells: int) -> np.ndarray:
+    values = np.zeros(n_cells, dtype=float)
+    if connectivity.empty:
+        return values
+
+    s1 = metric.groupby(connectivity["cell_id_1"]).max()
+    s2 = metric.groupby(connectivity["cell_id_2"]).max()
+    combined = pd.concat([s1, s2], axis=1).max(axis=1)
+    for cell_id, value in combined.items():
+        values[int(cell_id)] = float(value)
+    return values
 
 def calculate_orthogonality(gdf: gpd.GeoDataFrame) -> pd.Series:
     """
@@ -126,7 +363,12 @@ def calculate_orthogonality(gdf: gpd.GeoDataFrame) -> pd.Series:
     
     return final_series
 
-def calculate_mesh_quality(gdf: gpd.GeoDataFrame, calc_ortho: bool = False) -> gpd.GeoDataFrame:
+def calculate_mesh_quality(
+    gdf: gpd.GeoDataFrame,
+    calc_ortho: bool = False,
+    calc_skewness: bool = False,
+    connectivity: Optional[gpd.GeoDataFrame] = None,
+) -> gpd.GeoDataFrame:
     """
     Calculates a suite of geometric quality metrics for a Voronoi grid.
 
@@ -135,6 +377,13 @@ def calculate_mesh_quality(gdf: gpd.GeoDataFrame, calc_ortho: bool = False) -> g
             It is expected to have 'x' and 'y' columns for the generator points.
         calc_ortho (bool): If True, the orthogonality error will be calculated.
             This is a more expensive calculation and is disabled by default.
+        calc_skewness (bool): If True, the maximum per-cell skewness error
+            ``abs(pair_skewness - 0.5)`` will be calculated. Disabled by default.
+        connectivity (GeoDataFrame, optional): A precomputed report from
+            ``build_connectivity(gdf, center=...)``. It must include
+            ``cell_id_1`` and ``cell_id_2`` as zero-based row positions in
+            ``gdf`` plus ``ortho_error`` and/or ``skewness`` for the requested
+            metrics. When provided, it is reused for per-cell aggregation.
 
     Returns:
         gpd.GeoDataFrame: The input GeoDataFrame with added columns for each
@@ -154,7 +403,19 @@ def calculate_mesh_quality(gdf: gpd.GeoDataFrame, calc_ortho: bool = False) -> g
     # convex hull. A perfectly convex polygon has a convexity of 1.0.
     df['convexity'] = df['area'] / df.geometry.convex_hull.area
     
-    # 4. Generator-based metrics (require generator point coordinates).
+    connectivity_report = None
+    if connectivity is not None:
+        connectivity_report = connectivity
+        _validate_connectivity_report(
+            connectivity_report,
+            len(df),
+            require_ortho=calc_ortho,
+            require_skewness=calc_skewness,
+        )
+    elif calc_skewness and 'x' in df.columns and 'y' in df.columns:
+        connectivity_report = build_connectivity(df, center="generator")
+
+    # 4. Generator-based drift metrics (require generator point coordinates).
     if 'x' in df.columns and 'y' in df.columns:
         centroids = df.geometry.centroid
         dx = df['x'] - centroids.x
@@ -163,9 +424,27 @@ def calculate_mesh_quality(gdf: gpd.GeoDataFrame, calc_ortho: bool = False) -> g
         df['centroid_dist'] = np.sqrt(dx*dx + dy*dy)
         # A non-dimensional measure of the generator/centroid drift.
         df['drift_ratio'] = df['centroid_dist'] / np.sqrt(df['area'])
-        
-        if calc_ortho:
+
+    if calc_ortho:
+        if connectivity_report is not None and 'ortho_error' in connectivity_report.columns:
+            df['ortho_error'] = _max_pair_metric_by_cell(
+                connectivity_report,
+                connectivity_report['ortho_error'],
+                len(df),
+            )
+        elif 'x' in df.columns and 'y' in df.columns:
             df['ortho_error'] = calculate_orthogonality(df)
+
+    if calc_skewness:
+        if connectivity_report is None or connectivity_report.empty:
+            df['skewness'] = 0.0
+        else:
+            skew_error = (connectivity_report['skewness'] - 0.5).abs()
+            df['skewness'] = _max_pair_metric_by_cell(
+                connectivity_report,
+                skew_error,
+                len(df),
+            )
         
     return df
 
@@ -204,6 +483,8 @@ def summarize_quality(gdf: gpd.GeoDataFrame):
         metrics.append('drift_ratio')
     if 'ortho_error' in gdf.columns:
         metrics.append('ortho_error')
+    if 'skewness' in gdf.columns:
+        metrics.append('skewness')
         
     print("\n-- Internal Cells Statistics --")
     if not internal_df.empty:

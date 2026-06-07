@@ -67,6 +67,7 @@ class MeshGenerator:
         self.nodes = None
         self.node_tags = None
         self.zones_gdf = None
+        self.triangular_quality = None
         self.diagnostics = {}
 
     def _sanitize_coords(self, coords, *, min_spacing=1e-5, require_closed=False, min_points=2):
@@ -136,6 +137,65 @@ class MeshGenerator:
         if gmsh.is_initialized():
             gmsh.finalize()
             self.initialized = False
+
+    def _collect_triangular_quality(self):
+        """Collect gmsh 2D element quality metrics while the model is live."""
+        quality_columns = [
+            "minSICN",
+            "minDetJac",
+            "maxDetJac",
+            "minSJ",
+            "minSIGE",
+            "gamma",
+            "innerRadius",
+            "outerRadius",
+            "minIsotropy",
+            "angleShape",
+            "minEdge",
+            "maxEdge",
+        ]
+        metadata_columns = ["element_tag", "element_type", "element_name", "is_triangle"]
+        element_types, element_tags, _ = gmsh.model.mesh.getElements(dim=2)
+        if len(element_tags) == 0:
+            return pd.DataFrame(columns=metadata_columns + quality_columns)
+
+        frames = []
+        for element_type, tags_for_type in zip(element_types, element_tags):
+            tags = np.asarray(tags_for_type, dtype=np.int64)
+            if len(tags) == 0:
+                continue
+
+            element_name, _, _, _, _, _ = gmsh.model.mesh.getElementProperties(int(element_type))
+            qualities = {
+                "element_tag": tags,
+                "element_type": int(element_type),
+                "element_name": element_name,
+                "is_triangle": "triangle" in element_name.lower(),
+            }
+            for measure in quality_columns:
+                qualities[measure] = gmsh.model.mesh.getElementQualities(tags, measure)
+
+            frames.append(pd.DataFrame(qualities))
+
+        if not frames:
+            return pd.DataFrame(columns=metadata_columns + quality_columns)
+
+        return pd.concat(frames, ignore_index=True)[metadata_columns + quality_columns]
+
+    def get_triangular_quality(self):
+        """
+        Return cached gmsh 2D element quality metrics for the generated mesh.
+
+        The metrics are collected during ``generate()`` before gmsh is finalized,
+        so this method can be called after the normal mesh-generation lifecycle.
+        The report includes all 2D element types and marks triangle elements in
+        ``is_triangle`` so mixed tri/quad meshes are explicit.
+        """
+        if self.triangular_quality is None:
+            raise RuntimeError(
+                "Triangular quality is not available. Call MeshGenerator.generate() first."
+            )
+        return self.triangular_quality.copy()
 
     def _add_geometry(self, polygons_gdf, lines_gdf, points_gdf, launch_gmsh_gui=False):
         """
@@ -1435,6 +1495,7 @@ class MeshGenerator:
         Raises:
             Exception: If any step in the Gmsh process fails.
         """
+        self.triangular_quality = None
         self._initialize_gmsh()
         try:
             print("Transferring Geometry to Gmsh...")
@@ -1508,6 +1569,7 @@ class MeshGenerator:
                     # Smooths the mesh to relax gradients (reduces drift).
                     gmsh.model.mesh.optimize("Laplace2D",niter=1)
 
+            self.triangular_quality = self._collect_triangular_quality()
             
             if output_file:
                 gmsh.write(output_file)
