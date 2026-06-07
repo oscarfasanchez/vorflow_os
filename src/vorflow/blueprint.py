@@ -64,6 +64,8 @@ class ConceptualMesh:
         fields=None,
         embed=True,
         simplify_tolerance=None,
+        quad_buffer=False,
+        quad_buffer_thickness=1,
     ):
         """
         Adds a polygon feature, such as a model boundary or a refinement zone.
@@ -89,6 +91,10 @@ class ConceptualMesh:
                 Raises ValueError if negative. Boolean values are not supported.
             fields (list, optional): List of MeshField objects.
             embed (bool): If True, the polygon is embedded in the mesh. If False, it is used only for fields.
+            quad_buffer (bool): If True, creates an opt-in structured quad buffer
+                around the polygon boundary.
+            quad_buffer_thickness (int): Buffer thickness in local cell widths.
+                Supported values are 1 and 2.
         """
         if not geometry.is_valid:
             geometry = make_valid(geometry)
@@ -115,6 +121,9 @@ class ConceptualMesh:
         if dist_min is not None and dist_min < 0:
             raise ValueError(f"dist_min must be non-negative (or None). Got {dist_min}.")
 
+        if quad_buffer_thickness not in (1, 2):
+            raise ValueError("quad_buffer_thickness must be either 1 or 2.")
+
         if fields is None:
             fields = []
 
@@ -129,12 +138,15 @@ class ConceptualMesh:
                 "densify": densify,
                 "simplify_tolerance": simplify_tolerance,
                 'fields': fields,
-                'embed': embed
+                'embed': embed,
+                'quad_buffer': bool(quad_buffer),
+                'quad_buffer_thickness': int(quad_buffer_thickness),
             }
         )
 
     def add_line(self, geometry, line_id, resolution, snap_to_polygons=True, is_barrier=False,                 
-                  dist_min=None, dist_max=None, straddle_width=None, fields=None, embed=True, densify=True, simplify_tolerance=None):
+                  dist_min=None, dist_max=None, straddle_width=None, fields=None, embed=True, densify=True,
+                  simplify_tolerance=None, quad_buffer=False, quad_buffer_thickness=1):
         """
         Adds a line feature, such as a river, fault, or other linear boundary.
 
@@ -162,6 +174,10 @@ class ConceptualMesh:
             simplify_tolerance (float|int|None, optional): If a number > 0, simplifies the line with
                 this tolerance using Douglas-Peucker algorithm. If None or 0, no simplification is applied.
                 Raises ValueError if negative. Boolean values are not supported.
+            quad_buffer (bool): If True, creates an opt-in structured quad buffer
+                strip around the line instead of the lightweight straddle points.
+            quad_buffer_thickness (int): Buffer thickness in local cell widths.
+                Supported values are 1 and 2.
         """
         if not geometry.is_valid:
             geometry = make_valid(geometry)
@@ -177,6 +193,9 @@ class ConceptualMesh:
         if isinstance(densify, (int, float)) and not isinstance(densify, bool) and densify <= 0:
             raise ValueError(f"densify must be positive when specified as a float. Got {densify}.")
 
+        if quad_buffer_thickness not in (1, 2):
+            raise ValueError("quad_buffer_thickness must be either 1 or 2.")
+
         if fields is None:
             fields = []
         
@@ -191,7 +210,9 @@ class ConceptualMesh:
             'fields': fields,
             'embed': embed,
             'densify': densify,
-            'simplify_tolerance': simplify_tolerance
+            'simplify_tolerance': simplify_tolerance,
+            'quad_buffer': bool(quad_buffer),
+            'quad_buffer_thickness': int(quad_buffer_thickness),
         })
 
     def add_point(self, geometry, point_id, resolution, dist_min=None, dist_max=None, fields=None, embed=True, simplify_tolerance=None):
@@ -357,6 +378,8 @@ class ConceptualMesh:
                     "simplify_tolerance",
                     "fields",
                     "embed",
+                    "quad_buffer",
+                    "quad_buffer_thickness",
                 ],
                 crs=self.crs,
             )
@@ -573,6 +596,8 @@ class ConceptualMesh:
                     'embed',
                     'densify',
                     'simplify_tolerance',
+                    'quad_buffer',
+                    'quad_buffer_thickness',
                 ],
                 crs=self.crs,
             )
@@ -626,6 +651,8 @@ class ConceptualMesh:
                     'embed',
                     'densify',
                     'simplify_tolerance',
+                    'quad_buffer',
+                    'quad_buffer_thickness',
                 ]
                 self.clean_polygons = self.clean_polygons.reindex(columns=polygon_columns)
                 field_only_gdf = field_only_gdf.reindex(columns=polygon_columns)

@@ -4,8 +4,8 @@ import math
 import numpy as np
 import pandas as pd
 import geopandas as gpd
-from shapely.geometry import Point, LineString, Polygon
-from shapely.ops import unary_union
+from shapely.geometry import Point, LineString, MultiLineString, MultiPolygon, Polygon
+from shapely.ops import linemerge, unary_union
 from shapely.validation import make_valid
 from .fields import MeshField, ThresholdField, ExponentialField, AutoLinearField, AutoExponentialField, ConstantField
 
@@ -428,6 +428,146 @@ class MeshGenerator:
                 return None, []
 
             return s_tag, boundary_curve_tags
+
+        def row_bool(row, column, default=False):
+            val = row.get(column, default)
+            if pd.isna(val):
+                return bool(default)
+            return (val is True) or (str(val).lower() in ['true', '1', 'yes'])
+
+        def positive_number(value):
+            if value is None or pd.isna(value):
+                return None
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                return None
+            return value if value > 0 else None
+
+        def feature_lc(row):
+            lc = positive_number(row.get('lc'))
+            if lc is None:
+                lc = positive_number(self.background_lc)
+            return max(lc if lc is not None else 10.0, 0.001)
+
+        def quad_buffer_thickness(row):
+            value = row.get('quad_buffer_thickness', 1)
+            if value is None or pd.isna(value):
+                return 1
+            value = int(value)
+            if value not in (1, 2):
+                raise ValueError("quad_buffer_thickness must be either 1 or 2.")
+            return value
+
+        def polygon_parts(geom):
+            if geom.is_empty:
+                return []
+            if isinstance(geom, Polygon):
+                return [geom]
+            if isinstance(geom, MultiPolygon):
+                return list(geom.geoms)
+            if hasattr(geom, "geoms"):
+                parts = []
+                for part in geom.geoms:
+                    parts.extend(polygon_parts(part))
+                return parts
+            return []
+
+        def line_parts(geom):
+            if geom.is_empty:
+                return []
+            if isinstance(geom, LineString):
+                return [geom]
+            if isinstance(geom, MultiLineString):
+                return [part for part in geom.geoms if part.length > 0]
+            if hasattr(geom, "geoms"):
+                parts = []
+                for part in geom.geoms:
+                    parts.extend(line_parts(part))
+                return parts
+            return []
+
+        def coerce_offset_line(geom):
+            if isinstance(geom, LineString):
+                return geom
+            if isinstance(geom, MultiLineString):
+                merged = linemerge(geom)
+                if isinstance(merged, LineString):
+                    return merged
+                lines = [part for part in merged.geoms if part.length > 0] if hasattr(merged, "geoms") else []
+                return max(lines, key=lambda line: line.length) if lines else None
+            return None
+
+        def domain_union_geometry():
+            if polygons_gdf is None or polygons_gdf.empty:
+                return None
+            embedded = []
+            for _, poly_row in polygons_gdf.iterrows():
+                if is_embedded(poly_row):
+                    embedded.append(poly_row.geometry)
+            if not embedded:
+                return None
+            return make_valid(unary_union(embedded))
+
+        domain_geom_for_buffers = domain_union_geometry()
+
+        def add_structured_buffer_surface(buffer_geom, feature_id, input_type):
+            created = []
+            if domain_geom_for_buffers is not None and not domain_geom_for_buffers.is_empty:
+                buffer_geom = buffer_geom.intersection(domain_geom_for_buffers)
+            buffer_geom = make_valid(buffer_geom)
+            for poly in polygon_parts(buffer_geom):
+                if poly.is_empty or poly.area <= 0:
+                    continue
+                s_tag, boundary_curve_tags = create_polygon_surface(poly)
+                if s_tag is None:
+                    continue
+                key = to_key(2, s_tag)
+                input_tag_info[key] = {'type': input_type, 'id': feature_id}
+                embedded_surface_tags.append(key)
+                created.append((key, boundary_curve_tags))
+            return created
+
+        def create_line_structured_buffer(row):
+            line = row.geometry
+            lc = feature_lc(row)
+            thickness = quad_buffer_thickness(row)
+            offset = thickness * lc / 2.0
+            created = []
+            for part in line_parts(line):
+                if part.length <= 0:
+                    continue
+                pos = coerce_offset_line(
+                    part.offset_curve(offset, quad_segs=1, join_style=2, mitre_limit=5.0)
+                )
+                neg = coerce_offset_line(
+                    part.offset_curve(-offset, quad_segs=1, join_style=2, mitre_limit=5.0)
+                )
+                if pos is None or neg is None:
+                    if self.verbosity > 0:
+                        print(f"Warning: Skipping structured buffer for line {row.get('line_id', '?')} after offset split.")
+                    continue
+
+                pos_coords = self._sanitize_coords(list(pos.coords), min_points=2)
+                neg_coords = self._sanitize_coords(list(neg.coords), min_points=2)
+                if len(pos_coords) < 2 or len(neg_coords) < 2:
+                    continue
+
+                strip = Polygon(pos_coords + list(reversed(neg_coords)))
+                if not strip.is_valid:
+                    strip = make_valid(strip)
+                created.extend(add_structured_buffer_surface(strip, int(row.name), 'structured_buffer_surf'))
+            return created
+
+        def create_polygon_structured_buffer(row):
+            geom = row.geometry
+            lc = feature_lc(row)
+            thickness = quad_buffer_thickness(row)
+            offset = thickness * lc / 2.0
+            band = geom.boundary.buffer(offset, cap_style=2, join_style=2, mitre_limit=5.0)
+            return add_structured_buffer_surface(band, int(row.name), 'structured_buffer_surf')
+
+        structured_buffer_specs = {}
         
         # Add all point features to the Gmsh model first.
         for idx, row in points_gdf.iterrows():
@@ -444,13 +584,15 @@ class MeshGenerator:
         # meshing of the barrier features.
         barrier_buffers = []
         for idx, row in lines_gdf.iterrows():
-            val = row.get('is_barrier', False)
-            is_barrier = (val is True) or (str(val).lower() in ['true', '1', 'yes'])
-            straddle = row.get('straddle_width')
+            is_barrier = row_bool(row, 'is_barrier', False)
+            quad_buffer = row_bool(row, 'quad_buffer', False)
+            straddle = positive_number(row.get('straddle_width'))
             
-            if is_barrier: 
-                lc = max(row.get('lc', 10.0), 0.001)
-                if straddle and straddle > 0:
+            if is_barrier or quad_buffer or straddle:
+                lc = feature_lc(row)
+                if quad_buffer:
+                    eps = quad_buffer_thickness(row) * lc / 2.0
+                elif straddle:
                     eps = straddle / 2.0
                 else:
                     eps = lc * 0.20
@@ -472,16 +614,28 @@ class MeshGenerator:
 
         # Add line features to the model, handling barriers and standard lines differently.
         for idx, row in lines_gdf.iterrows():
-            val = row.get('is_barrier', False)
-            is_barrier = (val is True) or (str(val).lower() in ['true', '1', 'yes'])
-            straddle = row.get('straddle_width')
-            lc = max(row.get('lc', 10.0), 0.001)
+            is_barrier = row_bool(row, 'is_barrier', False)
+            quad_buffer = row_bool(row, 'quad_buffer', False)
+            straddle = positive_number(row.get('straddle_width'))
+            lc = feature_lc(row)
             
-            use_virtual_straddle = is_barrier or (straddle is not None and straddle > 0)
+            use_structured_buffer = quad_buffer
+            use_virtual_straddle = not use_structured_buffer and (is_barrier or straddle is not None)
 
             embedded = is_embedded(row)
             
-            if use_virtual_straddle:
+            if use_structured_buffer:
+                created = create_line_structured_buffer(row)
+                if created:
+                    structured_buffer_specs[int(idx)] = {
+                        'lc': lc,
+                        'thickness': quad_buffer_thickness(row),
+                        'kind': 'line',
+                    }
+                elif self.verbosity > 0:
+                    print(f"Warning: Structured buffer requested for line {idx}, but no buffer surface was created.")
+
+            elif use_virtual_straddle:
                 # For barriers or "straddle" lines, we don't add the line itself.
                 # Instead, we place pairs of points along the line's path. These
                 # points will become nodes in the triangular mesh, forcing the
@@ -491,7 +645,7 @@ class MeshGenerator:
                 num_segments = int(max(1, np.ceil(length / lc)))
                 distances = np.linspace(0, length, num_segments + 1)
                 
-                if straddle and straddle > 0:
+                if straddle:
                     epsilon = straddle / 2.0
                 else:
                     epsilon = lc * 0.20
@@ -620,6 +774,17 @@ class MeshGenerator:
                         pending_nonembedded_polys.append((int(idx), poly))
                         continue
 
+                    if row_bool(row, 'quad_buffer', False):
+                        created = create_polygon_structured_buffer(row)
+                        if created:
+                            structured_buffer_specs[int(idx)] = {
+                                'lc': feature_lc(row),
+                                'thickness': quad_buffer_thickness(row),
+                                'kind': 'polygon',
+                            }
+                        elif self.verbosity > 0:
+                            print(f"Warning: Structured buffer requested for polygon {idx}, but no buffer surface was created.")
+
                     s_tag, boundary_curve_tags = create_polygon_surface(poly)
                     if s_tag is None:
                         print(f"Warning: Skipping degenerate polygon {idx}")
@@ -657,6 +822,7 @@ class MeshGenerator:
                 'lines': nonembedded_line_tags,
                 'surfaces': nonembedded_surface_tags,
                 'straddle_surfs': {},
+                'structured_buffer_surfs': {},
                 'poly_curves': nonembedded_poly_curve_tags,
             }
 
@@ -973,6 +1139,7 @@ class MeshGenerator:
             'lines': dict(nonembedded_line_tags),
             'surfaces': dict(nonembedded_surface_tags),
             'straddle_surfs': {},
+            'structured_buffer_surfs': {},
             'poly_curves': dict(nonembedded_poly_curve_tags),
         }
         
@@ -1011,6 +1178,11 @@ class MeshGenerator:
                     if feat_id not in final_map['straddle_surfs']:
                         final_map['straddle_surfs'][feat_id] = []
                     final_map['straddle_surfs'][feat_id].extend(res_tags)
+
+                elif kind == 'structured_buffer_surf':
+                    if feat_id not in final_map['structured_buffer_surfs']:
+                        final_map['structured_buffer_surfs'][feat_id] = []
+                    final_map['structured_buffer_surfs'][feat_id].extend(res_tags)
             else:
                 print(f"Warning: Tag {key} lost during fragmentation mapping.")
 
@@ -1037,6 +1209,58 @@ class MeshGenerator:
                 print(f"  [DIAG] Empty point feat_ids: {sorted(_empty_feats)}")
             if _stale_feats:
                 print(f"  [DIAG] Stale point (feat_id, tag): {_stale_feats}")
+
+        def _entity_length(dim, tag):
+            try:
+                return float(gmsh.model.occ.getMass(dim, int(tag)))
+            except Exception:
+                try:
+                    return float(gmsh.model.getMass(dim, int(tag)))
+                except Exception:
+                    return None
+
+        structured_surfaces = final_map.get('structured_buffer_surfs', {})
+        if structured_surfaces:
+            gmsh.option.setNumber("Mesh.RecombinationAlgorithm", 0)
+            applied = 0
+            for feat_id, dimtags in structured_surfaces.items():
+                spec = structured_buffer_specs.get(int(feat_id), {})
+                lc = max(float(spec.get('lc', self.background_lc or 1.0)), 0.001)
+                for dt in dimtags:
+                    if not (isinstance(dt, (tuple, list)) and len(dt) >= 2 and int(dt[0]) == 2):
+                        continue
+                    surf_tag = int(dt[1])
+                    try:
+                        boundary = gmsh.model.getBoundary([(2, surf_tag)], oriented=False, recursive=False)
+                    except Exception:
+                        boundary = []
+
+                    curve_tags = sorted({int(tag) for dim, tag in boundary if int(dim) == 1})
+                    for curve_tag in curve_tags:
+                        length = _entity_length(1, curve_tag)
+                        if length is None or not math.isfinite(length) or length <= 0:
+                            continue
+                        divisions = max(2, int(round(length / lc)) + 1)
+                        try:
+                            gmsh.model.mesh.setTransfiniteCurve(curve_tag, divisions)
+                        except Exception:
+                            pass
+
+                    if len(curve_tags) == 4:
+                        try:
+                            gmsh.model.mesh.setTransfiniteSurface(surf_tag)
+                        except Exception:
+                            pass
+                    try:
+                        gmsh.model.mesh.setRecombine(2, surf_tag)
+                        gmsh.model.mesh.setAlgorithm(2, surf_tag, 8)
+                        applied += 1
+                    except Exception as e:
+                        if self.verbosity > 0:
+                            print(f"Warning: Could not apply structured buffer meshing to surface {surf_tag}: {e}")
+
+            if self.verbosity > 0:
+                print(f"Applied structured quad-buffer meshing to {applied} surface(s).")
 
         return final_map
     
@@ -1262,6 +1486,8 @@ class MeshGenerator:
                 # Straddle/barrier lines may have been converted into points.
                 elif fid in gmsh_map.get('points', {}):
                     tags_dict['points'].extend(extract_tags(gmsh_map['points'][fid]))
+                elif fid in gmsh_map.get('structured_buffer_surfs', {}):
+                    tags_dict['surfaces'].extend(extract_tags(gmsh_map['structured_buffer_surfs'][fid]))
 
             # Surfaces
             for fid in feature_ids_by_geom.get('surfaces', []):

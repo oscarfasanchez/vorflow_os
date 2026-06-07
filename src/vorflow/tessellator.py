@@ -314,8 +314,13 @@ class VoronoiTessellator:
             mask_no_straddle = (self.cm.clean_lines['straddle_width'].isna()) | (self.cm.clean_lines['straddle_width'] <= 0)
         else:
             mask_no_straddle = True
+
+        if 'quad_buffer' in self.cm.clean_lines.columns:
+            mask_no_quad_buffer = ~self.cm.clean_lines['quad_buffer'].fillna(False).astype(bool)
+        else:
+            mask_no_quad_buffer = True
             
-        barriers_to_cut = self.cm.clean_lines[mask_barrier & mask_no_straddle]
+        barriers_to_cut = self.cm.clean_lines[mask_barrier & mask_no_straddle & mask_no_quad_buffer]
         
         if barriers_to_cut.empty:
             return grid_gdf
