@@ -8,7 +8,16 @@ from shapely.ops import unary_union, split
 from shapely.validation import make_valid
 
 class VoronoiTessellator:
-    def __init__(self, mesh_generator, conceptual_mesh,clip_to_boundary=True):
+    def __init__(
+        self,
+        mesh_generator,
+        conceptual_mesh,
+        clip_to_boundary=True,
+        boundary_centering="clip",
+        boundary_inset_fraction=0.5,
+        boundary_corner_angle=135.0,
+        boundary_tolerance=None,
+    ):
         """
         Initializes the Voronoi tessellator.
 
@@ -23,7 +32,26 @@ class VoronoiTessellator:
                 domain boundaries, and feature information.
             clip_to_boundary (bool): If True, the final Voronoi grid will be
                 clipped to the domain boundary defined in the conceptual model.
+            boundary_centering (str): ``"clip"`` keeps the historical behavior.
+                ``"inset_mirror"`` shifts boundary generators inward and adds
+                mirrored outside ghosts so boundary-cell centers move off the
+                clipped face.
+            boundary_inset_fraction (float): Fraction of local boundary-node
+                spacing used for the inward shift in ``"inset_mirror"`` mode.
+            boundary_corner_angle (float): Boundary vertices with a local angle
+                below this value are treated as sharp corners and left unchanged.
+            boundary_tolerance (float, optional): Distance tolerance used to
+                classify generator nodes as boundary nodes.
         """
+        if boundary_centering not in {"clip", "inset_mirror"}:
+            raise ValueError("boundary_centering must be either 'clip' or 'inset_mirror'.")
+        if boundary_inset_fraction <= 0:
+            raise ValueError("boundary_inset_fraction must be positive.")
+        if boundary_corner_angle <= 0 or boundary_corner_angle >= 180:
+            raise ValueError("boundary_corner_angle must be between 0 and 180 degrees.")
+        if boundary_tolerance is not None and boundary_tolerance < 0:
+            raise ValueError("boundary_tolerance must be non-negative when provided.")
+
         self.mg = mesh_generator
         self.cm = conceptual_mesh
         self.voronoi_gdf = None
@@ -32,6 +60,178 @@ class VoronoiTessellator:
         self.node_tags = mesh_generator.node_tags
         self.zones_gdf = mesh_generator.zones_gdf
         self.clip_to_boundary = clip_to_boundary
+        self.boundary_centering = boundary_centering
+        self.boundary_inset_fraction = float(boundary_inset_fraction)
+        self.boundary_corner_angle = float(boundary_corner_angle)
+        self.boundary_tolerance = boundary_tolerance
+
+    def _domain_geometry(self):
+        """Return the current meshing domain geometry."""
+        if not self.cm.clean_polygons.empty:
+            domain_geom = unary_union(self.cm.clean_polygons.geometry)
+            if not domain_geom.is_valid:
+                domain_geom = make_valid(domain_geom)
+            return domain_geom
+        if hasattr(self.cm, 'domain_boundary') and self.cm.domain_boundary:
+            domain_geom = self.cm.domain_boundary
+            if not domain_geom.is_valid:
+                domain_geom = make_valid(domain_geom)
+            return domain_geom
+        return None
+
+    def _boundary_tolerance(self, nodes, domain_geom):
+        if self.boundary_tolerance is not None:
+            return float(self.boundary_tolerance)
+        minx, miny, maxx, maxy = domain_geom.bounds
+        domain_scale = max(maxx - minx, maxy - miny, 1.0)
+        node_scale = 1.0
+        if len(nodes) > 0:
+            node_scale = max(np.ptp(nodes[:, 0]), np.ptp(nodes[:, 1]), 1.0)
+        return max(domain_scale, node_scale) * 1e-8
+
+    def _ring_angle_at_point(self, point, domain_geom, tolerance):
+        """Return the local ring angle for a boundary vertex, if matched."""
+        polygons = []
+        if isinstance(domain_geom, Polygon):
+            polygons = [domain_geom]
+        elif isinstance(domain_geom, MultiPolygon):
+            polygons = list(domain_geom.geoms)
+
+        for poly in polygons:
+            rings = [poly.exterior, *poly.interiors]
+            for ring in rings:
+                coords = list(ring.coords)
+                if len(coords) < 4:
+                    continue
+                open_coords = coords[:-1]
+                for i, coord in enumerate(open_coords):
+                    if Point(coord).distance(point) > tolerance:
+                        continue
+                    prev_coord = np.asarray(open_coords[i - 1], dtype=float)
+                    current = np.asarray(coord, dtype=float)
+                    next_coord = np.asarray(open_coords[(i + 1) % len(open_coords)], dtype=float)
+                    v1 = prev_coord - current
+                    v2 = next_coord - current
+                    mag1 = np.linalg.norm(v1)
+                    mag2 = np.linalg.norm(v2)
+                    if mag1 == 0 or mag2 == 0:
+                        return None
+                    cos_theta = np.dot(v1, v2) / (mag1 * mag2)
+                    cos_theta = min(1.0, max(-1.0, cos_theta))
+                    return float(np.degrees(np.arccos(cos_theta)))
+        return None
+
+    def _is_sharp_boundary_corner(self, point, domain_geom, tolerance):
+        angle = self._ring_angle_at_point(point, domain_geom, tolerance)
+        return angle is not None and angle < self.boundary_corner_angle
+
+    def _local_boundary_tangent(self, boundary, point, spacing):
+        distance = boundary.project(point)
+        eps = max(spacing * 0.25, boundary.length * 1e-9, 1e-9)
+        before = max(0.0, distance - eps)
+        after = min(boundary.length, distance + eps)
+        if before == after:
+            before = max(0.0, distance - 1e-9)
+            after = min(boundary.length, distance + 1e-9)
+        p1 = boundary.interpolate(before)
+        p2 = boundary.interpolate(after)
+        tangent = np.array([p2.x - p1.x, p2.y - p1.y], dtype=float)
+        norm = np.linalg.norm(tangent)
+        if norm == 0:
+            return None
+        return tangent / norm
+
+    def _inward_normal(self, domain_geom, point, tangent, offset):
+        normals = [
+            np.array([-tangent[1], tangent[0]], dtype=float),
+            np.array([tangent[1], -tangent[0]], dtype=float),
+        ]
+        probe_distance = max(offset * 0.5, 1e-9)
+        for normal in normals:
+            probe = Point(point.x + normal[0] * probe_distance, point.y + normal[1] * probe_distance)
+            if domain_geom.covers(probe):
+                return normal
+        return None
+
+    def _prepare_boundary_centered_nodes(self, nodes, node_tags):
+        """
+        Shift non-corner boundary nodes inward and add mirrored outside ghosts.
+
+        Returns prepared nodes, prepared tags, and a metadata frame keyed by
+        node_id. Tags only cover real nodes; appended ghosts receive -1 in
+        _build_raw_voronoi.
+        """
+        if self.boundary_centering != "inset_mirror":
+            metadata = pd.DataFrame(
+                {
+                    "node_id": node_tags,
+                    "source_x": nodes[:, 0],
+                    "source_y": nodes[:, 1],
+                    "boundary_centering": "clip",
+                    "boundary_inset": 0.0,
+                    "boundary_centered": False,
+                }
+            )
+            return nodes, node_tags, np.empty((0, 2)), metadata
+
+        domain_geom = self._domain_geometry()
+        if domain_geom is None or domain_geom.is_empty:
+            raise RuntimeError(
+                "boundary_centering='inset_mirror' requires a generated domain geometry."
+            )
+
+        boundary = domain_geom.boundary
+        tolerance = self._boundary_tolerance(nodes, domain_geom)
+        points = [Point(float(x), float(y)) for x, y in nodes]
+        boundary_mask = np.array([boundary.distance(point) <= tolerance for point in points])
+        boundary_indices = np.flatnonzero(boundary_mask)
+
+        prepared = nodes.astype(float, copy=True)
+        ghost_nodes = []
+        records = []
+
+        if len(boundary_indices) > 1:
+            boundary_xy = nodes[boundary_indices]
+            distances = np.linalg.norm(
+                boundary_xy[:, None, :] - boundary_xy[None, :, :],
+                axis=2,
+            )
+            distances[distances == 0.0] = np.nan
+            nearest_spacing = np.nanmin(distances, axis=1)
+            spacing_by_index = {
+                int(idx): float(spacing)
+                for idx, spacing in zip(boundary_indices, nearest_spacing)
+                if not np.isnan(spacing) and spacing > 0
+            }
+        else:
+            spacing_by_index = {}
+
+        for i, (node, tag, point) in enumerate(zip(nodes, node_tags, points)):
+            centered = False
+            inset = 0.0
+            if i in spacing_by_index and not self._is_sharp_boundary_corner(point, domain_geom, tolerance):
+                spacing = spacing_by_index[i]
+                inset = spacing * self.boundary_inset_fraction
+                tangent = self._local_boundary_tangent(boundary, point, spacing)
+                normal = None if tangent is None else self._inward_normal(domain_geom, point, tangent, inset)
+                if normal is not None:
+                    prepared[i] = node + normal * inset
+                    ghost_nodes.append(node - normal * inset)
+                    centered = True
+
+            records.append(
+                {
+                    "node_id": tag,
+                    "source_x": float(node[0]),
+                    "source_y": float(node[1]),
+                    "boundary_centering": "inset_mirror" if centered else "clip",
+                    "boundary_inset": float(inset if centered else 0.0),
+                    "boundary_centered": bool(centered),
+                }
+            )
+
+        ghosts = np.asarray(ghost_nodes, dtype=float) if ghost_nodes else np.empty((0, 2))
+        return prepared, node_tags, ghosts, pd.DataFrame(records)
 
     def _build_raw_voronoi(self, nodes, node_tags):
         """
@@ -207,6 +407,12 @@ class VoronoiTessellator:
         
         print(f"Extracting {len(self.nodes)} Nodes from Gmsh...")
         nodes, tags = self.nodes, self.node_tags
+        nodes = np.asarray(nodes, dtype=float)
+        tags = np.asarray(tags)
+        if len(tags) != len(nodes):
+            raise ValueError("MeshGenerator nodes and node_tags must have the same length.")
+
+        nodes, tags, boundary_ghost_nodes, node_metadata = self._prepare_boundary_centered_nodes(nodes, tags)
         
         # To create a bounded Voronoi diagram from a finite set of points, a common
         # technique is to add "ghost" nodes far outside the area of interest. The
@@ -223,7 +429,7 @@ class VoronoiTessellator:
             [minx - buffer, maxy + buffer]
         ])
         
-        combined_nodes = np.vstack([nodes, ghost_nodes])
+        combined_nodes = np.vstack([nodes, boundary_ghost_nodes, ghost_nodes])
         
         print("Computing Mathematical Voronoi...")
         raw_gdf = self._build_raw_voronoi(combined_nodes, tags)
@@ -239,13 +445,8 @@ class VoronoiTessellator:
         
         if self.clip_to_boundary:
             print("Clipping to Domain Boundary...")
-            if not self.cm.clean_polygons.empty:
-                domain_geom = unary_union(self.cm.clean_polygons.geometry)
-                if not domain_geom.is_valid:
-                    domain_geom = make_valid(domain_geom)
-            elif hasattr(self.cm, 'domain_boundary') and self.cm.domain_boundary:
-                domain_geom = self.cm.domain_boundary
-            else:
+            domain_geom = self._domain_geometry()
+            if domain_geom is None:
                 print("Error: No domain geometry found (no polygons).")
                 return gpd.GeoDataFrame()
 
@@ -294,6 +495,12 @@ class VoronoiTessellator:
             on='node_id',
             how='left'
         )
+        if self.boundary_centering == "inset_mirror":
+            zoned_grid = zoned_grid.merge(
+                node_metadata,
+                on="node_id",
+                how="left",
+            )
         
         print(f"  -> Zones Assigned: {len(zoned_grid)}")
         
