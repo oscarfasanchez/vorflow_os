@@ -516,3 +516,183 @@ def test_quad_buffer_thickness_is_validated():
             quad_buffer=True,
             quad_buffer_thickness=0,
         )
+
+
+def _crossing_line_and_band(line_lc=1.0, poly_z_order=0):
+    """A horizontal quad-buffered line crossing a quad-buffered polygon band.
+
+    The domain is given z_order=-1 so the inner zone (z_order=poly_z_order,
+    defaulting to 0) survives overlap resolution while keeping a z_order equal to
+    the line's default 0 -- letting the finer-lc tie-break decide the winner.
+    """
+    cm = ConceptualMesh(crs=None)
+    cm.add_polygon(box(0, 0, 12, 10), zone_id="domain", resolution=1.0, z_order=-1, densify=True)
+    cm.add_polygon(
+        Polygon([(4, 3), (8, 3), (8, 7), (4, 7)]),
+        zone_id="inner",
+        resolution=1.0,
+        z_order=poly_z_order,
+        densify=True,
+        quad_buffer=True,
+        quad_buffer_thickness=1,
+    )
+    cm.add_line(
+        LineString([(0, 5), (12, 5)]),
+        line_id="fault",
+        resolution=line_lc,
+        quad_buffer=True,
+        quad_buffer_thickness=1,
+    )
+    clean_polys, clean_lines, clean_points = cm.generate()
+    mesher = MeshGenerator(background_lc=1.5, verbosity=0, smoothing_steps=0, optimization_cycles=0)
+    return cm, mesher, (clean_polys, clean_lines, clean_points)
+
+
+def test_crossing_priority_finer_lc_wins():
+    # The line (lc=0.5) is finer than the band (lc=1.0), so it wins the priority
+    # and stays continuous; the band is the one trimmed at the crossing.
+    _, mesher, clean = _crossing_line_and_band(line_lc=0.5)
+    with pytest.warns(UserWarning, match=r"polygon feature \d+ crosses a higher-priority"):
+        assert mesher.generate(*clean)
+    quads = mesher.get_element_grid("quads")
+    # The finer line strip runs continuously through the band region at y=5.
+    line_row = quads[quads["centroid_y"].sub(5).abs() < 0.4]
+    assert not line_row[line_row["centroid_x"].sub(6).abs() < 0.6].empty
+
+
+def test_crossing_priority_z_order_override():
+    # Same geometry, but z_order=10 on the polygon flips the winner: now the
+    # band stays continuous and the line is trimmed.
+    _, mesher, clean = _crossing_line_and_band(line_lc=1.0, poly_z_order=10)
+    with pytest.warns(UserWarning, match=r"line feature \d+ crosses a higher-priority"):
+        assert mesher.generate(*clean)
+    # Disjoint tiling is preserved regardless of which feature wins.
+    assert abs(mesher.get_element_grid().geometry.area.sum() - 120.0) < 0.01
+
+
+def test_winner_strip_stays_transfinite_through_crossing():
+    # Two equal quad buffers cross; the first-added (winning) horizontal strip
+    # must keep its transfinite structure -- only the trimmed vertical loser may
+    # degrade to recombine-only.
+    cm = ConceptualMesh(crs=None)
+    cm.add_polygon(box(0, 0, 12, 8), zone_id="domain", resolution=1.0, densify=True)
+    # Interior winner (does not touch the domain boundary, so any degradation
+    # would come from the crossing, not boundary end caps).
+    cm.add_line(
+        LineString([(1, 4), (11, 4)]),
+        line_id="winner",
+        resolution=1.0,
+        quad_buffer=True,
+        quad_buffer_thickness=1,
+    )
+    cm.add_line(
+        LineString([(6, 0), (6, 8)]),
+        line_id="loser",
+        resolution=1.0,
+        quad_buffer=True,
+        quad_buffer_thickness=1,
+    )
+    clean_polys, clean_lines, clean_points = cm.generate()
+    mesher = MeshGenerator(background_lc=1.5, verbosity=0, smoothing_steps=0, optimization_cycles=0)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert mesher.generate(clean_polys, clean_lines, clean_points)
+    winner_degraded = [
+        w for w in caught
+        if ("transfinite" in str(w.message) or "recombine-only" in str(w.message))
+        and "('line', 0)" in str(w.message)
+    ]
+    assert not winner_degraded, [str(w.message) for w in winner_degraded]
+    quads = mesher.get_element_grid("quads")
+    winner_row = quads[quads["centroid_y"].sub(4).abs() < 0.5]
+    # Continuous structured row through the crossing at x=6.
+    assert not winner_row[winner_row["centroid_x"].sub(6).abs() < 0.6].empty
+
+
+def test_partial_crossing_t_junction_records_refinement():
+    # A vertical buffer that terminates ON a horizontal buffer (a T-junction)
+    # must mesh cleanly, conserve area, and register a crossing refinement disk.
+    cm = ConceptualMesh(crs=None)
+    cm.add_polygon(box(0, 0, 12, 8), zone_id="domain", resolution=1.0, densify=True)
+    cm.add_line(
+        LineString([(0, 4), (12, 4)]),
+        line_id="trunk",
+        resolution=1.0,
+        quad_buffer=True,
+        quad_buffer_thickness=1,
+    )
+    cm.add_line(
+        LineString([(6, 0), (6, 4)]),
+        line_id="branch",
+        resolution=1.0,
+        quad_buffer=True,
+        quad_buffer_thickness=1,
+    )
+    clean_polys, clean_lines, clean_points = cm.generate()
+    mesher = MeshGenerator(background_lc=1.5, verbosity=0, smoothing_steps=0, optimization_cycles=0)
+    assert mesher.generate(clean_polys, clean_lines, clean_points)
+    assert abs(mesher.get_element_grid().geometry.area.sum() - 96.0) < 0.01
+    assert len(mesher._quad_buffer_crossings) >= 1
+
+
+def test_tangential_overlap_drops_sliver():
+    # A loser strip overlapping the winner's corridor at a shallow offset leaves
+    # a thin remnant that must be dropped (not meshed as a sliver surface).
+    cm = ConceptualMesh(crs=None)
+    cm.add_polygon(box(0, 0, 12, 8), zone_id="domain", resolution=1.0, densify=True)
+    cm.add_line(
+        LineString([(0, 4), (12, 4)]),
+        line_id="winner",
+        resolution=1.0,
+        quad_buffer=True,
+        quad_buffer_thickness=1,
+    )
+    cm.add_line(
+        LineString([(0, 4.8), (12, 4.8)]),
+        line_id="loser",
+        resolution=1.0,
+        quad_buffer=True,
+        quad_buffer_thickness=1,
+    )
+    clean_polys, clean_lines, clean_points = cm.generate()
+    mesher = MeshGenerator(background_lc=1.5, verbosity=0, smoothing_steps=0, optimization_cycles=0)
+    with pytest.warns(UserWarning, match=r"dropped \d+ sliver piece"):
+        assert mesher.generate(clean_polys, clean_lines, clean_points)
+
+
+def test_crossing_refinement_limits_size_jump():
+    # With a coarse background, the trimmed gap would fill with large triangles
+    # next to the dense strip rows. The Ball refinement field pins it to the
+    # feature size, so elements near the crossing stay close to lc, not
+    # background_lc.
+    lc = 1.0
+    cm = ConceptualMesh(crs=None)
+    cm.add_polygon(box(0, 0, 12, 10), zone_id="domain", resolution=lc, densify=True)
+    cm.add_polygon(
+        Polygon([(4, 3), (8, 3), (8, 7), (4, 7)]),
+        zone_id="inner",
+        resolution=lc,
+        z_order=1,
+        densify=True,
+        quad_buffer=True,
+        quad_buffer_thickness=1,
+    )
+    cm.add_line(
+        LineString([(0, 5), (12, 5)]),
+        line_id="fault",
+        resolution=lc,
+        quad_buffer=True,
+        quad_buffer_thickness=1,
+    )
+    clean_polys, clean_lines, clean_points = cm.generate()
+    mesher = MeshGenerator(background_lc=3.0, verbosity=0, smoothing_steps=0, optimization_cycles=0)
+    assert mesher.generate(clean_polys, clean_lines, clean_points)
+    assert len(mesher._quad_buffer_crossings) >= 1
+
+    grid = mesher.get_element_grid()
+    centroids = grid.geometry.centroid
+    # Around the left crossing point (4, 5), elements stay near lc rather than
+    # jumping to the background size (area (3.0)**2 = 9).
+    near = grid[(centroids.x.sub(4).abs() < 1.5) & (centroids.y.sub(5).abs() < 1.5)]
+    assert not near.empty
+    assert near.geometry.area.max() < (1.6 * lc) ** 2
