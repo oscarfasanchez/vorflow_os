@@ -13,9 +13,19 @@ itself never becomes mesh edges:
   faces trace the shapefile shape.
 - polygon, thickness=2 -> a ring of ~square cells centered on the outline.
 
-The buffered fault crosses the lower zone's band, so both are trimmed near the
-crossing with a warning and filled with triangles there (intersecting buffers
-are a vorflow extension; gmshflow never supported them).
+Crossing buffers are a vorflow extension (gmshflow never supported them). When
+two quad buffers cross, the higher-priority one stays continuous and only the
+other is trimmed at the crossing -- priority is z_order, then finer resolution,
+then wider strip, then line over polygon, then insertion order. A local size
+field keeps the small trimmed gap meshed at the feature size instead of jumping
+to the background size, so the cell size and quality stay smooth across the
+crossing. Here the inner zone (z_order=1) wins over the fault, which is trimmed.
+
+Two more features round out the comparison: a ``tee`` line that ends ON the
+fault (a T-junction, trimmed because the fault was added first) and a classic
+straddle ``barrier`` line (no quad buffer), which aligns Voronoi faces via
+mirrored point pairs rather than a structured strip -- the lightweight treatment
+to compare against the quad buffers.
 """
 
 import matplotlib.pyplot as plt
@@ -28,9 +38,11 @@ from vorflow.fields import AutoExponentialField
 
 #%%
 field = AutoExponentialField(growth_factor=1.5)
-domain = box(0, 0, 12, 20)
+domain = box(0, 0, 12, 22)
 fault = LineString([(0, 5), (12, 5)])    # crosses inner_zone's band
 drain = LineString([(0, 10), (12, 10)])  # passes between the two zones
+tee = LineString([(10, 5), (10, 9)])     # T-junction: ends on the fault
+barrier = LineString([(0, 20), (12, 20)])  # classic straddle, clear of all bands
 inner_zone = Polygon([(4, 3), (8, 3), (8, 7), (4, 7)])
 sup_inner_zone = translate(inner_zone, xoff=0, yoff=10)
 
@@ -81,6 +93,27 @@ mesh.add_line(
     fields=[field],
 )
 
+# T-junction: this quad buffer ends on the fault. With equal priority the fault
+# (added first) wins, so the tee is trimmed where the two meet.
+mesh.add_line(
+    tee,
+    line_id="tee-buffer",
+    resolution=1.0,
+    quad_buffer=True,
+    quad_buffer_thickness=1,
+    fields=[field],
+)
+
+# Classic straddle barrier (no quad_buffer) for contrast: it forces Voronoi
+# faces onto the line with mirrored point pairs rather than a structured strip.
+mesh.add_line(
+    barrier,
+    line_id="barrier",
+    resolution=1.0,
+    is_barrier=True,
+    fields=[field],
+)
+
 clean_polys, clean_lines, clean_points = mesh.generate()
 
 mesher = MeshGenerator(
@@ -106,8 +139,9 @@ voronoi_grid = tessellator.generate()
 
 # Behavior diagnostics: count cells centered on each feature (thickness=2
 # should have a full row, thickness=1 none) and, for the thickness=1 zone,
-# cells straddling the outline (faces should trace it; the only crossings sit
-# in the trimmed gaps at the fault crossing).
+# cells straddling the outline (faces should trace it). The inner zone wins
+# the crossing with the fault (z_order=1), so it stays continuous and its
+# straddle count is ~0 -- the fault is the one trimmed there instead.
 centroids = voronoi_grid.geometry.centroid
 def centered_cells(geom, tol=0.05):
     return voronoi_grid[centroids.distance(geom) < tol]
@@ -124,7 +158,7 @@ print(f"  fault  t=1: {len(fault_centered)} (expect 0 - faces align with the lin
 print(f"  drain  t=2: {len(drain_centered)} ~square cells, "
       f"area mean={drain_centered.geometry.area.mean():.2f}")
 print(f"  inner  t=1: {len(inner_centered)} on outline, "
-      f"{inner_crossing} cells straddle it (only at the fault crossing)")
+      f"{inner_crossing} cells straddle it (~0 - the zone wins, faces trace it)")
 print(f"  sup    t=2: {len(sup_centered)} ~square cells on outline, "
       f"area mean={sup_centered.geometry.area.mean():.2f}")
 
@@ -172,6 +206,8 @@ axes[2].set_title("Centroid orthogonality error (deg)")
 for ax in axes:
     ax.plot(*fault.xy, color="black", linewidth=1.2)
     ax.plot(*drain.xy, color="black", linewidth=1.2, linestyle="--")
+    ax.plot(*tee.xy, color="black", linewidth=1.2)
+    ax.plot(*barrier.xy, color="crimson", linewidth=1.2, linestyle=":")
     ax.plot(*inner_zone.exterior.xy, color="black", linewidth=1.0)
     ax.plot(*sup_inner_zone.exterior.xy, color="black", linewidth=1.0, linestyle="--")
     ax.set_aspect("equal")
