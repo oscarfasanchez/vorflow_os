@@ -76,7 +76,11 @@ class ConceptualMesh:
             resolution (float, optional): Target mesh size within this polygon. If None,
                 the background mesh size will be used.
             z_order (int): Stacking order for resolving overlaps. Higher values are
-                processed first and will "cut" into lower-order polygons.
+                processed first and will "cut" into lower-order polygons. Also acts
+                as the crossing priority when this polygon's quad buffer crosses
+                another quad-buffered feature (higher stays continuous). To control
+                the two independently, add the zone without ``quad_buffer`` and add
+                its boundary as a separate quad-buffered line with its own z_order.
             dist_min (float, optional): Distance from the polygon boundary where the mesh
                 size is held constant at the boundary's resolution.
             dist_max (float, optional): Distance from the polygon boundary over which the mesh
@@ -91,9 +95,23 @@ class ConceptualMesh:
                 Raises ValueError if negative. Boolean values are not supported.
             fields (list, optional): List of MeshField objects.
             embed (bool): If True, the polygon is embedded in the mesh. If False, it is used only for fields.
-            quad_buffer (bool): If True, creates an opt-in structured quad buffer
-                around the polygon boundary.
-            quad_buffer_thickness (int): Buffer thickness in local cell widths.
+            quad_buffer (bool): If True, replaces the meshed polygon outline
+                with a quad band straddling it (the annulus between the
+                ``+/- thickness * resolution / 2`` offsets, meshed as
+                recombined quads; annuli cannot be 4-corner transfinite). The
+                outline itself never becomes mesh edges: with
+                ``quad_buffer_thickness=1`` no nodes fall on it, so the Voronoi
+                cell faces trace the shapefile shape; with ``2`` a node row
+                lands on it, giving a row of ~square cells centered on the
+                shape. (For the triangular element-grid deliverable the reading
+                is opposite: ``2`` puts element edges along the outline.)
+                When the band crosses another quad buffer, the higher-priority
+                feature (``z_order``, then finer resolution, wider strip, lines
+                over polygons) stays continuous and only the other is trimmed
+                with a warning; polygons narrower than the band fall back to a
+                plain outline with a warning.
+            quad_buffer_thickness (int): Band width in local cell widths
+                (multiples of ``resolution``, like gmshflow's ``cs_thick``).
                 Supported values are 1 and 2.
         """
         if not geometry.is_valid:
@@ -144,9 +162,9 @@ class ConceptualMesh:
             }
         )
 
-    def add_line(self, geometry, line_id, resolution, snap_to_polygons=True, is_barrier=False,                 
+    def add_line(self, geometry, line_id, resolution, snap_to_polygons=True, is_barrier=False,
                   dist_min=None, dist_max=None, straddle_width=None, fields=None, embed=True, densify=True,
-                  simplify_tolerance=None, quad_buffer=False, quad_buffer_thickness=1):
+                  simplify_tolerance=None, quad_buffer=False, quad_buffer_thickness=1, z_order=0):
         """
         Adds a line feature, such as a river, fault, or other linear boundary.
 
@@ -176,8 +194,25 @@ class ConceptualMesh:
                 Raises ValueError if negative. Boolean values are not supported.
             quad_buffer (bool): If True, creates an opt-in structured quad buffer
                 strip around the line instead of the lightweight straddle points.
-            quad_buffer_thickness (int): Buffer thickness in local cell widths.
+                The strip is meshed as a 4-corner transfinite surface (structured
+                quad rows): with ``quad_buffer_thickness=1`` no nodes fall on
+                the line, so the Voronoi faces align with it (sharp barrier);
+                with ``2`` a node row lands on it, giving a row of ~square
+                Voronoi cells centered on the line. (For the triangular
+                element-grid deliverable the reading is opposite: ``2`` puts
+                element edges along the line.) When two quad buffers cross,
+                the higher-priority one stays continuous and only the other is
+                trimmed at the crossing with a warning (priority: ``z_order``,
+                then finer resolution, wider strip, lines over polygons,
+                insertion order). Strips crossing a barrier/straddle corridor
+                are still trimmed there. Independent of ``is_barrier``.
+            quad_buffer_thickness (int): Strip width in local cell widths
+                (multiples of ``resolution``, like gmshflow's ``cs_thick``).
                 Supported values are 1 and 2.
+            z_order (int): Crossing priority for quad buffers. When this
+                feature's quad buffer crosses another one, the feature with the
+                higher ``z_order`` keeps its strip continuous and the other is
+                trimmed. Lines do not participate in polygon overlap stacking.
         """
         if not geometry.is_valid:
             geometry = make_valid(geometry)
@@ -213,6 +248,7 @@ class ConceptualMesh:
             'simplify_tolerance': simplify_tolerance,
             'quad_buffer': bool(quad_buffer),
             'quad_buffer_thickness': int(quad_buffer_thickness),
+            'z_order': z_order,
         })
 
     def add_point(self, geometry, point_id, resolution, dist_min=None, dist_max=None, fields=None, embed=True, simplify_tolerance=None):
@@ -598,10 +634,11 @@ class ConceptualMesh:
                     'simplify_tolerance',
                     'quad_buffer',
                     'quad_buffer_thickness',
+                    'z_order',
                 ],
                 crs=self.crs,
             )
-   
+
         # Clean Points
         if self.raw_points:
             self.clean_points = gpd.GeoDataFrame(self.raw_points, crs=self.crs)

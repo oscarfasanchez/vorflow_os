@@ -215,3 +215,7 @@ __marimo__/
 # 
 .pyc
 __pycache__
+
+# Internal benchmarks / scratch experiments (not tracked)
+benchmarks/
+

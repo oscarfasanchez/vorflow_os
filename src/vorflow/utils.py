@@ -186,6 +186,49 @@ def build_connectivity(gdf: gpd.GeoDataFrame, center: str = "generator") -> gpd.
     return gpd.GeoDataFrame(records, geometry="shared_edge", crs=gdf.crs)
 
 
+def boundary_connectivity_report(
+    grid_gdf: gpd.GeoDataFrame,
+    domain_geom,
+    *,
+    center: str = "centroid",
+    tolerance: Optional[float] = None,
+) -> gpd.GeoDataFrame:
+    """
+    Connectivity report restricted to pairs touching the domain boundary.
+
+    Runs :func:`build_connectivity` on ``grid_gdf`` and keeps only the rows
+    where at least one of the two cells touches the boundary of
+    ``domain_geom``. Useful to compare the boundary-cell angle/orthogonality
+    distribution between ``boundary_centering="clip"`` and ``"inset_mirror"``
+    runs of the tessellator. ``center="centroid"`` is the meaningful mode for
+    that comparison: with ``center="generator"`` Voronoi faces are exact
+    perpendicular bisectors and always report 90 degrees.
+
+    ``tolerance`` defaults to a domain-bbox-scaled value matching the
+    tessellator's boundary-node classification.
+    """
+    if domain_geom is None or domain_geom.is_empty:
+        raise ValueError("boundary_connectivity_report requires a non-empty domain geometry.")
+    if tolerance is None:
+        minx, miny, maxx, maxy = domain_geom.bounds
+        tolerance = max(maxx - minx, maxy - miny, 1.0) * 1e-8
+    elif tolerance < 0:
+        raise ValueError("tolerance must be non-negative when provided.")
+
+    connectivity = build_connectivity(grid_gdf, center=center)
+    if connectivity.empty:
+        return connectivity
+
+    boundary = domain_geom.boundary
+    distances = grid_gdf.geometry.reset_index(drop=True).distance(boundary)
+    boundary_cells = set(np.flatnonzero(distances.to_numpy() <= tolerance))
+
+    mask = connectivity["cell_id_1"].isin(boundary_cells) | connectivity["cell_id_2"].isin(
+        boundary_cells
+    )
+    return connectivity[mask].reset_index(drop=True)
+
+
 def _validate_connectivity_report(
     connectivity: gpd.GeoDataFrame,
     n_cells: int,

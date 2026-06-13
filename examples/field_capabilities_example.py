@@ -296,9 +296,6 @@ for name, poly in plot_polys.items():
     )
 
 line_colors = {
-    "fault-left": "tab:red",
-    "fault-center": "tab:purple",
-    "fault-right": "tab:blue",
     "river-center-up": "tab:cyan",
     "river-center-down": "tab:cyan",
 }
@@ -367,6 +364,8 @@ modflow_connectivity_report.set_geometry("connector").plot(
     linewidth=0.35,
     alpha=0.35,
 )
+# ortho_error is in degrees (0 is ideal); let the color scale auto-range
+# instead of saturating at 1 degree.
 modflow_connectivity_report.plot(
     column="ortho_error",
     ax=ax,
@@ -374,7 +373,6 @@ modflow_connectivity_report.plot(
     cmap="Reds",
     linewidth=1.2,
     vmin=0,
-    vmax=1,
 )
 ax.plot(*domain.exterior.xy, color="black", lw=1)
 ax.set_title("MODFLOW-facing centroid connectivity: shared-face orthogonality error")
@@ -383,9 +381,9 @@ plt.show()
 
 fig, ax = plt.subplots(figsize=(10, 8))
 ax.set_aspect("equal")
-quality_gdf.plot(column="ortho_error", ax=ax, legend=True, cmap="Reds", vmin=0, vmax=1)
+quality_gdf.plot(column="ortho_error", ax=ax, legend=True, cmap="Reds", vmin=0)
 ax.plot(*domain.exterior.xy, color="black", lw=1)
-ax.set_title("Per-cell orthogonality error (degrees)")
+ax.set_title("Per-cell orthogonality error (degrees, worst face per cell)")
 fig.tight_layout()
 plt.show()
 
@@ -401,7 +399,7 @@ fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 dashboard_metrics = [
     ("area", "Cell area", "viridis", None, None),
     ("drift_ratio", "Generator drift ratio", "magma", None, None),
-    ("ortho_error", "Orthogonality error (degrees)", "Reds", 0, 1),
+    ("ortho_error", "Orthogonality error (degrees)", "Reds", 0, None),
     ("skewness", "Skewness error |s - 0.5|", "Purples", 0, 0.5),
 ]
 for ax, (column, title, cmap, vmin, vmax) in zip(axes.ravel(), dashboard_metrics):

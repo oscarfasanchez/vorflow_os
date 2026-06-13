@@ -369,3 +369,79 @@ def test_get_element_grid_validates_filter():
 
     with pytest.raises(ValueError, match="element_filter"):
         mesher.get_element_grid("hexes")
+
+
+def test_element_grid_and_quality_exclude_field_only_surfaces():
+    # embed=False polygons become standalone meshed surfaces in gmsh; their
+    # elements must not leak into the element grid or quality report.
+    cm = ConceptualMesh(crs=None)
+    cm.add_polygon(Polygon([(0, 0), (4, 0), (4, 4), (0, 4)]), zone_id="domain", resolution=2.0)
+    cm.add_polygon(Polygon([(1, 1), (3, 1), (3, 3), (1, 3)]), zone_id="overlay", embed=False, resolution=2.0)
+    clean_polys, clean_lines, clean_points = cm.generate()
+
+    mesher = MeshGenerator(background_lc=2.0, verbosity=0, smoothing_steps=0, optimization_cycles=0)
+    assert mesher.generate(clean_polys, clean_lines, clean_points)
+
+    element_grid = mesher.get_element_grid()
+    quality = mesher.get_triangular_quality()
+
+    # If the overlay's standalone mesh leaked in, the total element area would
+    # be ~domain + overlay (16 + 4) instead of the domain alone.
+    total_area = float(element_grid.geometry.area.sum())
+    assert abs(total_area - 16.0) < 1e-6
+    assert len(quality) == len(element_grid)
+
+
+def _fake_element_grid(centroid):
+    geometry = [Polygon([(centroid[0] - 0.1, centroid[1] - 0.1),
+                         (centroid[0] + 0.1, centroid[1] - 0.1),
+                         (centroid[0], centroid[1] + 0.1)])]
+    return gpd.GeoDataFrame(
+        {
+            "element_tag": [1],
+            "centroid_x": [centroid[0]],
+            "centroid_y": [centroid[1]],
+        },
+        geometry=geometry,
+        crs=None,
+    )
+
+
+def test_zone_assignment_tie_break_is_deterministic():
+    from vorflow.engine import _assign_zones_to_elements
+
+    zone_a = box(0, 0, 1, 1)
+    zone_b = box(1, 0, 2, 1)
+    on_border = (1.0, 0.5)
+
+    # With z_order, the higher z_order wins regardless of zone row order.
+    for order in (["a", "b"], ["b", "a"]):
+        zones = gpd.GeoDataFrame(
+            {
+                "zone_id": order,
+                "z_order": [2 if z == "b" else 1 for z in order],
+                "geometry": [zone_b if z == "b" else zone_a for z in order],
+            },
+            geometry="geometry",
+            crs=None,
+        )
+        result = _assign_zones_to_elements(_fake_element_grid(on_border), zones)
+        assert result.loc[0, "zone_id"] == "b"
+
+    # Without z_order, the earliest zone row wins, reproducibly.
+    zones_ab = gpd.GeoDataFrame(
+        {"zone_id": ["a", "b"], "geometry": [zone_a, zone_b]},
+        geometry="geometry",
+        crs=None,
+    )
+    zones_ba = gpd.GeoDataFrame(
+        {"zone_id": ["b", "a"], "geometry": [zone_b, zone_a]},
+        geometry="geometry",
+        crs=None,
+    )
+    for zones, expected in ((zones_ab, "a"), (zones_ba, "b")):
+        results = {
+            _assign_zones_to_elements(_fake_element_grid(on_border), zones).loc[0, "zone_id"]
+            for _ in range(3)
+        }
+        assert results == {expected}

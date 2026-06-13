@@ -1,6 +1,7 @@
 import gmsh
 import sys
 import math
+import warnings
 import numpy as np
 import pandas as pd
 import geopandas as gpd
@@ -8,6 +9,44 @@ from shapely.geometry import Point, LineString, MultiLineString, MultiPolygon, P
 from shapely.ops import linemerge, unary_union
 from shapely.validation import make_valid
 from .fields import MeshField, ThresholdField, ExponentialField, AutoLinearField, AutoExponentialField, ConstantField
+
+
+def _assign_zones_to_elements(grid, zones_gdf):
+    """Assign a zone to each element by spatially joining element centroids.
+
+    When a centroid intersects several zones (overlaps or shared borders) the
+    tie is broken deterministically: highest ``z_order`` wins, then the zone
+    that appears earliest in ``zones_gdf``.
+    """
+    if zones_gdf is None or zones_gdf.empty or "zone_id" not in zones_gdf.columns:
+        grid["zone_id"] = pd.NA
+        grid["z_order"] = pd.NA
+        return grid
+
+    zone_cols = ["geometry", "zone_id"]
+    if "z_order" in zones_gdf.columns:
+        zone_cols.append("z_order")
+    zones = zones_gdf[zone_cols].reset_index(drop=True)
+    centroids = gpd.GeoDataFrame(
+        {"element_tag": grid["element_tag"]},
+        geometry=gpd.points_from_xy(grid["centroid_x"], grid["centroid_y"]),
+        crs=grid.crs,
+    )
+    joined = gpd.sjoin(centroids, zones, how="left", predicate="intersects")
+    sort_cols, ascending = ["element_tag"], [True]
+    if "z_order" in joined.columns:
+        sort_cols += ["z_order", "index_right"]
+        ascending += [False, True]
+    else:
+        sort_cols += ["index_right"]
+        ascending += [True]
+    joined = joined.sort_values(sort_cols, ascending=ascending, kind="mergesort")
+    joined = joined.drop_duplicates(subset="element_tag")
+    merge_cols = ["element_tag", "zone_id"]
+    if "z_order" in joined.columns:
+        merge_cols.append("z_order")
+    return grid.merge(joined[merge_cols], on="element_tag", how="left")
+
 
 class MeshGenerator:
     def __init__(self, background_lc=None, verbosity=0, mesh_algorithm=6,
@@ -140,7 +179,65 @@ class MeshGenerator:
             gmsh.finalize()
             self.initialized = False
 
-    def _collect_triangular_quality(self):
+    @staticmethod
+    def _meshed_surface_tags(gmsh_map, clean_polys):
+        """Surface tags composing the meshed domain.
+
+        Embedded polygon surfaces plus straddle and structured-buffer strips.
+        Field-only (embed=False) surfaces are excluded: gmsh meshes them as
+        standalone entities, but they are not part of the deliverable mesh and
+        must not pollute element/quality/node collection.
+        """
+        def is_embedded_row(row):
+            val = row.get('embed', True)
+            return True if pd.isna(val) else bool(val)
+
+        if clean_polys is not None and not clean_polys.empty:
+            if 'embed' in clean_polys.columns:
+                poly_ids = [int(i) for i, r in clean_polys.iterrows() if is_embedded_row(r)]
+            else:
+                poly_ids = [int(i) for i in clean_polys.index]
+        else:
+            poly_ids = []
+
+        tags, seen = [], set()
+
+        def add_dimtags(dimtags):
+            for dimtag in dimtags:
+                if isinstance(dimtag, (tuple, list)) and len(dimtag) >= 2 and int(dimtag[0]) == 2:
+                    tag = int(dimtag[1])
+                    if tag not in seen:
+                        seen.add(tag)
+                        tags.append(tag)
+
+        for fid in poly_ids:
+            add_dimtags(gmsh_map.get('surfaces', {}).get(fid, []))
+        for map_key in ('straddle_surfs', 'structured_buffer_surfs'):
+            for dimtags in gmsh_map.get(map_key, {}).values():
+                add_dimtags(dimtags)
+        return tags
+
+    @staticmethod
+    def _get_2d_elements(surface_tags=None):
+        """getElements(dim=2), optionally restricted to specific surfaces."""
+        if not surface_tags:
+            return gmsh.model.mesh.getElements(dim=2)
+        by_type = {}
+        for tag in surface_tags:
+            try:
+                element_types, element_tags, element_nodes = gmsh.model.mesh.getElements(2, int(tag))
+            except Exception:
+                continue
+            for etype, etags, enodes in zip(element_types, element_tags, element_nodes):
+                bucket = by_type.setdefault(int(etype), ([], []))
+                bucket[0].append(np.asarray(etags, dtype=np.int64))
+                bucket[1].append(np.asarray(enodes, dtype=np.int64))
+        types = list(by_type.keys())
+        tags = [np.concatenate(by_type[t][0]) for t in types]
+        nodes = [np.concatenate(by_type[t][1]) for t in types]
+        return types, tags, nodes
+
+    def _collect_triangular_quality(self, surface_tags=None):
         """Collect gmsh 2D element quality metrics while the model is live."""
         quality_columns = [
             "minSICN",
@@ -157,7 +254,7 @@ class MeshGenerator:
             "maxEdge",
         ]
         metadata_columns = ["element_tag", "element_type", "element_name", "is_triangle"]
-        element_types, element_tags, _ = gmsh.model.mesh.getElements(dim=2)
+        element_types, element_tags, _ = self._get_2d_elements(surface_tags)
         if len(element_tags) == 0:
             return pd.DataFrame(columns=metadata_columns + quality_columns)
 
@@ -218,11 +315,12 @@ class MeshGenerator:
             crs=crs,
         )
 
-    def _collect_element_grid(self, zones_gdf=None):
+    def _collect_element_grid(self, zones_gdf=None, surface_tags=None):
         """Collect gmsh 2D element polygons while the model is live."""
         crs = getattr(zones_gdf, "crs", None)
-        element_types, element_tags, element_node_tags = gmsh.model.mesh.getElements(dim=2)
+        element_types, element_tags, element_node_tags = self._get_2d_elements(surface_tags)
         if len(element_tags) == 0:
+            warnings.warn("gmsh returned no 2D elements; element grid is empty.")
             return self._empty_element_grid(crs)
 
         node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
@@ -287,34 +385,13 @@ class MeshGenerator:
                 )
 
         if not records:
+            warnings.warn("gmsh returned no usable 2D elements; element grid is empty.")
             return self._empty_element_grid(crs)
 
         grid = gpd.GeoDataFrame(records, geometry="geometry", crs=crs)
         grid = grid.sort_values("element_tag").reset_index(drop=True)
 
-        if zones_gdf is not None and not zones_gdf.empty and "zone_id" in zones_gdf.columns:
-            zone_cols = ["geometry", "zone_id"]
-            if "z_order" in zones_gdf.columns:
-                zone_cols.append("z_order")
-            zones = zones_gdf[zone_cols].copy()
-            centroids = gpd.GeoDataFrame(
-                {"element_tag": grid["element_tag"]},
-                geometry=gpd.points_from_xy(grid["centroid_x"], grid["centroid_y"]),
-                crs=grid.crs,
-            )
-            joined = gpd.sjoin(centroids, zones, how="left", predicate="intersects")
-            if "z_order" in joined.columns:
-                joined = joined.sort_values("z_order", ascending=False)
-            joined = joined.drop_duplicates(subset="element_tag")
-            merge_cols = ["element_tag", "zone_id"]
-            if "z_order" in joined.columns:
-                merge_cols.append("z_order")
-            grid = grid.merge(joined[merge_cols], on="element_tag", how="left")
-        else:
-            grid["zone_id"] = pd.NA
-            grid["z_order"] = pd.NA
-
-        return grid
+        return _assign_zones_to_elements(grid, zones_gdf)
 
     def get_element_grid(self, element_filter="all"):
         """
@@ -323,6 +400,11 @@ class MeshGenerator:
         ``element_filter`` may be ``"all"``, ``"triangles"``, or ``"quads"``.
         The exporter is independent of the Voronoi tessellator and can represent
         mixed tri/quad meshes produced by future structured-buffer workflows.
+
+        Each element is assigned the zone whose polygon intersects the element
+        centroid. Ties (overlapping zones or centroids on shared borders) are
+        broken deterministically: highest ``z_order`` wins, then the zone that
+        appears earliest in the conceptual-mesh polygon table.
         """
         if self.element_grid is None:
             raise RuntimeError(
@@ -511,42 +593,74 @@ class MeshGenerator:
 
         domain_geom_for_buffers = domain_union_geometry()
 
-        def add_structured_buffer_surface(buffer_geom, feature_id, input_type):
+        def add_structured_buffer_surface(buffer_geom, feature_id, input_type,
+                                          corners=None, side_lines=None):
+            """Create OCC surfaces for a buffer geometry; returns [(key, strip_info), ...]."""
             created = []
             if domain_geom_for_buffers is not None and not domain_geom_for_buffers.is_empty:
                 buffer_geom = buffer_geom.intersection(domain_geom_for_buffers)
             buffer_geom = make_valid(buffer_geom)
-            for poly in polygon_parts(buffer_geom):
-                if poly.is_empty or poly.area <= 0:
-                    continue
+            parts = [
+                poly for poly in polygon_parts(buffer_geom)
+                if not poly.is_empty and poly.area > 0
+            ]
+            if corners is not None and len(parts) != 1:
+                # The recorded whole-strip corners no longer apply; pieces are
+                # re-cornered individually from the side lines post-fragment.
+                corners = None
+            for poly in parts:
                 s_tag, boundary_curve_tags = create_polygon_surface(poly)
                 if s_tag is None:
                     continue
                 key = to_key(2, s_tag)
                 input_tag_info[key] = {'type': input_type, 'id': feature_id}
                 embedded_surface_tags.append(key)
-                created.append((key, boundary_curve_tags))
+                created.append((key, {'corners': corners, 'side_lines': side_lines}))
             return created
+
+        # Strip footprints collected for ring-vertex protection (see
+        # push_ring_vertices_off_strips below).
+        line_strip_polygons = []
 
         def create_line_structured_buffer(row):
             line = row.geometry
             lc = feature_lc(row)
             thickness = quad_buffer_thickness(row)
             offset = thickness * lc / 2.0
+            other_corridors = other_feature_corridors(
+                ('line', int(row.name)), min_half_width=0.6 * lc
+            )
             created = []
             for part in line_parts(line):
                 if part.length <= 0:
                     continue
+                # gmshflow recipe: simplify then segmentize before offsetting so
+                # both offsets are symmetric and split into ~lc-long segments,
+                # which keeps the transfinite divisions equal on opposite sides
+                # of the strip. (Adds one OCC curve per ~lc of feature length.)
+                work = part.simplify(lc * 1.5)
+                work = work.segmentize(lc)
                 pos = coerce_offset_line(
-                    part.offset_curve(offset, quad_segs=1, join_style=2, mitre_limit=5.0)
+                    work.offset_curve(offset, quad_segs=1, join_style=2, mitre_limit=5.0)
                 )
                 neg = coerce_offset_line(
-                    part.offset_curve(-offset, quad_segs=1, join_style=2, mitre_limit=5.0)
+                    work.offset_curve(-offset, quad_segs=1, join_style=2, mitre_limit=5.0)
                 )
                 if pos is None or neg is None:
-                    if self.verbosity > 0:
-                        print(f"Warning: Skipping structured buffer for line {row.get('line_id', '?')} after offset split.")
+                    warnings.warn(
+                        f"Skipping structured buffer for line feature {row.name} after offset split."
+                    )
                     continue
+                # Clip the offset lines (not the strip polygon) to the domain so
+                # their endpoints remain the true strip corners.
+                if domain_geom_for_buffers is not None and not domain_geom_for_buffers.is_empty:
+                    pos = coerce_offset_line(pos.intersection(domain_geom_for_buffers))
+                    neg = coerce_offset_line(neg.intersection(domain_geom_for_buffers))
+                    if pos is None or neg is None:
+                        warnings.warn(
+                            f"Skipping structured buffer for line feature {row.name} after domain clipping."
+                        )
+                        continue
 
                 pos_coords = self._sanitize_coords(list(pos.coords), min_points=2)
                 neg_coords = self._sanitize_coords(list(neg.coords), min_points=2)
@@ -556,16 +670,76 @@ class MeshGenerator:
                 strip = Polygon(pos_coords + list(reversed(neg_coords)))
                 if not strip.is_valid:
                     strip = make_valid(strip)
-                created.extend(add_structured_buffer_surface(strip, int(row.name), 'structured_buffer_surf'))
+                # Corner order matches gmshflow's setTransfiniteSurface(..., "Left", ...).
+                corners = [
+                    tuple(neg_coords[0]),
+                    tuple(neg_coords[-1]),
+                    tuple(pos_coords[-1]),
+                    tuple(pos_coords[0]),
+                ]
+                if other_corridors is not None and strip.intersects(other_corridors):
+                    warnings.warn(
+                        f"Structured buffer for line feature {row.name} crosses another protected "
+                        "feature; the strip is trimmed at the crossing."
+                    )
+                    strip = make_valid(strip.difference(other_corridors))
+                    corners = None
+                line_strip_polygons.append(strip)
+                created.extend(
+                    add_structured_buffer_surface(
+                        strip, ('line', int(row.name)), 'structured_buffer_surf',
+                        corners=corners, side_lines=(pos, neg),
+                    )
+                )
             return created
 
         def create_polygon_structured_buffer(row):
+            # gmshflow parity (create_surfacegrid_from_buffer_poly): the band is
+            # the annulus between the +/- offsets of the simplified outline, and
+            # the zone interior is meshed from the inner offset, so the original
+            # boundary never becomes mesh edges. thickness=1 leaves no nodes on
+            # the outline (the Voronoi faces trace the shape); thickness=2 puts
+            # a node row on it (a row of ~square cells centered on the shape).
+            # Bands are annuli: no 4-corner transfinite structure is possible,
+            # so they are meshed quasi-structured (recombined quads with ~lc
+            # curve divisions). Returns (created_surfaces, band_geom).
             geom = row.geometry
             lc = feature_lc(row)
             thickness = quad_buffer_thickness(row)
             offset = thickness * lc / 2.0
-            band = geom.boundary.buffer(offset, cap_style=2, join_style=2, mitre_limit=5.0)
-            return add_structured_buffer_surface(band, int(row.name), 'structured_buffer_surf')
+            # The band leaves little room to mesh, so simplify first.
+            work = make_valid(geom.simplify(lc * 1.5))
+            inner = make_valid(work.buffer(-offset, quad_segs=1, join_style=2, mitre_limit=5.0))
+            outer = make_valid(work.buffer(offset, quad_segs=1, join_style=2, mitre_limit=5.0))
+            inner_parts = [
+                p for p in polygon_parts(inner) if not p.is_empty and p.area > 0
+            ]
+            if not inner_parts or outer.is_empty:
+                warnings.warn(
+                    f"Polygon feature {row.name} is too narrow for a quad_buffer band of "
+                    f"width {2.0 * offset:g}; meshing it without the structured buffer."
+                )
+                return [], None
+            inner = inner_parts[0] if len(inner_parts) == 1 else MultiPolygon(inner_parts)
+            # Difference (rather than boundary.buffer) so the band's inner ring
+            # and the interior surface share exact coordinates and OCC merges
+            # them into a single curve.
+            band = make_valid(outer.difference(inner))
+            other_corridors = other_feature_corridors(
+                ('poly', int(row.name)), min_half_width=0.6 * lc
+            )
+            if other_corridors is not None and band.intersects(other_corridors):
+                warnings.warn(
+                    f"Structured buffer for polygon feature {row.name} crosses another protected "
+                    "feature; the band is trimmed near the crossing."
+                )
+                band = make_valid(band.difference(other_corridors))
+            created = add_structured_buffer_surface(
+                band, ('poly', int(row.name)), 'structured_buffer_surf'
+            )
+            if not created:
+                return [], None
+            return created, band
 
         structured_buffer_specs = {}
         
@@ -579,38 +753,65 @@ class MeshGenerator:
             else:
                 nonembedded_point_tags.setdefault(int(idx), []).append(key)
             
-        # Create a buffer zone around barrier lines. This is used to trim back
-        # other lines, preventing their endpoints from interfering with the
-        # meshing of the barrier features.
-        barrier_buffers = []
-        for idx, row in lines_gdf.iterrows():
-            is_barrier = row_bool(row, 'is_barrier', False)
-            quad_buffer = row_bool(row, 'quad_buffer', False)
+        # Build a protection corridor around each barrier/straddle/quad-buffer
+        # feature. Their union (the "barrier zone") trims standard lines away
+        # from these sensitive regions; structured buffer strips are
+        # additionally trimmed against the corridors of *other* protected
+        # features so crossing features cannot inject nodes into each other's
+        # strips.
+        def feature_protection_epsilon(row):
+            lc = feature_lc(row)
+            if row_bool(row, 'quad_buffer', False):
+                return quad_buffer_thickness(row) * lc / 2.0
             straddle = positive_number(row.get('straddle_width'))
-            
-            if is_barrier or quad_buffer or straddle:
-                lc = feature_lc(row)
-                if quad_buffer:
-                    eps = quad_buffer_thickness(row) * lc / 2.0
-                elif straddle:
-                    eps = straddle / 2.0
-                else:
-                    eps = lc * 0.20
-                
-                # The trim buffer is made slightly larger than the feature's half-width
-                # to ensure a clean separation between standard lines and the
-                # sensitive node pairs used for straddle barriers.
-                trim_eps = eps * 1.20
-                
-                buf = row.geometry.buffer(trim_eps, cap_style=2)
-                barrier_buffers.append(buf)
-        
+            if straddle:
+                return straddle / 2.0
+            return lc * 0.20
+
+        def corridor_geometry(basis, eps, min_half_width=0.0):
+            # The corridor is made slightly larger than the feature's half-width
+            # to ensure a clean separation between standard lines and the
+            # sensitive node pairs used for straddle barriers.
+            return basis.buffer(max(eps * 1.20, min_half_width), cap_style=2)
+
+        corridors_by_feature = {}
+        for idx, row in lines_gdf.iterrows():
+            if (
+                row_bool(row, 'is_barrier', False)
+                or row_bool(row, 'quad_buffer', False)
+                or positive_number(row.get('straddle_width'))
+            ):
+                corridors_by_feature[('line', int(idx))] = (
+                    row.geometry, feature_protection_epsilon(row)
+                )
+        if not polygons_gdf.empty:
+            for idx, row in polygons_gdf.iterrows():
+                if row_bool(row, 'quad_buffer', False) and is_embedded(row):
+                    corridors_by_feature[('poly', int(idx))] = (
+                        row.geometry.boundary, feature_protection_epsilon(row)
+                    )
+
         barrier_zone = None
-        if barrier_buffers:
-            barrier_zone = unary_union(barrier_buffers)
-            barrier_zone = make_valid(barrier_zone)
+        if corridors_by_feature:
+            barrier_zone = make_valid(unary_union([
+                corridor_geometry(basis, eps)
+                for basis, eps in corridors_by_feature.values()
+            ]))
             if self.verbosity > 0:
-                print(f"Constructed Barrier Zone from {len(barrier_buffers)} barriers.")
+                print(f"Constructed Barrier Zone from {len(corridors_by_feature)} protected features.")
+
+        def other_feature_corridors(self_key, min_half_width=0.0):
+            # min_half_width widens the corridors so the gap a structured
+            # strip/band is trimmed to stays at least about one cell wide;
+            # narrower gaps force sliver triangles at the crossing.
+            geoms = [
+                corridor_geometry(basis, eps, min_half_width)
+                for key, (basis, eps) in corridors_by_feature.items()
+                if key != self_key
+            ]
+            if not geoms:
+                return None
+            return make_valid(unary_union(geoms))
 
         # Add line features to the model, handling barriers and standard lines differently.
         for idx, row in lines_gdf.iterrows():
@@ -627,10 +828,12 @@ class MeshGenerator:
             if use_structured_buffer:
                 created = create_line_structured_buffer(row)
                 if created:
-                    structured_buffer_specs[int(idx)] = {
+                    structured_buffer_specs[('line', int(idx))] = {
                         'lc': lc,
                         'thickness': quad_buffer_thickness(row),
                         'kind': 'line',
+                        'strips': [info for _, info in created],
+                        'n_surfaces_created': len(created),
                     }
                 elif self.verbosity > 0:
                     print(f"Warning: Structured buffer requested for line {idx}, but no buffer surface was created.")
@@ -748,19 +951,99 @@ class MeshGenerator:
                     if created_segments == 0 and self.verbosity > 0:
                         print(f"Warning: No valid line segments were created for feature {idx}.")
 
+        def push_ring_vertices_off_strips(poly):
+            """Move polygon ring vertices out of structured strip interiors.
+
+            A ring vertex strictly inside a strip (e.g. a densified midpoint
+            landing on the buffered feature line) subdivides the strip's end
+            caps during fragmentation and injects a node into the protected
+            corridor, breaking the transfinite structure. Project such
+            vertices onto the strip boundary instead — a move of at most half
+            the strip width, collinear when the ring crosses the strip
+            straight.
+            """
+            if not line_strip_polygons:
+                return poly
+            moved = 0
+
+            def adjust(coords):
+                nonlocal moved
+                out = []
+                for x, y in coords:
+                    point = Point(x, y)
+                    for strip in line_strip_polygons:
+                        if strip.contains(point):
+                            boundary = strip.boundary
+                            point = boundary.interpolate(boundary.project(point))
+                            moved += 1
+                            break
+                    out.append((point.x, point.y))
+                return out
+
+            exterior = adjust(list(poly.exterior.coords))
+            interiors = [adjust(list(ring.coords)) for ring in poly.interiors]
+            if not moved:
+                return poly
+            adjusted = Polygon(exterior, interiors)
+            if not adjusted.is_valid:
+                adjusted = make_valid(adjusted)
+            if adjusted.geom_type != 'Polygon' or adjusted.is_empty:
+                return poly
+            if self.verbosity > 0:
+                print(f"Moved {moved} zone-ring vertex(es) off structured buffer strips.")
+            return adjusted
+
         # Add polygon features to the model.
         if not polygons_gdf.empty:
             print(f"Adding {len(polygons_gdf)} polygons to Gmsh...")
+            # First pass: create the quad-buffer band surfaces and collect their
+            # footprints. The band hugs the full feature boundary, so it is
+            # created once per feature rather than once per MultiPolygon part.
+            polygon_band_geoms = []
+            for idx, row in polygons_gdf.iterrows():
+                if not (is_embedded(row) and row_bool(row, 'quad_buffer', False)):
+                    continue
+                created, band_geom = create_polygon_structured_buffer(row)
+                if created:
+                    structured_buffer_specs[('poly', int(idx))] = {
+                        'lc': feature_lc(row),
+                        'thickness': quad_buffer_thickness(row),
+                        'kind': 'polygon',
+                        'strips': [],
+                        'n_surfaces_created': len(created),
+                    }
+                    polygon_band_geoms.append(band_geom)
+                elif self.verbosity > 0:
+                    print(f"Warning: Structured buffer requested for polygon {idx}, but no buffer surface was created.")
+            buffer_footprints = polygon_band_geoms + line_strip_polygons
+            buffer_footprints_union = (
+                make_valid(unary_union(buffer_footprints)) if buffer_footprints else None
+            )
+
             for idx, row in polygons_gdf.iterrows():
                 embedded = is_embedded(row)
                 geom = row['geometry']
-                if geom.geom_type == 'Polygon':
-                    polys = [geom]
-                elif geom.geom_type == 'MultiPolygon':
-                    polys = geom.geoms
-                else:
+                if geom.geom_type not in ('Polygon', 'MultiPolygon'):
                     continue
-                
+                # Mesh every embedded polygon minus the band/strip footprints,
+                # so the buffer surfaces tile the plane with their neighbours
+                # exactly (shared curves merged by removeAllDuplicates) instead
+                # of relying on OCC fragment to cut overlapping faces — which
+                # silently refuses in some trimmed-crossing configurations and
+                # leaves double-meshed regions. It also keeps a buffered zone's
+                # outline out of the mesh entirely: overlap resolution makes
+                # neighbours share that outline (e.g. the domain piece has a
+                # hole there), so subtracting only from the buffered zone itself
+                # would still pin mesh nodes onto it. Zone assignment uses the
+                # original polygons, so zone extents are unchanged.
+                if (
+                    embedded
+                    and buffer_footprints_union is not None
+                    and geom.intersects(buffer_footprints_union)
+                ):
+                    geom = make_valid(geom.difference(buffer_footprints_union))
+                polys = polygon_parts(geom)
+
                 for poly in polys:
                     if poly.is_empty:
                         continue
@@ -774,17 +1057,7 @@ class MeshGenerator:
                         pending_nonembedded_polys.append((int(idx), poly))
                         continue
 
-                    if row_bool(row, 'quad_buffer', False):
-                        created = create_polygon_structured_buffer(row)
-                        if created:
-                            structured_buffer_specs[int(idx)] = {
-                                'lc': feature_lc(row),
-                                'thickness': quad_buffer_thickness(row),
-                                'kind': 'polygon',
-                            }
-                        elif self.verbosity > 0:
-                            print(f"Warning: Structured buffer requested for polygon {idx}, but no buffer surface was created.")
-
+                    poly = push_ring_vertices_off_strips(poly)
                     s_tag, boundary_curve_tags = create_polygon_surface(poly)
                     if s_tag is None:
                         print(f"Warning: Skipping degenerate polygon {idx}")
@@ -1157,7 +1430,9 @@ class MeshGenerator:
             if key in input_tag_info:
                 info = input_tag_info[key]
                 kind = info['type']
-                feat_id = int(info['id'])
+                # Structured-buffer ids are ('line'|'poly', idx) tuples so line
+                # and polygon features with the same index cannot collide.
+                feat_id = info['id'] if isinstance(info['id'], tuple) else int(info['id'])
                 
                 if kind == 'point':
                     if feat_id not in final_map['points']:
@@ -1210,59 +1485,428 @@ class MeshGenerator:
             if _stale_feats:
                 print(f"  [DIAG] Stale point (feat_id, tag): {_stale_feats}")
 
-        def _entity_length(dim, tag):
-            try:
-                return float(gmsh.model.occ.getMass(dim, int(tag)))
-            except Exception:
-                try:
-                    return float(gmsh.model.getMass(dim, int(tag)))
-                except Exception:
-                    return None
-
-        structured_surfaces = final_map.get('structured_buffer_surfs', {})
-        if structured_surfaces:
-            gmsh.option.setNumber("Mesh.RecombinationAlgorithm", 0)
-            applied = 0
-            for feat_id, dimtags in structured_surfaces.items():
-                spec = structured_buffer_specs.get(int(feat_id), {})
-                lc = max(float(spec.get('lc', self.background_lc or 1.0)), 0.001)
+        # Safety net: OCC's fragment map can omit pieces of an input surface
+        # (observed when a buffer strip with boundaries coincident to the
+        # densified domain edge splits the domain). An unclaimed 2D entity
+        # would silently lose its mesh nodes and field sizing downstream, so
+        # re-attach each orphan to the embedded polygon feature containing it.
+        claimed_surfaces = set()
+        for map_key in ('surfaces', 'straddle_surfs', 'structured_buffer_surfs'):
+            for dimtags in final_map.get(map_key, {}).values():
                 for dt in dimtags:
-                    if not (isinstance(dt, (tuple, list)) and len(dt) >= 2 and int(dt[0]) == 2):
-                        continue
-                    surf_tag = int(dt[1])
-                    try:
-                        boundary = gmsh.model.getBoundary([(2, surf_tag)], oriented=False, recursive=False)
-                    except Exception:
-                        boundary = []
+                    if isinstance(dt, (tuple, list)) and len(dt) >= 2 and int(dt[0]) == 2:
+                        claimed_surfaces.add(int(dt[1]))
+        orphan_surfaces = [
+            int(tag) for dim, tag in gmsh.model.getEntities(2)
+            if int(tag) not in claimed_surfaces
+        ]
+        if orphan_surfaces and polygons_gdf is not None and not polygons_gdf.empty:
+            embedded_polys = [
+                (int(idx), row.geometry)
+                for idx, row in polygons_gdf.iterrows()
+                if is_embedded(row)
+            ]
+            recovered = 0
+            for surf_tag in orphan_surfaces:
+                try:
+                    cx, cy, _ = gmsh.model.occ.getCenterOfMass(2, surf_tag)
+                except Exception:
+                    continue
+                center = Point(cx, cy)
+                owner = None
+                for fid, geom in embedded_polys:
+                    if geom.covers(center):
+                        owner = fid
+                        break
+                if owner is None and embedded_polys:
+                    owner = min(embedded_polys, key=lambda item: item[1].distance(center))[0]
+                if owner is not None:
+                    final_map['surfaces'].setdefault(owner, []).append((2, surf_tag))
+                    recovered += 1
+            if recovered:
+                print(
+                    f"Recovered {recovered} orphan surface(s) the fragment map had "
+                    "dropped; re-attached to their containing polygon features."
+                )
 
-                    curve_tags = sorted({int(tag) for dim, tag in boundary if int(dim) == 1})
-                    for curve_tag in curve_tags:
-                        length = _entity_length(1, curve_tag)
-                        if length is None or not math.isfinite(length) or length <= 0:
-                            continue
-                        divisions = max(2, int(round(length / lc)) + 1)
-                        try:
-                            gmsh.model.mesh.setTransfiniteCurve(curve_tag, divisions)
-                        except Exception:
-                            pass
-
-                    if len(curve_tags) == 4:
-                        try:
-                            gmsh.model.mesh.setTransfiniteSurface(surf_tag)
-                        except Exception:
-                            pass
-                    try:
-                        gmsh.model.mesh.setRecombine(2, surf_tag)
-                        gmsh.model.mesh.setAlgorithm(2, surf_tag, 8)
-                        applied += 1
-                    except Exception as e:
-                        if self.verbosity > 0:
-                            print(f"Warning: Could not apply structured buffer meshing to surface {surf_tag}: {e}")
-
-            if self.verbosity > 0:
-                print(f"Applied structured quad-buffer meshing to {applied} surface(s).")
+        self._apply_structured_buffer_meshing(final_map, structured_buffer_specs)
 
         return final_map
+
+    @staticmethod
+    def _entity_length(dim, tag):
+        try:
+            return float(gmsh.model.occ.getMass(int(dim), int(tag)))
+        except Exception:
+            try:
+                return float(gmsh.model.getMass(int(dim), int(tag)))
+            except Exception:
+                return None
+
+    @staticmethod
+    def _surface_boundary_point_coords(surf_tag):
+        """Map of point tag -> (x, y) for a surface's boundary points."""
+        try:
+            boundary_points = gmsh.model.getBoundary(
+                [(2, int(surf_tag))], oriented=False, recursive=True
+            )
+        except Exception:
+            return {}
+        candidates = {}
+        for dim, tag in boundary_points:
+            if int(dim) != 0:
+                continue
+            try:
+                xyz = gmsh.model.getValue(0, int(tag), [])
+            except Exception:
+                continue
+            candidates[int(tag)] = (float(xyz[0]), float(xyz[1]))
+        return candidates
+
+    def _derive_strip_corners_on_surface(self, surf_tag, side_lines, tol):
+        """Derive the 4 corner point tags of a strip *piece* from its side lines.
+
+        When fragmentation splits a strip (e.g. an embedded zone boundary
+        crosses it), each piece is still a 4-sided strip whose corners are the
+        extreme boundary points lying on the original positive/negative offset
+        curves. Returns corner tags in "Left" order, or None.
+        """
+        if not side_lines:
+            return None
+        pos, neg = side_lines
+        if pos is None or neg is None:
+            return None
+        candidates = self._surface_boundary_point_coords(surf_tag)
+        if len(candidates) < 4:
+            return None
+
+        def extremes_on(line):
+            hits = []
+            for tag, (x, y) in candidates.items():
+                point = Point(x, y)
+                if line.distance(point) <= tol:
+                    hits.append((float(line.project(point)), tag))
+            if len(hits) < 2:
+                return None
+            hits.sort()
+            return hits[0][1], hits[-1][1]
+
+        neg_ends = extremes_on(neg)
+        pos_ends = extremes_on(pos)
+        if neg_ends is None or pos_ends is None:
+            return None
+        corner_tags = [neg_ends[0], neg_ends[1], pos_ends[1], pos_ends[0]]
+        if len(set(corner_tags)) != 4:
+            return None
+        return corner_tags
+
+    def _locate_corner_tags_on_surface(self, surf_tag, corner_coords, tol):
+        """Match recorded strip corner coordinates to point tags on a surface.
+
+        Only the surface's own boundary points are considered, so coordinate
+        collisions with the rest of the model are impossible. Returns the four
+        point tags in corner order, or None if any corner has no boundary
+        point within ``tol``.
+        """
+        candidates = self._surface_boundary_point_coords(surf_tag)
+        if len(candidates) < 4:
+            return None
+
+        corner_tags = []
+        for cx, cy in corner_coords:
+            best_tag, best_dist = None, None
+            for tag, (px, py) in candidates.items():
+                dist = math.hypot(px - cx, py - cy)
+                if best_dist is None or dist < best_dist:
+                    best_tag, best_dist = tag, dist
+            if best_dist is None or best_dist > tol:
+                return None
+            corner_tags.append(best_tag)
+        if len(set(corner_tags)) != 4:
+            return None
+        return corner_tags
+
+    def _partition_boundary_chains(self, surf_tag, corner_tags):
+        """Order a surface's boundary curves into 4 chains cut at the corners.
+
+        Returns a list of (start_corner, end_corner, [curve_tags]) tuples, or
+        None when the boundary is not a single closed loop through all four
+        corner points (e.g. the strip was split by fragmentation).
+        """
+        try:
+            boundary = gmsh.model.getBoundary(
+                [(2, int(surf_tag))], oriented=False, recursive=False
+            )
+        except Exception:
+            return None
+        curve_tags = [int(tag) for dim, tag in boundary if int(dim) == 1]
+        if len(curve_tags) < 4:
+            return None
+
+        endpoints = {}
+        point_curves = {}
+        for curve in curve_tags:
+            try:
+                pts = gmsh.model.getBoundary([(1, curve)], oriented=False, recursive=False)
+            except Exception:
+                return None
+            point_pair = [int(tag) for dim, tag in pts if int(dim) == 0]
+            if len(point_pair) != 2 or point_pair[0] == point_pair[1]:
+                return None
+            endpoints[curve] = point_pair
+            for point in point_pair:
+                point_curves.setdefault(point, []).append(curve)
+        if any(len(curves) != 2 for curves in point_curves.values()):
+            return None
+
+        corner_set = {int(tag) for tag in corner_tags}
+        if len(corner_set) != 4 or not corner_set.issubset(point_curves.keys()):
+            return None
+
+        start = int(corner_tags[0])
+        point = start
+        curve = point_curves[start][0]
+        chains = []
+        chain_start = start
+        current = []
+        visited = set()
+        for _ in range(len(curve_tags)):
+            if curve in visited:
+                return None
+            visited.add(curve)
+            current.append(curve)
+            a, b = endpoints[curve]
+            point = b if point == a else a
+            if point in corner_set:
+                chains.append((chain_start, point, current))
+                chain_start = point
+                current = []
+            next_curves = [c for c in point_curves[point] if c != curve]
+            if len(next_curves) != 1:
+                return None
+            curve = next_curves[0]
+        if current or len(chains) != 4 or chains[-1][1] != start:
+            return None
+        return chains
+
+    @staticmethod
+    def _distribute_chain_points(lengths, total_points):
+        """Split a chain's transfinite point budget across its curves.
+
+        Returns per-curve point counts whose segment total matches
+        ``total_points - 1`` exactly, or None if the chain has more curves
+        than segments.
+        """
+        total_segments = total_points - 1
+        n = len(lengths)
+        if total_segments < n:
+            return None
+        total_length = sum(lengths)
+        segments = [
+            max(1, int(round(total_segments * length / total_length)))
+            for length in lengths
+        ]
+        drift = total_segments - sum(segments)
+        order = sorted(range(n), key=lambda i: -lengths[i])
+        attempts = 0
+        while drift != 0 and attempts < 10 * n:
+            i = order[attempts % n]
+            step = 1 if drift > 0 else -1
+            if segments[i] + step >= 1:
+                segments[i] += step
+                drift -= step
+            attempts += 1
+        if drift != 0:
+            return None
+        return [s + 1 for s in segments]
+
+    def _apply_transfinite_strip(self, surf_tag, corner_tags, lc, thickness):
+        """Apply a 4-corner transfinite structure to a relocated buffer strip.
+
+        Opposite sides of a transfinite surface must carry equal point counts,
+        so the along-feature target is computed once from the longer side and
+        distributed across each side's curves. End caps get ``thickness + 1``
+        points, matching gmshflow. Returns True on success.
+        """
+        chains = self._partition_boundary_chains(surf_tag, corner_tags)
+        if chains is None:
+            return False
+
+        ct = [int(tag) for tag in corner_tags]
+        roles = {
+            frozenset((ct[0], ct[1])): 'side',
+            frozenset((ct[2], ct[3])): 'side',
+            frozenset((ct[1], ct[2])): 'cap',
+            frozenset((ct[3], ct[0])): 'cap',
+        }
+        sides, caps = [], []
+        for start_corner, end_corner, curves in chains:
+            role = roles.get(frozenset((start_corner, end_corner)))
+            if role == 'side':
+                sides.append(curves)
+            elif role == 'cap':
+                caps.append(curves)
+            else:
+                return False
+        if len(sides) != 2 or len(caps) != 2:
+            return False
+
+        def chain_lengths(chains_group):
+            result = []
+            for curves in chains_group:
+                lengths = [self._entity_length(1, curve) for curve in curves]
+                if any(l is None or not math.isfinite(l) or l <= 0 for l in lengths):
+                    return None
+                result.append(lengths)
+            return result
+
+        side_lengths = chain_lengths(sides)
+        cap_lengths = chain_lengths(caps)
+        if side_lengths is None or cap_lengths is None:
+            return False
+
+        total_points = max(
+            2,
+            int(round(max(sum(lengths) for lengths in side_lengths) / max(lc, 1e-12))) + 1,
+        )
+        # A cap subdivided into more curves than the strip has cell rows (e.g.
+        # by a densified domain-boundary vertex) cannot carry thickness+1
+        # points; forcing more would interpolate a node row onto the feature
+        # line, so the caller falls back to recombine-only instead.
+        cap_divisions = [
+            self._distribute_chain_points(lengths, int(thickness) + 1)
+            for lengths in cap_lengths
+        ]
+        if any(divisions is None for divisions in cap_divisions):
+            return False
+
+        try:
+            for curves, lengths in zip(sides, side_lengths):
+                divisions = self._distribute_chain_points(lengths, total_points)
+                if divisions is None:
+                    return False
+                for curve, points in zip(curves, divisions):
+                    gmsh.model.mesh.setTransfiniteCurve(int(curve), int(points))
+            for curves, divisions in zip(caps, cap_divisions):
+                for curve, points in zip(curves, divisions):
+                    gmsh.model.mesh.setTransfiniteCurve(int(curve), int(points))
+            gmsh.model.mesh.setTransfiniteSurface(int(surf_tag), "Left", ct)
+        except Exception as e:
+            warnings.warn(
+                f"Could not apply transfinite structure to buffer surface {surf_tag}: {e}"
+            )
+            return False
+        return True
+
+    def _set_default_buffer_curve_divisions(self, surf_tag, lc):
+        """Recombine-only fallback: seed each boundary curve at ~lc spacing."""
+        try:
+            boundary = gmsh.model.getBoundary(
+                [(2, int(surf_tag))], oriented=False, recursive=False
+            )
+        except Exception:
+            boundary = []
+        for dim, tag in boundary:
+            if int(dim) != 1:
+                continue
+            length = self._entity_length(1, tag)
+            if length is None or not math.isfinite(length) or length <= 0:
+                continue
+            divisions = max(2, int(round(length / lc)) + 1)
+            try:
+                gmsh.model.mesh.setTransfiniteCurve(int(tag), divisions)
+            except Exception as e:
+                warnings.warn(f"Could not set transfinite divisions on curve {tag}: {e}")
+
+    def _apply_structured_buffer_meshing(self, final_map, structured_buffer_specs):
+        """Apply transfinite/recombine constraints to relocated buffer surfaces.
+
+        Runs after fragmentation/dedup so OCC re-tagging cannot break the
+        structured constraints. Line strips get a true 4-corner transfinite
+        structure located by their recorded corner coordinates; polygon bands
+        (annuli) and any strip that was trimmed or split are meshed
+        recombine-only.
+        """
+        structured_surfaces = final_map.get('structured_buffer_surfs', {})
+        if not structured_surfaces:
+            return
+
+        gmsh.option.setNumber("Mesh.RecombinationAlgorithm", 0)
+        transfinite_count = 0
+        recombine_only_count = 0
+        for feat_id, dimtags in structured_surfaces.items():
+            spec = structured_buffer_specs.get(feat_id, {})
+            lc = max(float(spec.get('lc', self.background_lc or 1.0)), 0.001)
+            thickness = int(spec.get('thickness', 1))
+            strips = [info for info in spec.get('strips', []) if isinstance(info, dict)]
+            corner_sets = [info['corners'] for info in strips if info.get('corners')]
+            side_line_sets = [info['side_lines'] for info in strips if info.get('side_lines')]
+            surf_tags = [
+                int(dt[1])
+                for dt in dimtags
+                if isinstance(dt, (tuple, list)) and len(dt) >= 2 and int(dt[0]) == 2
+            ]
+
+            n_created = int(spec.get('n_surfaces_created', 0) or 0)
+            if n_created and len(surf_tags) > n_created and self.verbosity > 0:
+                print(
+                    f"Structured buffer for feature {feat_id} was split by fragmentation "
+                    f"({n_created} surface(s) became {len(surf_tags)}); applying the "
+                    "transfinite structure per piece."
+                )
+
+            tol = max(1e-4, lc * 1e-3)
+            for surf_tag in surf_tags:
+                structured = False
+                # Fast path: the recorded whole-strip corners survived intact.
+                for corners in corner_sets:
+                    corner_tags = self._locate_corner_tags_on_surface(surf_tag, corners, tol)
+                    if corner_tags is not None:
+                        structured = self._apply_transfinite_strip(
+                            surf_tag, corner_tags, lc, thickness
+                        )
+                        if structured:
+                            break
+                # Split/trimmed pieces: re-derive each piece's corners from the
+                # extreme boundary points on the original offset side lines.
+                if not structured:
+                    for side_lines in side_line_sets:
+                        corner_tags = self._derive_strip_corners_on_surface(
+                            surf_tag, side_lines, tol
+                        )
+                        if corner_tags is not None:
+                            structured = self._apply_transfinite_strip(
+                                surf_tag, corner_tags, lc, thickness
+                            )
+                            if structured:
+                                break
+                if not structured and (corner_sets or side_line_sets):
+                    warnings.warn(
+                        f"Could not apply transfinite structure to buffer surface "
+                        f"{surf_tag} of feature {feat_id} (the strip was altered by "
+                        "fragmentation, e.g. end caps subdivided where the strip meets "
+                        "the domain boundary); meshing it recombine-only."
+                    )
+                if not structured:
+                    self._set_default_buffer_curve_divisions(surf_tag, lc)
+                try:
+                    gmsh.model.mesh.setRecombine(2, int(surf_tag))
+                    gmsh.model.mesh.setAlgorithm(2, int(surf_tag), 8)
+                except Exception as e:
+                    warnings.warn(
+                        f"Could not apply recombination to buffer surface {surf_tag}: {e}"
+                    )
+                if structured:
+                    transfinite_count += 1
+                else:
+                    recombine_only_count += 1
+
+        if self.verbosity > 0:
+            print(
+                f"Applied structured quad-buffer meshing to "
+                f"{transfinite_count + recombine_only_count} surface(s) "
+                f"({transfinite_count} transfinite, {recombine_only_count} recombine-only)."
+            )
     
     def _setup_fields(self, gmsh_map, polygons_gdf, lines_gdf, points_gdf):
         """
@@ -1486,13 +2130,25 @@ class MeshGenerator:
                 # Straddle/barrier lines may have been converted into points.
                 elif fid in gmsh_map.get('points', {}):
                     tags_dict['points'].extend(extract_tags(gmsh_map['points'][fid]))
-                elif fid in gmsh_map.get('structured_buffer_surfs', {}):
-                    tags_dict['surfaces'].extend(extract_tags(gmsh_map['structured_buffer_surfs'][fid]))
+                elif ('line', fid) in gmsh_map.get('structured_buffer_surfs', {}):
+                    # Buffer strips are embedded surfaces; list them as such so
+                    # distance-growth fields target their boundary curves
+                    # (an empty 'embedded_surfaces' would disable the field).
+                    surface_tags = extract_tags(gmsh_map['structured_buffer_surfs'][('line', fid)])
+                    tags_dict['surfaces'].extend(surface_tags)
+                    tags_dict['embedded_surfaces'].extend(surface_tags)
 
             # Surfaces
             for fid in feature_ids_by_geom.get('surfaces', []):
                 if fid in gmsh_map.get('surfaces', {}):
                     surface_tags = extract_tags(gmsh_map['surfaces'][fid])
+                    # A buffered polygon's outline lives in its band surfaces
+                    # (the interior is inset), so include them for field
+                    # targeting too.
+                    if ('poly', fid) in gmsh_map.get('structured_buffer_surfs', {}):
+                        surface_tags = surface_tags + extract_tags(
+                            gmsh_map['structured_buffer_surfs'][('poly', fid)]
+                        )
                     tags_dict['surfaces'].extend(surface_tags)
 
                     try:
@@ -1937,8 +2593,9 @@ class MeshGenerator:
                     # Smooths the mesh to relax gradients (reduces drift).
                     gmsh.model.mesh.optimize("Laplace2D",niter=1)
 
-            self.triangular_quality = self._collect_triangular_quality()
-            self.element_grid = self._collect_element_grid(clean_polys)
+            meshed_surface_tags = self._meshed_surface_tags(gmsh_map, clean_polys)
+            self.triangular_quality = self._collect_triangular_quality(meshed_surface_tags)
+            self.element_grid = self._collect_element_grid(clean_polys, meshed_surface_tags)
             
             if output_file:
                 gmsh.write(output_file)
@@ -1968,21 +2625,10 @@ class MeshGenerator:
 
             tag_to_xy: dict[int, tuple[float, float]] = {}
 
-            # 1) Domain surfaces: embedded polygons only
-            domain_surface_tags: list[int] = []
-            if clean_polys is not None and not clean_polys.empty and 'embed' in clean_polys.columns:
-                embedded_poly_ids = [int(i) for i, r in clean_polys.iterrows() if _is_embedded_row(r)]
-            elif clean_polys is not None and not clean_polys.empty:
-                # Historical behavior: polygons were all embedded.
-                embedded_poly_ids = [int(i) for i in clean_polys.index]
-            else:
-                embedded_poly_ids = []
-
-            for fid in embedded_poly_ids:
-                if fid in gmsh_map.get('surfaces', {}):
-                    for dimtag in gmsh_map['surfaces'][fid]:
-                        if isinstance(dimtag, (tuple, list)) and len(dimtag) >= 2 and int(dimtag[0]) == 2:
-                            domain_surface_tags.append(int(dimtag[1]))
+            # 1) Surfaces of the meshed domain: embedded polygons plus
+            # straddle/structured-buffer strips (their nodes are Voronoi
+            # generators too). Field-only surfaces are excluded.
+            domain_surface_tags = self._meshed_surface_tags(gmsh_map, clean_polys)
 
             # If we cannot determine domain surfaces from the map, fall back to
             # all 2D nodes (still avoids 1D-only nodes).
