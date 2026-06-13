@@ -164,11 +164,18 @@ def test_crossing_quad_buffers_are_protected_and_warn():
     clean_polys, clean_lines, clean_points = cm.generate()
     mesher = MeshGenerator(background_lc=1.5, verbosity=0, smoothing_steps=0, optimization_cycles=0)
 
-    with pytest.warns(UserWarning, match="crosses another protected feature"):
+    with pytest.warns(UserWarning, match="crosses a higher-priority protected feature"):
         assert mesher.generate(clean_polys, clean_lines, clean_points)
 
     quads = mesher.get_element_grid("quads")
     assert not quads.empty
+    # Equal z_order/lc/thickness: the horizontal line was added first, so it
+    # wins the tie-break and stays continuous THROUGH the crossing (one-sided
+    # trimming) while the vertical one is trimmed there.
+    winner_at_crossing = quads[
+        (quads["centroid_y"].sub(2).abs() < 0.5) & (quads["centroid_x"].sub(5).abs() < 0.6)
+    ]
+    assert not winner_at_crossing.empty
     horizontal_arm = quads[
         (quads["centroid_y"].sub(2).abs() < 0.5) & (quads["centroid_x"].sub(5).abs() > 1)
     ]
@@ -480,7 +487,9 @@ def test_buffer_surfaces_do_not_double_mesh_crossing_configuration():
     )
     clean_polys, clean_lines, clean_points = cm.generate()
     mesher = MeshGenerator(background_lc=1.5, verbosity=0, smoothing_steps=0, optimization_cycles=0)
-    with pytest.warns(UserWarning, match="crosses another protected feature"):
+    # The inner zone has z_order=1, so it wins and stays continuous; the fault
+    # line (z_order=0) is the lower-priority feature trimmed at the crossing.
+    with pytest.warns(UserWarning, match="crosses a higher-priority protected feature"):
         assert mesher.generate(clean_polys, clean_lines, clean_points)
 
     element_grid = mesher.get_element_grid()

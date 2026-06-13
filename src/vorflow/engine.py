@@ -11,6 +11,14 @@ from shapely.validation import make_valid
 from .fields import MeshField, ThresholdField, ExponentialField, AutoLinearField, AutoExponentialField, ConstantField
 
 
+# Half-cell gap left between a trimmed (lower-priority) quad buffer and the
+# continuous (higher-priority) one it crosses. The loser is trimmed to the
+# winner's footprint plus this many local cell widths, so its quads butt up
+# against the winner's structured node row with one clean unstructured row in
+# between. Tunable; larger values widen the gap if slivers appear.
+QUAD_BUFFER_CROSSING_GAP = 0.5
+
+
 def _assign_zones_to_elements(grid, zones_gdf):
     """Assign a zone to each element by spatially joining element centroids.
 
@@ -431,6 +439,10 @@ class MeshGenerator:
         """
         input_tag_info = {}
 
+        # Refinement disks recorded where quad buffers cross (see
+        # record_quad_buffer_crossings); consumed in _setup_fields.
+        self._quad_buffer_crossings = []
+
         # Non-embedded geometry does not participate in fragmentation.
         # We still track it so mesh-size fields can be applied later.
         nonembedded_point_tags = {}
@@ -622,15 +634,16 @@ class MeshGenerator:
         # push_ring_vertices_off_strips below).
         line_strip_polygons = []
 
-        def create_line_structured_buffer(row):
+        def plan_line_strip(row):
+            # Pure-geometry planning (no OCC, no trimming): build the untrimmed
+            # strip polygon(s) for a quad-buffered line so footprints exist for
+            # all features before any are trimmed. Returns a list of
+            # {'strip', 'corners', 'side_lines'} dicts, one per line part.
             line = row.geometry
             lc = feature_lc(row)
             thickness = quad_buffer_thickness(row)
             offset = thickness * lc / 2.0
-            other_corridors = other_feature_corridors(
-                ('line', int(row.name)), min_half_width=0.6 * lc
-            )
-            created = []
+            plans = []
             for part in line_parts(line):
                 if part.length <= 0:
                     continue
@@ -677,23 +690,10 @@ class MeshGenerator:
                     tuple(pos_coords[-1]),
                     tuple(pos_coords[0]),
                 ]
-                if other_corridors is not None and strip.intersects(other_corridors):
-                    warnings.warn(
-                        f"Structured buffer for line feature {row.name} crosses another protected "
-                        "feature; the strip is trimmed at the crossing."
-                    )
-                    strip = make_valid(strip.difference(other_corridors))
-                    corners = None
-                line_strip_polygons.append(strip)
-                created.extend(
-                    add_structured_buffer_surface(
-                        strip, ('line', int(row.name)), 'structured_buffer_surf',
-                        corners=corners, side_lines=(pos, neg),
-                    )
-                )
-            return created
+                plans.append({'strip': strip, 'corners': corners, 'side_lines': (pos, neg)})
+            return plans
 
-        def create_polygon_structured_buffer(row):
+        def plan_polygon_band(row):
             # gmshflow parity (create_surfacegrid_from_buffer_poly): the band is
             # the annulus between the +/- offsets of the simplified outline, and
             # the zone interior is meshed from the inner offset, so the original
@@ -702,7 +702,7 @@ class MeshGenerator:
             # a node row on it (a row of ~square cells centered on the shape).
             # Bands are annuli: no 4-corner transfinite structure is possible,
             # so they are meshed quasi-structured (recombined quads with ~lc
-            # curve divisions). Returns (created_surfaces, band_geom).
+            # curve divisions). Pure geometry; returns the untrimmed band or None.
             geom = row.geometry
             lc = feature_lc(row)
             thickness = quad_buffer_thickness(row)
@@ -719,23 +719,109 @@ class MeshGenerator:
                     f"Polygon feature {row.name} is too narrow for a quad_buffer band of "
                     f"width {2.0 * offset:g}; meshing it without the structured buffer."
                 )
-                return [], None
+                return None
             inner = inner_parts[0] if len(inner_parts) == 1 else MultiPolygon(inner_parts)
             # Difference (rather than boundary.buffer) so the band's inner ring
             # and the interior surface share exact coordinates and OCC merges
             # them into a single curve.
-            band = make_valid(outer.difference(inner))
-            other_corridors = other_feature_corridors(
-                ('poly', int(row.name)), min_half_width=0.6 * lc
-            )
-            if other_corridors is not None and band.intersects(other_corridors):
-                warnings.warn(
-                    f"Structured buffer for polygon feature {row.name} crosses another protected "
-                    "feature; the band is trimmed near the crossing."
+            return make_valid(outer.difference(inner))
+
+        def clean_trimmed_pieces(geom, lc, feature_label):
+            # After one-sided trimming, drop "sleeve" slivers (thin wedges from
+            # shallow-angle/tangential overlaps) that would force bad elements.
+            # Morphological opening (mitre joins keep rectangles square) removes
+            # whiskers; the area + erosion tests drop pieces thinner than ~0.8
+            # cells. Dropped gaps are filled by unstructured elements.
+            kept = []
+            dropped = 0
+            for part in polygon_parts(make_valid(geom)):
+                if part.is_empty or part.area <= 0:
+                    continue
+                opened = make_valid(
+                    part.buffer(-0.25 * lc, join_style=2).buffer(0.25 * lc, join_style=2)
                 )
-                band = make_valid(band.difference(other_corridors))
+                candidates = polygon_parts(opened) if not opened.is_empty else []
+                if not candidates:
+                    dropped += 1
+                    continue
+                for sub in candidates:
+                    sub = make_valid(sub.simplify(0.1 * lc))
+                    if sub.is_empty or sub.area < 0.5 * lc * lc:
+                        dropped += 1
+                        continue
+                    eroded = sub.buffer(-0.4 * lc)
+                    if eroded.is_empty or getattr(eroded, 'area', 0.0) <= 0:
+                        dropped += 1
+                        continue
+                    kept.append(sub)
+            if dropped:
+                warnings.warn(
+                    f"Structured buffer for {feature_label} dropped {dropped} sliver "
+                    "piece(s) at a crossing (too thin to mesh); that gap is filled with "
+                    "unstructured elements. Flip z_order or simplify the geometry to avoid it."
+                )
+            return kept
+
+        def create_line_structured_buffer(row):
+            key = ('line', int(row.name))
+            plan = strip_plans.get(key)
+            if plan is None:
+                return []
+            lc = plan['lc']
+            obstacles = higher_priority_obstacles(key)
+            record_quad_buffer_crossings(key)
+            created = []
+            feature_label = f"line feature {row.name}"
+            for part_plan in plan['parts']:
+                strip = part_plan['strip']
+                corners = part_plan['corners']
+                side_lines = part_plan['side_lines']
+                if obstacles is not None and strip.intersects(obstacles):
+                    warnings.warn(
+                        f"Structured buffer for {feature_label} crosses a higher-priority "
+                        "protected feature; it is trimmed at the crossing (set z_order to "
+                        "choose which feature stays continuous)."
+                    )
+                    pieces = clean_trimmed_pieces(
+                        make_valid(strip.difference(obstacles)), lc, feature_label
+                    )
+                    corners = None
+                    if not pieces:
+                        continue
+                    strip = make_valid(unary_union(pieces) if len(pieces) > 1 else pieces[0])
+                line_strip_polygons.append(strip)
+                created.extend(
+                    add_structured_buffer_surface(
+                        strip, key, 'structured_buffer_surf',
+                        corners=corners, side_lines=side_lines,
+                    )
+                )
+            return created
+
+        def create_polygon_structured_buffer(row):
+            key = ('poly', int(row.name))
+            plan = strip_plans.get(key)
+            if plan is None:
+                return [], None
+            lc = plan['lc']
+            band = plan['band']
+            obstacles = higher_priority_obstacles(key)
+            record_quad_buffer_crossings(key)
+            feature_label = f"polygon feature {row.name}"
+            if obstacles is not None and band.intersects(obstacles):
+                warnings.warn(
+                    f"Structured buffer for {feature_label} crosses a higher-priority "
+                    "protected feature; it is trimmed at the crossing (set z_order to "
+                    "choose which feature stays continuous)."
+                )
+                pieces = clean_trimmed_pieces(
+                    make_valid(band.difference(obstacles)), lc, feature_label
+                )
+                if not pieces:
+                    return [], None
+                band = make_valid(unary_union(pieces) if len(pieces) > 1 else pieces[0])
             created = add_structured_buffer_surface(
-                band, ('poly', int(row.name)), 'structured_buffer_surf'
+                band, key, 'structured_buffer_surf'
             )
             if not created:
                 return [], None
@@ -755,10 +841,9 @@ class MeshGenerator:
             
         # Build a protection corridor around each barrier/straddle/quad-buffer
         # feature. Their union (the "barrier zone") trims standard lines away
-        # from these sensitive regions; structured buffer strips are
-        # additionally trimmed against the corridors of *other* protected
-        # features so crossing features cannot inject nodes into each other's
-        # strips.
+        # from these sensitive regions. Quad-buffer strips that cross each other
+        # are resolved by priority (see strip_plans / higher_priority_obstacles
+        # below): the winner stays continuous and only the loser is trimmed.
         def feature_protection_epsilon(row):
             lc = feature_lc(row)
             if row_bool(row, 'quad_buffer', False):
@@ -800,18 +885,120 @@ class MeshGenerator:
             if self.verbosity > 0:
                 print(f"Constructed Barrier Zone from {len(corridors_by_feature)} protected features.")
 
-        def other_feature_corridors(self_key, min_half_width=0.0):
-            # min_half_width widens the corridors so the gap a structured
-            # strip/band is trimmed to stays at least about one cell wide;
-            # narrower gaps force sliver triangles at the crossing.
-            geoms = [
-                corridor_geometry(basis, eps, min_half_width)
-                for key, (basis, eps) in corridors_by_feature.items()
-                if key != self_key
-            ]
+        # --- Quad-buffer crossing priority -------------------------------
+        # Plan every quad-buffer footprint up front (pure geometry, no OCC) so
+        # that when two cross, one stays continuous and only the lower-priority
+        # one is trimmed -- against the winner's actual footprint plus a half-
+        # cell gap, instead of both yielding to an inflated corridor (which left
+        # a hole filled by coarse background triangles). Priority key (lower
+        # wins): user z_order, then finer lc, then wider strip, then line over
+        # polygon, then insertion order.
+        def feature_z_order(row):
+            val = row.get('z_order', 0)
+            if val is None or pd.isna(val):
+                return 0.0
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                return 0.0
+
+        strip_plans = {}
+        _feat_counter = 0
+        for idx, row in lines_gdf.iterrows():
+            if not row_bool(row, 'quad_buffer', False):
+                continue
+            parts = plan_line_strip(row)
+            if not parts:
+                continue
+            lc = feature_lc(row)
+            thickness = quad_buffer_thickness(row)
+            strip_plans[('line', int(idx))] = {
+                'kind': 'line',
+                'parts': parts,
+                'footprint': make_valid(unary_union([p['strip'] for p in parts])),
+                'lc': lc,
+                'thickness': thickness,
+                'width': thickness * lc,
+                'priority_key': (-feature_z_order(row), lc, -(thickness * lc), 0, _feat_counter),
+            }
+            _feat_counter += 1
+        if not polygons_gdf.empty:
+            for idx, row in polygons_gdf.iterrows():
+                if not (is_embedded(row) and row_bool(row, 'quad_buffer', False)):
+                    continue
+                band = plan_polygon_band(row)
+                if band is None or band.is_empty:
+                    continue
+                lc = feature_lc(row)
+                thickness = quad_buffer_thickness(row)
+                strip_plans[('poly', int(idx))] = {
+                    'kind': 'poly',
+                    'band': band,
+                    'footprint': make_valid(band),
+                    'lc': lc,
+                    'thickness': thickness,
+                    'width': thickness * lc,
+                    'priority_key': (-feature_z_order(row), lc, -(thickness * lc), 1, _feat_counter),
+                }
+                _feat_counter += 1
+
+        def higher_priority_obstacles(self_key):
+            # Union of geometry a quad buffer must keep clear of: the footprints
+            # of strictly higher-priority quad buffers (buffered by a half-cell
+            # so the loser's quads butt up against the winner's structured row),
+            # plus the corridors of non-quad protected features (barrier/straddle
+            # lines, which still trim mutually).
+            self_plan = strip_plans.get(self_key)
+            if self_plan is None:
+                return None
+            self_pkey = self_plan['priority_key']
+            lc_self = self_plan['lc']
+            geoms = []
+            for key, plan in strip_plans.items():
+                if key == self_key:
+                    continue
+                if plan['priority_key'] < self_pkey:
+                    geoms.append(
+                        plan['footprint'].buffer(
+                            QUAD_BUFFER_CROSSING_GAP * lc_self, cap_style=2
+                        )
+                    )
+            for key, (basis, eps) in corridors_by_feature.items():
+                if key in strip_plans or key == self_key:
+                    continue
+                geoms.append(corridor_geometry(basis, eps, min_half_width=0.6 * lc_self))
             if not geoms:
                 return None
             return make_valid(unary_union(geoms))
+
+        def record_quad_buffer_crossings(self_key):
+            # From the loser's side, record a refinement disk over each crossing
+            # region so the gap fill is pinned to min(lc) rather than jumping to
+            # the background size next to the dense strip rows.
+            self_plan = strip_plans.get(self_key)
+            if self_plan is None:
+                return
+            self_fp = self_plan['footprint']
+            self_pkey = self_plan['priority_key']
+            lc_self = self_plan['lc']
+            w_self = self_plan['width']
+            for key, plan in strip_plans.items():
+                if key == self_key or not (plan['priority_key'] < self_pkey):
+                    continue
+                inter = make_valid(self_fp.intersection(plan['footprint']))
+                for part in polygon_parts(inter):
+                    if part.is_empty or part.area <= 0:
+                        continue
+                    minx, miny, maxx, maxy = part.bounds
+                    part_radius = 0.5 * math.hypot(maxx - minx, maxy - miny)
+                    size = min(lc_self, plan['lc'])
+                    radius = part_radius + 0.5 * (w_self + plan['width']) + size
+                    self._quad_buffer_crossings.append({
+                        'x': part.centroid.x,
+                        'y': part.centroid.y,
+                        'size': size,
+                        'radius': radius,
+                    })
 
         # Add line features to the model, handling barriers and standard lines differently.
         for idx, row in lines_gdf.iterrows():
@@ -2183,6 +2370,25 @@ class MeshGenerator:
             
             if f_id is not None:
                 field_list.append(f_id)
+
+        # Crossing refinement: where two quad buffers cross, the lower-priority
+        # one is trimmed away, leaving a small gap that the unstructured mesher
+        # would otherwise fill at the background size right next to the dense
+        # strip rows -- the size jump and quality crater the user sees. Pin each
+        # crossing region to min(lc) of the two features with a Ball field
+        # (rotation-agnostic, no OCC geometry added). The Min field below takes
+        # the smallest requested size, and transfinite strips ignore size fields,
+        # so the continuous winner is unaffected.
+        for crossing in getattr(self, '_quad_buffer_crossings', []):
+            ball = gmsh.model.mesh.field.add("Ball")
+            gmsh.model.mesh.field.setNumber(ball, "Radius", float(crossing['radius']))
+            gmsh.model.mesh.field.setNumber(ball, "XCenter", float(crossing['x']))
+            gmsh.model.mesh.field.setNumber(ball, "YCenter", float(crossing['y']))
+            gmsh.model.mesh.field.setNumber(ball, "ZCenter", 0.0)
+            gmsh.model.mesh.field.setNumber(ball, "VIn", float(crossing['size']))
+            gmsh.model.mesh.field.setNumber(ball, "VOut", global_max_lc)
+            gmsh.model.mesh.field.setNumber(ball, "Thickness", 3.0 * float(crossing['size']))
+            field_list.append(ball)
 
         #now lets add the background constant field if specified
         if self.background_lc is not None:
