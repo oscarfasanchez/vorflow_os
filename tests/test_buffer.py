@@ -350,31 +350,33 @@ def test_strip_crossing_embedded_zone_stays_transfinite():
 def test_size_field_attached_to_quad_buffer_line_refines_halo():
     # Regression: distance-growth fields on quad_buffer lines were silently
     # dropped because the strip surfaces were not listed as embedded surfaces.
+    # An explicit exponential field must still grade the halo outward from the
+    # strip (now also the default behavior -- see test_default_field_*).
     from vorflow.fields import AutoExponentialField
 
-    def cell_count(with_field):
-        if gmsh.is_initialized():
-            gmsh.finalize()
-        cm = ConceptualMesh(crs=None)
-        cm.add_polygon(box(0, 0, 20, 12), zone_id="domain", resolution=4.0, densify=True)
-        cm.add_line(
-            LineString([(4, 6), (16, 6)]),
-            line_id="buffered",
-            resolution=0.5,
-            quad_buffer=True,
-            quad_buffer_thickness=1,
-            fields=[AutoExponentialField(growth_factor=1.2)] if with_field else None,
-        )
-        clean_polys, clean_lines, clean_points = cm.generate()
-        mesher = MeshGenerator(background_lc=4.0, verbosity=0, smoothing_steps=0, optimization_cycles=0)
-        assert mesher.generate(clean_polys, clean_lines, clean_points)
-        return len(mesher.get_element_grid())
+    cm = ConceptualMesh(crs=None)
+    cm.add_polygon(box(0, 0, 20, 12), zone_id="domain", resolution=4.0, densify=True)
+    cm.add_line(
+        LineString([(4, 6), (16, 6)]),
+        line_id="buffered",
+        resolution=0.5,
+        quad_buffer=True,
+        quad_buffer_thickness=1,
+        fields=[AutoExponentialField(growth_factor=1.2)],
+    )
+    clean_polys, clean_lines, clean_points = cm.generate()
+    mesher = MeshGenerator(background_lc=4.0, verbosity=0, smoothing_steps=0, optimization_cycles=0)
+    assert mesher.generate(clean_polys, clean_lines, clean_points)
 
-    without_field = cell_count(False)
-    with_field = cell_count(True)
-    # The exponential halo must grade sizes outward from the strip, producing
-    # clearly more elements than the bare strip in a coarse background.
-    assert with_field > without_field * 1.3
+    grid = mesher.get_element_grid()
+    cent = grid.geometry.centroid
+    # The halo grades element size outward from the strip: elements just off the
+    # strip are smaller than those out near the coarse domain edge. If the field
+    # were dropped (the regression), sizes would be uniform.
+    near = grid[cent.y.sub(6).abs().between(1.0, 3.0)]
+    far = grid[cent.y.sub(6).abs() > 4.5]
+    assert not near.empty and not far.empty
+    assert near.geometry.area.mean() < far.geometry.area.mean()
 
 
 def _generate_polygon_buffer_voronoi(thickness):

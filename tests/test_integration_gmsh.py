@@ -1,3 +1,5 @@
+import warnings
+
 import pytest
 import geopandas as gpd
 from shapely.geometry import Polygon, LineString
@@ -308,3 +310,66 @@ def test_gmsh_integration_overlapping_polygon_with_hole():
     total_area = grid.geometry.area.sum()
     expected_area = domain.area # 400
     assert pytest.approx(total_area, rel=0.01) == expected_area
+
+
+def _domain_with_fine_zone(*, growth_factor=None, dist_min=None, dist_max=None, fields=None):
+    domain = Polygon([(0, 0), (20, 0), (20, 20), (0, 20)])
+    fine = Polygon([(8, 8), (12, 8), (12, 12), (8, 12)])
+    cm = ConceptualMesh(crs=None)
+    cm.add_polygon(domain, zone_id="domain", resolution=4.0)
+    cm.add_polygon(
+        fine,
+        zone_id="fine",
+        resolution=0.5,
+        z_order=1,
+        densify=True,
+        growth_factor=growth_factor,
+        dist_min=dist_min,
+        dist_max=dist_max,
+        fields=fields,
+    )
+    clean = cm.generate()
+    mg = MeshGenerator(background_lc=4.0, verbosity=0, smoothing_steps=0, optimization_cycles=0)
+    return mg, clean
+
+
+def test_default_field_is_auto_exponential_and_refines_without_dist_or_fields():
+    # A feature finer than the background now refines by default via an implicit
+    # AutoExponentialField -- no dist_min/dist_max or explicit fields required,
+    # and no deprecation warning.
+    mg, clean = _domain_with_fine_zone()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert mg.generate(*clean)
+    assert not [w for w in caught if issubclass(w.category, DeprecationWarning)]
+
+    grid = mg.get_element_grid()
+    cent = grid.geometry.centroid
+    inner = grid[cent.x.between(8, 12) & cent.y.between(8, 12)]
+    outer = grid[(cent.x < 4) | (cent.x > 16)]
+    assert not inner.empty and not outer.empty
+    # Exponential halo: cells in the fine zone are much smaller than far away.
+    assert inner.geometry.area.mean() < 0.25 * outer.geometry.area.mean()
+
+
+def test_dist_params_emit_deprecation_warning_but_still_mesh():
+    # The legacy dist_min/dist_max linear-threshold path still works (back-compat)
+    # but now warns that it is deprecated in favor of the AutoExponentialField.
+    mg, clean = _domain_with_fine_zone(dist_min=0.5, dist_max=10.0)
+    with pytest.warns(DeprecationWarning, match="dist_min/dist_max are deprecated"):
+        assert mg.generate(*clean)
+    assert not mg.get_element_grid().empty
+
+
+def test_growth_factor_controls_default_refinement_spread():
+    # A slower growth factor keeps cells fine over a larger region, so it yields
+    # more elements than a fast one -- confirming the parameter is wired through.
+    mg_slow, clean_slow = _domain_with_fine_zone(growth_factor=1.05)
+    assert mg_slow.generate(*clean_slow)
+    slow = len(mg_slow.get_element_grid())
+
+    mg_fast, clean_fast = _domain_with_fine_zone(growth_factor=2.0)
+    assert mg_fast.generate(*clean_fast)
+    fast = len(mg_fast.get_element_grid())
+
+    assert slow > fast

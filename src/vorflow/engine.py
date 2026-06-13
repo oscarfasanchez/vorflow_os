@@ -18,6 +18,11 @@ from .fields import MeshField, ThresholdField, ExponentialField, AutoLinearField
 # between. Tunable; larger values widen the gap if slivers appear.
 QUAD_BUFFER_CROSSING_GAP = 0.5
 
+# Default cell-to-cell growth ratio for the implicit AutoExponentialField that
+# now backs a feature's resolution (replacing the legacy linear ThresholdField
+# that was implied by dist_min/dist_max).
+DEFAULT_GROWTH_FACTOR = 1.2
+
 
 def _assign_zones_to_elements(grid, zones_gdf):
     """Assign a zone to each element by spatially joining element centroids.
@@ -2168,68 +2173,68 @@ class MeshGenerator:
                 return [v for v in value if isinstance(v, MeshField)]
             return []
 
-        def _auto_threshold_from_row(row, background_lc):
-            """Create a default ThresholdField from dist_min/dist_max + lc.
+        def _auto_field_from_row(row, background_lc, has_explicit_fields):
+            """Build the implicit size field that backs a feature's resolution.
 
-            This centralizes the legacy behavior that used to live in
-            ConceptualMesh.add_*: if a feature specifies dist_min/dist_max it
-            implies a distance-based size transition around that feature.
+            Default (new): an AutoExponentialField that grows the mesh from the
+            feature size up to the background size at the feature's growth_factor
+            (DEFAULT_GROWTH_FACTOR when unset). Created only when the feature is
+            finer than the background and has no explicit ``fields``.
 
-                        Design notes:
-                        - We only auto-create this field when at least one of dist_min/dist_max
-                            is provided AND the feature has a valid lc.
-                        - This is a *distance-based* transition around the feature:
-                            - SizeMin = lc (feature resolution)
-                            - SizeMax = background_lc (global resolution)
-                            - DistMin >= 0.5 * lc (avoid near-zero gradients)
-                            - DistMax defaults to ~5 * background_lc (transition length scale)
-                            - We enforce (DistMax - DistMin) >= 3 * SizeMax for a gentle gradient.
+            Legacy (deprecated): if dist_min/dist_max are supplied, honor them as
+            the old linear ThresholdField and emit a DeprecationWarning. This path
+            is kept (even alongside explicit fields) so existing models still mesh.
             """
-            dist_min = row.get('dist_min', None)
-            dist_max = row.get('dist_max', None)
-
-            if (dist_min is None or (isinstance(dist_min, float) and pd.isna(dist_min))) and (
-                dist_max is None or (isinstance(dist_max, float) and pd.isna(dist_max))
-            ):
-                return None
-
-            # We need both the feature resolution and a global background resolution
-            # to define an implicit ThresholdField.
             if background_lc is None or (isinstance(background_lc, float) and pd.isna(background_lc)):
                 return None
 
             feature_lc = row.get('lc', None)
             if feature_lc is None or (isinstance(feature_lc, float) and pd.isna(feature_lc)):
                 return None
-
             feature_lc = float(feature_lc)
+
+            dist_min = row.get('dist_min', None)
+            dist_max = row.get('dist_max', None)
             dist_min = None if (dist_min is None or (isinstance(dist_min, float) and pd.isna(dist_min))) else float(dist_min)
             dist_max = None if (dist_max is None or (isinstance(dist_max, float) and pd.isna(dist_max))) else float(dist_max)
 
-            # Default distances if one of the values is omitted.
-            # - DistMin: at least one local element size.
-            # - DistMax: a broader transition scale based on global mesh size.
-            if dist_min is None:
-                dist_min = feature_lc
-            if dist_max is None:
-                dist_max = float(background_lc) * 5.0
+            if dist_min is not None or dist_max is not None:
+                # --- Legacy linear ThresholdField (deprecated) ---
+                warnings.warn(
+                    "dist_min/dist_max are deprecated for feature size transitions; they "
+                    "select the legacy linear ThresholdField. Omit them to use the default "
+                    "AutoExponentialField (tune it with growth_factor), or pass an explicit "
+                    "ThresholdField in `fields` to keep a linear ramp.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                # DistMin: at least one local element size; DistMax: broad scale.
+                if dist_min is None:
+                    dist_min = feature_lc
+                if dist_max is None:
+                    dist_max = float(background_lc) * 5.0
+                dist_min = max(dist_min, feature_lc * 0.5)
+                # Enforce a gentle gradient relative to SizeMax.
+                min_span = 3.0 * float(background_lc)
+                if (dist_max - dist_min) < min_span:
+                    dist_max = dist_min + min_span
+                if dist_max <= dist_min:
+                    dist_max = dist_min + max(float(background_lc), feature_lc, 1e-3)
+                return ThresholdField(size_min=feature_lc, dist_min=dist_min, dist_max=dist_max, size_max=background_lc)
 
-            # Force a reasonable relationship with the target resolution.
-            # DistMin should not be smaller than the local size.
-            dist_min = max(dist_min, feature_lc*0.5)
+            # --- Default AutoExponentialField ---
+            # Only when the user has not supplied an explicit field and the
+            # feature is actually finer than the background (else nothing to do).
+            if has_explicit_fields or feature_lc >= float(background_lc):
+                return None
+            growth = row.get('growth_factor', None)
+            if growth is None or (isinstance(growth, float) and pd.isna(growth)):
+                growth = DEFAULT_GROWTH_FACTOR
+            growth = float(growth)
+            if growth <= 1.0:
+                growth = DEFAULT_GROWTH_FACTOR
+            return AutoExponentialField(growth_factor=growth)
 
-            # Enforce a minimum transition span relative to SizeMax.
-            # This avoids very steep growth that can make the mesher struggle.
-            min_span = 3.0 * float(background_lc)
-            if (dist_max - dist_min) < min_span:
-                dist_max = dist_min + min_span
-
-            # Final safety.
-            if dist_max <= dist_min:
-                dist_max = dist_min + max(float(background_lc), feature_lc, 1e-3)
-
-            return ThresholdField(size_min=feature_lc, dist_min=dist_min, dist_max=dist_max, size_max=background_lc)
-        
         # Configure mesh size fields using MeshField objects attached to features.
         #
         # Data model expectations:
@@ -2239,7 +2244,8 @@ class MeshGenerator:
         #
         # How fields can be specified per feature:
         # - `fields`: list[MeshField] (the only supported explicit mechanism)
-        # - `dist_min/dist_max` (+ lc): shorthand for an automatic ThresholdField
+        # - resolution (+ growth_factor): default implicit AutoExponentialField
+        # - `dist_min/dist_max` (+ lc): DEPRECATED shorthand for a linear ThresholdField
         #
         # Grouping:
         # - We build ONE gmsh field per unique (field parameters + lc).
@@ -2254,11 +2260,15 @@ class MeshGenerator:
         for gdf, geom_type in [(points_gdf, 'points'), (lines_gdf, 'lines'), (polygons_gdf, 'surfaces')]:
             for idx, row in gdf.iterrows():
                 # 1) Collect explicitly specified fields.
-                row_fields = []
-                row_fields.extend(_normalize_fields(row.get('fields', None)))
+                explicit_fields = _normalize_fields(row.get('fields', None))
+                row_fields = list(explicit_fields)
 
-                # 2) Optionally add an implicit ThresholdField based on dist_min/dist_max.
-                auto_field = _auto_threshold_from_row(row, global_max_lc)
+                # 2) Add the implicit size field backing the feature's
+                #    resolution: AutoExponentialField by default, or the legacy
+                #    ThresholdField when dist_min/dist_max are given (deprecated).
+                auto_field = _auto_field_from_row(
+                    row, global_max_lc, has_explicit_fields=bool(explicit_fields)
+                )
                 if auto_field is not None:
                     row_fields.append(auto_field)
 

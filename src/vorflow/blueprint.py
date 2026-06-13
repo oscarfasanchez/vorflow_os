@@ -11,6 +11,18 @@ from shapely.strtree import STRtree
 SIGNIFICANT_REDUCTION_PCT = 1.0
 DEFAULT_CONNECTIVITY_TOLERANCE = 1e-3
 
+
+def _validate_growth_factor(value):
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(
+            f"growth_factor must be a number greater than 1.0 (or None). Got {value!r}."
+        )
+    if value <= 1.0:
+        raise ValueError(f"growth_factor must be greater than 1.0. Got {value}.")
+    return float(value)
+
 def _coerce_connectivity_tolerance(value, parameter_name="connectivity_tolerance"):
     if isinstance(value, bool):
         raise ValueError(
@@ -66,6 +78,7 @@ class ConceptualMesh:
         simplify_tolerance=None,
         quad_buffer=False,
         quad_buffer_thickness=1,
+        growth_factor=None,
     ):
         """
         Adds a polygon feature, such as a model boundary or a refinement zone.
@@ -81,10 +94,15 @@ class ConceptualMesh:
                 another quad-buffered feature (higher stays continuous). To control
                 the two independently, add the zone without ``quad_buffer`` and add
                 its boundary as a separate quad-buffered line with its own z_order.
-            dist_min (float, optional): Distance from the polygon boundary where the mesh
-                size is held constant at the boundary's resolution.
-            dist_max (float, optional): Distance from the polygon boundary over which the mesh
-                transitions to the background resolution.
+            dist_min (float, optional): DEPRECATED. Distance from the polygon boundary where
+                the mesh size is held constant at the boundary's resolution. Supplying
+                dist_min/dist_max selects the legacy linear ThresholdField transition and
+                emits a DeprecationWarning; omit them to use the default AutoExponentialField.
+            dist_max (float, optional): DEPRECATED. Distance from the polygon boundary over
+                which the mesh transitions to the background resolution. See dist_min.
+            growth_factor (float, optional): Cell-to-cell growth ratio (>1.0) for the default
+                AutoExponentialField size transition away from the feature. Defaults to 1.2.
+                Ignored when an explicit ``fields`` list or the legacy dist_min/dist_max is given.
             densify (float|bool|None, optional): Controls polygon boundary densification:
                 - If False, disables densification.
                 - If True, densifies using `resolution` (lc). Requires `resolution` to be set.
@@ -142,6 +160,8 @@ class ConceptualMesh:
         if quad_buffer_thickness not in (1, 2):
             raise ValueError("quad_buffer_thickness must be either 1 or 2.")
 
+        growth_factor = _validate_growth_factor(growth_factor)
+
         if fields is None:
             fields = []
 
@@ -159,12 +179,14 @@ class ConceptualMesh:
                 'embed': embed,
                 'quad_buffer': bool(quad_buffer),
                 'quad_buffer_thickness': int(quad_buffer_thickness),
+                'growth_factor': growth_factor,
             }
         )
 
     def add_line(self, geometry, line_id, resolution, snap_to_polygons=True, is_barrier=False,
                   dist_min=None, dist_max=None, straddle_width=None, fields=None, embed=True, densify=True,
-                  simplify_tolerance=None, quad_buffer=False, quad_buffer_thickness=1, z_order=0):
+                  simplify_tolerance=None, quad_buffer=False, quad_buffer_thickness=1, z_order=0,
+                  growth_factor=None):
         """
         Adds a line feature, such as a river, fault, or other linear boundary.
 
@@ -176,10 +198,12 @@ class ConceptualMesh:
                 nearby polygon boundaries to ensure connectivity.
             is_barrier (bool): If True, the line is treated as a flow barrier. The mesh
                 will be constructed to prevent cell faces from crossing it.
-            dist_min (float, optional): Distance from the line where the mesh size is
-                held constant at the line's resolution.
-            dist_max (float, optional): Distance from the line over which the mesh
-                transitions to the background resolution.
+            dist_min (float, optional): DEPRECATED. Distance from the line where the mesh size
+                is held constant at the line's resolution. Supplying dist_min/dist_max selects
+                the legacy linear ThresholdField transition and emits a DeprecationWarning;
+                omit them to use the default AutoExponentialField.
+            dist_max (float, optional): DEPRECATED. Distance from the line over which the mesh
+                transitions to the background resolution. See dist_min.
             straddle_width (float, optional): If set, forces Voronoi cell edges to align
                 perfectly with the line by creating a "virtual straddle" of mesh nodes.
             fields (list, optional): List of MeshField objects.
@@ -213,6 +237,9 @@ class ConceptualMesh:
                 feature's quad buffer crosses another one, the feature with the
                 higher ``z_order`` keeps its strip continuous and the other is
                 trimmed. Lines do not participate in polygon overlap stacking.
+            growth_factor (float, optional): Cell-to-cell growth ratio (>1.0) for the default
+                AutoExponentialField size transition away from the line. Defaults to 1.2.
+                Ignored when an explicit ``fields`` list or the legacy dist_min/dist_max is given.
         """
         if not geometry.is_valid:
             geometry = make_valid(geometry)
@@ -231,9 +258,11 @@ class ConceptualMesh:
         if quad_buffer_thickness not in (1, 2):
             raise ValueError("quad_buffer_thickness must be either 1 or 2.")
 
+        growth_factor = _validate_growth_factor(growth_factor)
+
         if fields is None:
             fields = []
-        
+
         self.raw_lines.append({
             'geometry': geometry,
             'line_id': line_id,
@@ -249,9 +278,10 @@ class ConceptualMesh:
             'quad_buffer': bool(quad_buffer),
             'quad_buffer_thickness': int(quad_buffer_thickness),
             'z_order': z_order,
+            'growth_factor': growth_factor,
         })
 
-    def add_point(self, geometry, point_id, resolution, dist_min=None, dist_max=None, fields=None, embed=True, simplify_tolerance=None):
+    def add_point(self, geometry, point_id, resolution, dist_min=None, dist_max=None, fields=None, embed=True, simplify_tolerance=None, growth_factor=None):
         """
         Adds a point feature, such as a well or an observation point.
 
@@ -259,13 +289,18 @@ class ConceptualMesh:
             geometry (shapely.Point): The point geometry.
             point_id (str): A unique identifier for the point.
             resolution (float): Target mesh size at the point.
-            dist_min (float, optional): Distance from the point where the mesh size is
-                held constant at the point's resolution.
-            dist_max (float, optional): Distance from the point over which the mesh
-                transitions to the background resolution.
+            dist_min (float, optional): DEPRECATED. Distance from the point where the mesh size
+                is held constant at the point's resolution. Supplying dist_min/dist_max selects
+                the legacy linear ThresholdField transition and emits a DeprecationWarning;
+                omit them to use the default AutoExponentialField.
+            dist_max (float, optional): DEPRECATED. Distance from the point over which the mesh
+                transitions to the background resolution. See dist_min.
             simplify_tolerance (float|int|None, optional): If a number > 0, merges points that are closer
                 than this tolerance. If None or 0, no merging is applied. Raises ValueError if negative.
                 Boolean values are not supported.
+            growth_factor (float, optional): Cell-to-cell growth ratio (>1.0) for the default
+                AutoExponentialField size transition away from the point. Defaults to 1.2.
+                Ignored when an explicit ``fields`` list or the legacy dist_min/dist_max is given.
         """
         if isinstance(simplify_tolerance, bool):
             raise ValueError(
@@ -274,6 +309,8 @@ class ConceptualMesh:
             )
         if isinstance(simplify_tolerance, (int, float)) and simplify_tolerance < 0:
             raise ValueError(f"simplify_tolerance must be non-negative. Got {simplify_tolerance}.")
+
+        growth_factor = _validate_growth_factor(growth_factor)
 
         if fields is None:
             fields = []
@@ -285,7 +322,8 @@ class ConceptualMesh:
             'dist_max': dist_max,
             'fields': fields,
             'embed': embed,
-            'simplify_tolerance': simplify_tolerance
+            'simplify_tolerance': simplify_tolerance,
+            'growth_factor': growth_factor,
         })
     def _apply_simplification(self):
         """
@@ -416,6 +454,7 @@ class ConceptualMesh:
                     "embed",
                     "quad_buffer",
                     "quad_buffer_thickness",
+                    "growth_factor",
                 ],
                 crs=self.crs,
             )
@@ -635,6 +674,7 @@ class ConceptualMesh:
                     'quad_buffer',
                     'quad_buffer_thickness',
                     'z_order',
+                    'growth_factor',
                 ],
                 crs=self.crs,
             )
@@ -644,7 +684,7 @@ class ConceptualMesh:
             self.clean_points = gpd.GeoDataFrame(self.raw_points, crs=self.crs)
         else:
             self.clean_points = gpd.GeoDataFrame(
-                columns=['geometry', 'point_id', 'lc', 'dist_min', 'dist_max', 'fields', 'embed', 'simplify_tolerance'],
+                columns=['geometry', 'point_id', 'lc', 'dist_min', 'dist_max', 'fields', 'embed', 'simplify_tolerance', 'growth_factor'],
                 crs=self.crs,
             )
 
@@ -690,6 +730,7 @@ class ConceptualMesh:
                     'simplify_tolerance',
                     'quad_buffer',
                     'quad_buffer_thickness',
+                    'growth_factor',
                 ]
                 self.clean_polygons = self.clean_polygons.reindex(columns=polygon_columns)
                 field_only_gdf = field_only_gdf.reindex(columns=polygon_columns)

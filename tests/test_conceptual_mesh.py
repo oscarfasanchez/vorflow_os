@@ -26,6 +26,26 @@ def test_resolve_overlaps_respects_z_order():
     assert pytest.approx(expected_union.area, rel=1e-6) == resolved_union.area
 
 
+def test_growth_factor_must_exceed_one():
+    cm = ConceptualMesh()
+    square = Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
+    with pytest.raises(ValueError, match="growth_factor"):
+        cm.add_polygon(square, zone_id=1, resolution=0.5, growth_factor=1.0)
+    with pytest.raises(ValueError, match="growth_factor"):
+        cm.add_line(LineString([(0, 0), (1, 0)]), line_id="l", resolution=0.5, growth_factor=0.9)
+    with pytest.raises(ValueError, match="growth_factor"):
+        cm.add_point(Point(0, 0), point_id="p", resolution=0.5, growth_factor=True)
+
+
+def test_growth_factor_defaults_to_none_and_is_stored():
+    cm = ConceptualMesh()
+    square = Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
+    cm.add_polygon(square, zone_id=1, resolution=0.5)
+    cm.add_polygon(square, zone_id=2, resolution=0.5, growth_factor=1.3)
+    assert cm.raw_polygons[0]["growth_factor"] is None
+    assert cm.raw_polygons[1]["growth_factor"] == 1.3
+
+
 def test_lines_and_points_snap_to_polygons():
     cm = ConceptualMesh(connectivity_tolerance=1.0)
 
