@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 from shapely.geometry import Polygon, LineString, MultiPolygon
 from shapely.ops import unary_union, snap
+from shapely.prepared import prep
 from shapely.validation import make_valid
 from shapely.strtree import STRtree
 
@@ -606,16 +607,25 @@ class ConceptualMesh:
         if domain_union.is_empty:
             return
         domain_union = make_valid(domain_union)
+        # Prepared-geometry fast paths: most features are entirely inside
+        # (or outside) the domain, where a cheap predicate avoids the full
+        # boolean intersection.
+        domain_prep = prep(domain_union)
 
         clipped_lines = []
         for line_data in self.raw_lines:
             geom = line_data.get("geometry")
             if geom is None or geom.is_empty:
                 continue
-            try:
-                clipped = geom.intersection(domain_union)
-            except Exception:
-                clipped = make_valid(geom).intersection(domain_union)
+            if not domain_prep.intersects(geom):
+                continue
+            if domain_prep.covers(geom):
+                clipped = geom
+            else:
+                try:
+                    clipped = geom.intersection(domain_union)
+                except Exception:
+                    clipped = make_valid(geom).intersection(domain_union)
 
             if clipped.is_empty:
                 continue
@@ -733,6 +743,7 @@ class ConceptualMesh:
         if field_only_polys and not self.clean_polygons.empty:
             domain_union = unary_union(self.clean_polygons.geometry)
             domain_union = make_valid(domain_union)
+            domain_prep = prep(domain_union)
 
             clipped_features = []
             for poly_data in field_only_polys:
@@ -740,10 +751,15 @@ class ConceptualMesh:
                 if geom is None or geom.is_empty:
                     continue
                 geom = make_valid(geom)
-                try:
-                    clipped = geom.intersection(domain_union)
-                except Exception:
-                    clipped = make_valid(geom).intersection(make_valid(domain_union))
+                if not domain_prep.intersects(geom):
+                    continue
+                if domain_prep.covers(geom):
+                    clipped = geom
+                else:
+                    try:
+                        clipped = geom.intersection(domain_union)
+                    except Exception:
+                        clipped = make_valid(geom).intersection(make_valid(domain_union))
 
                 if clipped.is_empty:
                     continue

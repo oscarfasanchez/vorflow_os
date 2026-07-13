@@ -5,7 +5,7 @@ import warnings
 import numpy as np
 import geopandas as gpd
 import pandas as pd
-from scipy.spatial import Voronoi
+from scipy.spatial import Voronoi, cKDTree
 from shapely.geometry import Polygon, Point, MultiPolygon
 from shapely.ops import unary_union, split
 from shapely.validation import make_valid
@@ -198,12 +198,17 @@ class VoronoiTessellator:
 
         if len(boundary_indices) > 1:
             boundary_xy = nodes[boundary_indices]
-            distances = np.linalg.norm(
-                boundary_xy[:, None, :] - boundary_xy[None, :, :],
-                axis=2,
-            )
-            distances[distances == 0.0] = np.nan
-            nearest_spacing = np.nanmin(distances, axis=1)
+            # Nearest distinct-neighbor spacing via a KD-tree instead of the
+            # previous dense N x N distance matrix (quadratic memory).
+            # Querying k=2 against the de-duplicated coordinates returns the
+            # node's own coordinate (distance 0) and the nearest *different*
+            # coordinate, matching the old nearest-nonzero semantics exactly.
+            unique_xy = np.unique(boundary_xy, axis=0)
+            if len(unique_xy) > 1:
+                dists, _ = cKDTree(unique_xy).query(boundary_xy, k=2)
+                nearest_spacing = dists[:, 1]
+            else:
+                nearest_spacing = np.full(len(boundary_xy), np.nan)
             spacing_by_index = {
                 int(idx): float(spacing)
                 for idx, spacing in zip(boundary_indices, nearest_spacing)
