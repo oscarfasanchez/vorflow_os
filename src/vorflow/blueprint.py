@@ -1,4 +1,5 @@
 import logging
+import warnings
 import geopandas as gpd
 import pandas as pd
 import numpy as np
@@ -39,8 +40,36 @@ def _coerce_connectivity_tolerance(value, parameter_name="connectivity_tolerance
         raise ValueError(f"{parameter_name} must be non-negative. Got {value}.")
     return float(value)
 
+
+def _warn_if_geographic_crs(crs):
+    """Warn when the project CRS is geographic (lat/lon degrees).
+
+    Mesh sizes (resolution, background_lc, buffer thicknesses) are expressed
+    in CRS units, and MODFLOW needs real length units for cell areas and
+    conductances -- meshing in degrees is almost certainly a mistake.
+    """
+    if crs is None:
+        return
+    try:
+        from pyproj import CRS
+        is_geographic = CRS.from_user_input(crs).is_geographic
+    except Exception:
+        # Unparseable CRS spec: GeoDataFrame construction will surface it.
+        return
+    if is_geographic:
+        warnings.warn(
+            f"The project CRS ({crs}) is geographic (latitude/longitude "
+            "degrees). Mesh sizes will be in degrees and the resulting "
+            "MODFLOW grid will be physically meaningless (1 deg of longitude "
+            "and latitude differ in length, and cell areas/conductances need "
+            "length units). Reproject your data to a projected CRS (e.g. a "
+            "UTM zone) with GeoDataFrame.to_crs() before building the mesh.",
+            stacklevel=3,
+        )
+
+
 class ConceptualMesh:
-    def __init__(self, crs="EPSG:4326", connectivity_tolerance=DEFAULT_CONNECTIVITY_TOLERANCE):
+    def __init__(self, crs=None, connectivity_tolerance=DEFAULT_CONNECTIVITY_TOLERANCE):
         """
         Initializes the conceptual model, which holds raw geometric inputs.
 
@@ -49,12 +78,19 @@ class ConceptualMesh:
         inputs for the mesh generator.
 
         Args:
-            crs: The coordinate reference system for the project (e.g., "EPSG:4326").
+            crs: The coordinate reference system for the project. Use a
+                *projected* CRS (e.g. a UTM zone like "EPSG:32618") so mesh
+                sizes are in real length units. Geographic CRSs (lat/lon
+                degrees, e.g. "EPSG:4326") produce physically meaningless
+                grids and trigger a warning -- reproject your data first with
+                GeoDataFrame.to_crs(). None (default) means local/unspecified
+                coordinates; output GeoDataFrames then carry no CRS.
             connectivity_tolerance (float, optional): Default snapping tolerance used
                 during topology cleanup in generate(). Larger values make lines and
                 points connect more aggressively to nearby geometry.
         """
         self.crs = crs
+        _warn_if_geographic_crs(crs)
         self.connectivity_tolerance = _coerce_connectivity_tolerance(connectivity_tolerance)
         # Store raw geometric inputs before processing.
         self.raw_polygons = [] 

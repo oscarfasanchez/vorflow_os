@@ -1,3 +1,5 @@
+import warnings
+
 import geopandas as gpd
 import pytest
 from shapely.geometry import LineString, Point, Polygon
@@ -267,3 +269,33 @@ def test_simplify_tolerance_bool_is_rejected(bool_tol):
 def test_connectivity_tolerance_validation(bad_tolerance):
     with pytest.raises(ValueError):
         ConceptualMesh(connectivity_tolerance=bad_tolerance)
+
+
+class TestCrsHandling:
+    def test_geographic_crs_warns(self):
+        with pytest.warns(UserWarning, match="geographic"):
+            ConceptualMesh(crs="EPSG:4326")
+
+    def test_projected_crs_does_not_warn(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            ConceptualMesh(crs="EPSG:32618")
+
+    def test_default_crs_is_none_and_does_not_warn(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            cm = ConceptualMesh()
+        assert cm.crs is None
+
+    def test_none_crs_propagates_to_outputs(self):
+        cm = ConceptualMesh()
+        cm.add_polygon(Polygon([(0, 0), (10, 0), (10, 10), (0, 10)]), zone_id=1)
+        clean_polys, _, _ = cm.generate()
+        assert clean_polys.crs is None
+
+    def test_explicit_projected_crs_propagates_to_outputs(self):
+        cm = ConceptualMesh(crs="EPSG:32618")
+        cm.add_polygon(Polygon([(0, 0), (10, 0), (10, 10), (0, 10)]), zone_id=1)
+        clean_polys, _, _ = cm.generate()
+        assert clean_polys.crs is not None
+        assert clean_polys.crs.to_epsg() == 32618
