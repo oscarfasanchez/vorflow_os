@@ -52,3 +52,6 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "slow: gmsh-heavy end-to-end tests (deselect with -m 'not slow')",
+]

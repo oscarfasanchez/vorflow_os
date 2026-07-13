@@ -19,15 +19,6 @@ from vorflow.engine import MeshGenerator, _unit_tangent
 from vorflow.tessellator import VoronoiTessellator
 
 
-@pytest.fixture(autouse=True)
-def ensure_gmsh_finalized():
-    """Ensure gmsh is finalized before and after each test."""
-    if gmsh.is_initialized():
-        gmsh.finalize()
-    yield
-    if gmsh.is_initialized():
-        gmsh.finalize()
-
 
 def _nodes_near_line(nodes, line, tolerance):
     """Count mesh nodes that lie within `tolerance` of a LineString."""

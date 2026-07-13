@@ -43,14 +43,6 @@ ELEMENT_GRID_COLUMNS = [
 ]
 
 
-@pytest.fixture(autouse=True)
-def ensure_gmsh_finalized():
-    if gmsh.is_initialized():
-        gmsh.finalize()
-    yield
-    if gmsh.is_initialized():
-        gmsh.finalize()
-
 
 @pytest.fixture
 def paired_polygons():

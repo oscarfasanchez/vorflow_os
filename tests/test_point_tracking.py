@@ -13,15 +13,8 @@ from shapely.geometry import Point, Polygon, LineString
 from vorflow.blueprint import ConceptualMesh
 from vorflow.engine import MeshGenerator
 
+pytestmark = pytest.mark.slow  # gmsh-heavy end-to-end tests
 
-@pytest.fixture(autouse=True)
-def ensure_gmsh_finalized():
-    """Ensure gmsh is finalized before and after each test."""
-    if gmsh.is_initialized():
-        gmsh.finalize()
-    yield
-    if gmsh.is_initialized():
-        gmsh.finalize()
 
 
 # ---------------------------------------------------------------------------

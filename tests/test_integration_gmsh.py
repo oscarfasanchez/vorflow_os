@@ -10,14 +10,7 @@ from vorflow.engine import MeshGenerator
 from vorflow.fields import AutoExponentialField
 from vorflow.tessellator import VoronoiTessellator
 
-@pytest.fixture(autouse=True)
-def ensure_gmsh_finalized():
-    """Ensure gmsh is finalized before and after each test to prevent state leakage."""
-    if gmsh.is_initialized():
-        gmsh.finalize()
-    yield
-    if gmsh.is_initialized():
-        gmsh.finalize()
+pytestmark = pytest.mark.slow  # gmsh-heavy end-to-end tests
 
 def test_gmsh_integration_simple_square():
     """

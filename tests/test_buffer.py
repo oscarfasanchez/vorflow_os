@@ -6,14 +6,8 @@ from shapely.geometry import LineString, Polygon, box
 
 from vorflow import ConceptualMesh, MeshGenerator, VoronoiTessellator
 
+pytestmark = pytest.mark.slow  # gmsh-heavy end-to-end tests
 
-@pytest.fixture(autouse=True)
-def ensure_gmsh_finalized():
-    if gmsh.is_initialized():
-        gmsh.finalize()
-    yield
-    if gmsh.is_initialized():
-        gmsh.finalize()
 
 
 def _generate_line_buffer_mesh(*, thickness=1, add_crossing_line=False, return_context=False):
@@ -52,6 +46,11 @@ def _generate_line_buffer_mesh(*, thickness=1, add_crossing_line=False, return_c
         optimization_cycles=0,
     )
     assert mesher.generate(clean_polys, clean_lines, clean_points)
+    # A successful run must actually produce mesh nodes covering the domain.
+    assert mesher.nodes is not None and len(mesher.nodes) > 0
+    element_area = mesher.get_element_grid().geometry.area.sum()
+    domain_area = clean_polys.geometry.area.sum()
+    assert element_area == pytest.approx(domain_area, rel=1e-2)
     if return_context:
         return mesher, cm
     return mesher

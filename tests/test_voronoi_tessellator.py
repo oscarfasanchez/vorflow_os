@@ -278,3 +278,29 @@ def test_boundary_centering_rejects_invalid_mode():
 
     with pytest.raises(ValueError, match="boundary_centering"):
         VoronoiTessellator(mesh_gen, cm, boundary_centering="mirror")
+
+
+class TestExportToShapefile:
+    def _tessellator_with_grid(self):
+        cm = _build_conceptual_mesh()
+        clean_polys, _, _ = cm.generate()
+        nodes = np.array([[0.2, 0.2], [0.8, 0.2], [0.2, 0.8], [0.8, 0.8]])
+        mesh_gen = DummyMeshGenerator(nodes=nodes, tags=[1, 2, 3, 4], zones_gdf=clean_polys)
+        return VoronoiTessellator(mesh_gen, cm, clip_to_boundary=True)
+
+    def test_writes_readable_shapefile(self, tmp_path):
+        tess = self._tessellator_with_grid()
+        grid = tess.generate()
+        path = tmp_path / "grid.shp"
+        tess.export_to_shapefile(str(path))
+        assert path.exists()
+        back = gpd.read_file(path)
+        assert len(back) == len(grid)
+        assert back.geometry.is_valid.all()
+        assert back.geometry.area.sum() == pytest.approx(grid.geometry.area.sum())
+
+    def test_no_grid_writes_nothing(self, tmp_path):
+        tess = self._tessellator_with_grid()  # generate() never called
+        path = tmp_path / "grid.shp"
+        tess.export_to_shapefile(str(path))
+        assert not path.exists()
