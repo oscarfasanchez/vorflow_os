@@ -1318,7 +1318,9 @@ class MeshGenerator:
                         bb = gmsh.model.occ.getBoundingBox(0, t)
                         _pre_dedup_coords[(d, t)] = (bb[0], bb[1], bb[2])
                     except Exception:
-                        pass
+                        logger.debug("Pre-dedup snapshot: no bounding box for "
+                                     "point %d; it cannot be remapped if "
+                                     "removeAllDuplicates renumbers it.", t)
 
         gmsh.model.occ.removeAllDuplicates()
 
@@ -1338,7 +1340,8 @@ class MeshGenerator:
                             coord_key = (round(bb[0], 6), round(bb[1], 6), round(bb[2], 6))
                             _alive_pts_by_coord[coord_key] = t
                         except Exception:
-                            pass
+                            logger.debug("Post-dedup survey: no bounding box "
+                                         "for surviving point %d.", t)
 
             _dup_pruned = 0
             _dup_remapped = 0
@@ -1391,24 +1394,18 @@ class MeshGenerator:
             for i in range(len(out_map)):
                 for dt in out_map[i]:
                     d, t = int(dt[0]), int(dt[1])
-                    if d == 0 and (d, t) not in _pre_heal_coords:
+                    if (d, t) not in _pre_heal_coords and d in (0, 1, 2):
                         try:
-                            bb = gmsh.model.occ.getBoundingBox(0, t)
-                            _pre_heal_coords[(d, t)] = (bb[0], bb[1], bb[2])
+                            bb = gmsh.model.occ.getBoundingBox(d, t)
+                            if d == 0:
+                                _pre_heal_coords[(d, t)] = (bb[0], bb[1], bb[2])
+                            else:
+                                _pre_heal_coords[(d, t)] = (bb[0], bb[1], bb[2], bb[3], bb[4], bb[5])
                         except Exception:
-                            pass
-                    elif d == 1 and (d, t) not in _pre_heal_coords:
-                        try:
-                            bb = gmsh.model.occ.getBoundingBox(1, t)
-                            _pre_heal_coords[(d, t)] = (bb[0], bb[1], bb[2], bb[3], bb[4], bb[5])
-                        except Exception:
-                            pass
-                    elif d == 2 and (d, t) not in _pre_heal_coords:
-                        try:
-                            bb = gmsh.model.occ.getBoundingBox(2, t)
-                            _pre_heal_coords[(d, t)] = (bb[0], bb[1], bb[2], bb[3], bb[4], bb[5])
-                        except Exception:
-                            pass
+                            logger.debug("Pre-heal snapshot: no bounding box "
+                                         "for entity (dim %d, tag %d); it "
+                                         "cannot be remapped if healShapes "
+                                         "renumbers it.", d, t)
 
             pre_heal = set()
             for dim in range(3):
@@ -1458,7 +1455,8 @@ class MeshGenerator:
                                          round(bb[3], _HEAL_ROUND), round(bb[4], _HEAL_ROUND), round(bb[5], _HEAL_ROUND))
                         _heal_alive_by_dim[d][coord_key] = t
                     except Exception:
-                        pass
+                        logger.debug("Post-heal survey: no bounding box for "
+                                     "surviving entity (dim %d, tag %d).", d, t)
 
             # healShapes can reuse the same tag number for a DIFFERENT entity,
             # so we must ALWAYS remap by coordinates — never trust tag identity.
@@ -1573,7 +1571,8 @@ class MeshGenerator:
                     if gmsh.model.mesh.getEmbedded(2, s[1]):
                         _n_auto += 1
                 except Exception:
-                    pass
+                    logger.debug("getEmbedded failed for surface %d during "
+                                 "post-fragment diagnostics.", s[1])
 
             logger.debug(f"[DIAG] Post-fragment: {len(all_surfs_post)} surfs, "
                          f"{len(all_lines_post)} lines, {len(all_pts_post)} pts")
@@ -2501,7 +2500,8 @@ class MeshGenerator:
                 _bb = gmsh.model.getBoundingBox(2, _st)
                 _surf_bboxes[_st] = _bb  # (xmin, ymin, zmin, xmax, ymax, zmax)
             except Exception:
-                pass
+                logger.debug("No bounding box for domain surface %d; it is "
+                             "excluded from the embedding candidate pool.", _st)
 
         def _bbox_contains_point(sbb, pt, eps=1e-4):
             return (
@@ -2569,7 +2569,8 @@ class MeshGenerator:
                     up, _down = gmsh.model.getAdjacencies(1, tag)
                     is_boundary_of = {int(v) for v in up}
                 except Exception:
-                    pass
+                    logger.debug("getAdjacencies failed for curve %d; treating "
+                                 "it as interior for embedding.", tag)
                 if is_boundary_of:
                     _elog['boundary_skip'] += 1
                     _elog['boundary_tags'].append((int(tag), sorted(is_boundary_of)))
