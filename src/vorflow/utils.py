@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 import logging
 import warnings
-from typing import Optional
 
 import numpy as np
 import geopandas as gpd
@@ -196,7 +197,7 @@ def boundary_connectivity_report(
     domain_geom,
     *,
     center: str = "centroid",
-    tolerance: Optional[float] = None,
+    tolerance: float | None = None,
 ) -> gpd.GeoDataFrame:
     """
     Connectivity report restricted to pairs touching the domain boundary.
@@ -415,7 +416,7 @@ def calculate_mesh_quality(
     gdf: gpd.GeoDataFrame,
     calc_ortho: bool = False,
     calc_skewness: bool = False,
-    connectivity: Optional[gpd.GeoDataFrame] = None,
+    connectivity: gpd.GeoDataFrame | None = None,
 ) -> gpd.GeoDataFrame:
     """
     Calculates a suite of geometric quality metrics for a Voronoi grid.

@@ -11,6 +11,8 @@ Verbosity mapping (same scale MeshGenerator has always documented):
 - ``1`` — basic progress messages (the package default).
 - ``2`` — debug diagnostics (the ``[DIAG]`` output).
 """
+from __future__ import annotations
+
 import logging
 
 _LEVELS = {0: logging.WARNING, 1: logging.INFO}
