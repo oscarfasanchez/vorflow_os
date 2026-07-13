@@ -1,4 +1,5 @@
 import logging
+import warnings
 from typing import Optional
 
 import numpy as np
@@ -615,7 +616,18 @@ def check_geometry_resolution(gdf):
                 all_lengths.extend(dists)
 
     if not all_lengths:
-        return "No valid segments found."
+        warnings.warn(
+            "check_geometry_resolution: no valid segments found in the "
+            "GeoDataFrame; returning empty statistics.",
+            stacklevel=2,
+        )
+        return {
+            "min": float("nan"),
+            "max": float("nan"),
+            "mean": float("nan"),
+            "median": float("nan"),
+            "count": 0,
+        }
 
     all_lengths = np.array(all_lengths)
     return {

@@ -1,4 +1,5 @@
 import logging
+import warnings
 import numpy as np
 import geopandas as gpd
 import pandas as pd
@@ -254,7 +255,12 @@ class VoronoiTessellator:
                 columns for the generator's node_id, x, and y coordinates.
         """
         if len(nodes) < 3:
-            logger.error("Error: Not enough nodes to generate Voronoi.")
+            warnings.warn(
+                "Not enough generator nodes (<3) to build a Voronoi diagram; "
+                "returning an empty grid. Check that meshing succeeded and "
+                "the domain is not degenerate.",
+                stacklevel=2,
+            )
             return gpd.GeoDataFrame()
 
         vor = Voronoi(nodes)
@@ -411,7 +417,11 @@ class VoronoiTessellator:
             gpd.GeoDataFrame: The final, clean Voronoi grid.
         """
         if self.nodes is None or len(self.nodes) == 0:
-            logger.error("Error: No nodes found in MeshGenerator.")
+            warnings.warn(
+                "No nodes found in MeshGenerator; returning an empty grid. "
+                "Did MeshGenerator.generate() run successfully?",
+                stacklevel=2,
+            )
             return gpd.GeoDataFrame()
         
         logger.info(f"Extracting {len(self.nodes)} Nodes from Gmsh...")
@@ -456,7 +466,12 @@ class VoronoiTessellator:
             logger.info("Clipping to Domain Boundary...")
             domain_geom = self._domain_geometry()
             if domain_geom is None:
-                logger.error("Error: No domain geometry found (no polygons).")
+                warnings.warn(
+                    "No domain geometry found (no polygons); returning an "
+                    "empty grid. Add at least one embedded polygon to the "
+                    "ConceptualMesh, or use clip_to_boundary=False.",
+                    stacklevel=2,
+                )
                 return gpd.GeoDataFrame()
 
             domain_gdf = gpd.GeoDataFrame(
