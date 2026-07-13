@@ -1560,10 +1560,6 @@ class MeshGenerator:
                         _n_orphan += 1
 
             # Count auto-embeddings
-            _n_auto = sum(
-                1 for s in all_surfs_post
-                if (lambda: (gmsh.model.mesh.getEmbedded(2, s[1]) or None) is not None)()
-            ) if False else 0  # placeholder
             _n_auto = 0
             for s in all_surfs_post:
                 try:
