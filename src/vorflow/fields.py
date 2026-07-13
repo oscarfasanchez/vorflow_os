@@ -27,7 +27,13 @@ class MeshField:
 
 
 class DistanceField(MeshField):
-    """Creates a Gmsh Distance field from points/lines/surfaces tags."""
+    """Creates a Gmsh Distance field from points/lines/surfaces tags.
+
+    Internal — not part of the public API. This is a raw building block
+    (distance-to-feature, not a mesh size) combined by the size fields via
+    _distance_tags_for_growth(). Its create() signature differs from
+    MeshField's, so it cannot be passed as a user field via ``fields=``.
+    """
 
     def __init__(self, include_surfaces=True, sampling=20):
         self.include_surfaces = bool(include_surfaces)
@@ -158,9 +164,12 @@ def _combine_with_polygon_surface_constant(
 # --- Manual Fields ---
 
 class ConstantField(MeshField):
-    """Public/manual constant field.
+    """Internal — not part of the public API.
 
-    Polygon interior constants are handled by the internal
+    Used by the engine to set the global background size (which users control
+    through ``background_lc``). Not useful as a per-feature field: create()
+    ignores ``tags_dict``, so it cannot scope a size to a feature. Polygon
+    interior constants are handled by the internal
     _polygon_surface_constant() helper because they need SurfacesList scoping
     and are combined with a growth field.
     """
@@ -182,7 +191,7 @@ class ThresholdField(MeshField):
         self.dist_max = float(dist_max)
         self.size_max = float(size_max) if size_max is not None else None
         self.sampling = int(sampling)
-    def create(self, gmsh_api, tags_dict, background_lc, feature_lc=None, constant_in=False):
+    def create(self, gmsh_api, tags_dict, background_lc, feature_lc=None):
         # 1. Distance field for growth away from features. For polygon
         # surfaces, use boundary curves for growth and add a spatial constant
         # field below so the polygon interior remains flat.
