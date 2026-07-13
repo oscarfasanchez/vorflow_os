@@ -54,6 +54,11 @@ def _unit_tangent(line, d, probe):
     return dx / mag, dy / mag
 
 
+def _to_key(dim, tag):
+    """Normalize a gmsh (dim, tag) pair into a hashable dict key."""
+    return (int(dim), int(tag))
+
+
 def _assign_zones_to_elements(grid, zones_gdf):
     """Assign a zone to each element by spatially joining element centroids.
 
@@ -466,6 +471,257 @@ class MeshGenerator:
             grid = grid[grid["is_quad"]]
         return grid.copy()
 
+    def _dedup_and_remap_fragment_map(self, out_map, object_tags, input_tag_info):
+        """Remove duplicate OCC entities and remap the fragment map.
+
+        removeAllDuplicates() can merge coincident entities (changing
+        tags) without returning a mapping, so point coordinates are
+        snapshotted beforehand and out_map tags that disappear are
+        remapped to the surviving entity at the same location.
+        Mutates out_map in place.
+        """
+        # Remove geometrically coincident (duplicate) entities left by
+        # fragmentation.  Unlike healShapes this does NOT delete or merge
+        # entities based on a size tolerance, so it cannot destroy surfaces
+        # or convert interior lines into boundaries.
+        #
+        # Because removeAllDuplicates() can merge entities (changing tags)
+        # without returning a mapping, we snapshot the coordinates of all
+        # out_map entries beforehand and remap any that disappear.
+        _pre_dedup_coords = {}  # (dim, tag) -> (x, y, z)  for dim-0 entries
+        for i in range(len(out_map)):
+            for dt in out_map[i]:
+                d, t = int(dt[0]), int(dt[1])
+                if d == 0 and (d, t) not in _pre_dedup_coords:
+                    try:
+                        bb = gmsh.model.occ.getBoundingBox(0, t)
+                        _pre_dedup_coords[(d, t)] = (bb[0], bb[1], bb[2])
+                    except Exception:
+                        logger.debug("Pre-dedup snapshot: no bounding box for "
+                                     "point %d; it cannot be remapped if "
+                                     "removeAllDuplicates renumbers it.", t)
+
+        gmsh.model.occ.removeAllDuplicates()
+
+        # Refresh out_map: replace tags killed by removeAllDuplicates with
+        # the surviving entity at the same location.
+        if len(out_map) > 0:
+            occ_alive = set()
+            _alive_pts_by_coord = {}  # (round_x, round_y, round_z) -> tag
+            for dim in range(3):
+                for dt in gmsh.model.occ.getEntities(dim):
+                    d, t = int(dt[0]), int(dt[1])
+                    occ_alive.add((d, t))
+                    if d == 0:
+                        try:
+                            bb = gmsh.model.occ.getBoundingBox(0, t)
+                            # Round to ~nm precision to match coordinates
+                            coord_key = (round(bb[0], 6), round(bb[1], 6), round(bb[2], 6))
+                            _alive_pts_by_coord[coord_key] = t
+                        except Exception:
+                            logger.debug("Post-dedup survey: no bounding box "
+                                         "for surviving point %d.", t)
+
+            _dup_pruned = 0
+            _dup_remapped = 0
+            for i in range(len(out_map)):
+                new_entries = []
+                for dt in out_map[i]:
+                    d, t = int(dt[0]), int(dt[1])
+                    if (d, t) in occ_alive:
+                        new_entries.append(dt)
+                    elif d == 0 and (d, t) in _pre_dedup_coords:
+                        # Tag was killed by dedup — find the surviving point
+                        x, y, z = _pre_dedup_coords[(d, t)]
+                        coord_key = (round(x, 6), round(y, 6), round(z, 6))
+                        new_tag = _alive_pts_by_coord.get(coord_key)
+                        if new_tag is not None:
+                            new_entries.append((0, new_tag))
+                            _dup_remapped += 1
+                        else:
+                            _dup_pruned += 1
+                    else:
+                        _dup_pruned += 1
+                out_map[i] = new_entries
+            if _dup_pruned > 0 or _dup_remapped > 0:
+                logger.info(f"removeAllDuplicates: remapped {_dup_remapped}, pruned {_dup_pruned} tag(s) from fragment map.")
+
+            # DIAG: Per-feature point tracking after dedup
+            if self.verbosity >= 2:
+                _pt_feat_status = []
+                for i, input_dimtag in enumerate(object_tags):
+                    key = _to_key(input_dimtag[0], input_dimtag[1])
+                    info = input_tag_info.get(key, {})
+                    if info.get('type') == 'point':
+                        feat_id = info['id']
+                        dim0 = [dt for dt in (out_map[i] if i < len(out_map) else [])
+                                if int(dt[0]) == 0]
+                        alive = [(d, t) for d, t in dim0 if (int(d), int(t)) in occ_alive]
+                        _pt_feat_status.append((feat_id, len(dim0), len(alive)))
+                _n_empty = sum(1 for _, n, a in _pt_feat_status if a == 0)
+                logger.debug(f"[DIAG] Post-dedup point features: {len(_pt_feat_status)} total, "
+                             f"{_n_empty} with 0 alive tags")
+                if _n_empty > 0:
+                    for fid, nd, na in _pt_feat_status:
+                        if na == 0:
+                            logger.debug(f"  [DIAG] Point feat_id={fid}: {nd} map entries, 0 alive")
+
+    def _heal_and_remap_fragment_map(self, out_map, object_tags, input_tag_info):
+        """Optionally heal OCC shapes, synchronize, and remap the map.
+
+        healShapes rebuilds OCC topology - renumbering entities and even
+        reusing a tag number for a DIFFERENT entity - so remapping is
+        done purely by coordinate matching, never by tag identity.
+        Mutates out_map in place. Always synchronizes the OCC model,
+        even when heal_shapes is off.
+        """
+        if self.heal_shapes:
+            # Snapshot coordinates of ALL out_map entities before heal so we
+            # can remap tags that healShapes renumbers.
+            _pre_heal_coords = {}  # (dim, tag) -> (x, y, z) for dim-0 entries
+            for i in range(len(out_map)):
+                for dt in out_map[i]:
+                    d, t = int(dt[0]), int(dt[1])
+                    if (d, t) not in _pre_heal_coords and d in (0, 1, 2):
+                        try:
+                            bb = gmsh.model.occ.getBoundingBox(d, t)
+                            if d == 0:
+                                _pre_heal_coords[(d, t)] = (bb[0], bb[1], bb[2])
+                            else:
+                                _pre_heal_coords[(d, t)] = (bb[0], bb[1], bb[2], bb[3], bb[4], bb[5])
+                        except Exception:
+                            logger.debug("Pre-heal snapshot: no bounding box "
+                                         "for entity (dim %d, tag %d); it "
+                                         "cannot be remapped if healShapes "
+                                         "renumbers it.", d, t)
+
+            pre_heal = set()
+            for dim in range(3):
+                for dt in gmsh.model.occ.getEntities(dim):
+                    pre_heal.add((int(dt[0]), int(dt[1])))
+
+            if self.heal_tolerance > 1e-2:
+                logger.info(f"WARNING: heal_tolerance={self.heal_tolerance} is large. "
+                            f"This may destroy fragment boundaries and lose surfaces/lines. "
+                            f"Consider values <= 1e-3.")
+            logger.info(f"Healing OCC shapes (tolerance={self.heal_tolerance}, "
+                        f"degenerated={self.heal_fix_degenerated}, "
+                        f"small_edges={self.heal_fix_small_edges}, "
+                        f"small_faces={self.heal_fix_small_faces})...")
+            gmsh.model.occ.healShapes(
+                [], tolerance=self.heal_tolerance,
+                fixDegenerated=self.heal_fix_degenerated,
+                fixSmallEdges=self.heal_fix_small_edges,
+                fixSmallFaces=self.heal_fix_small_faces,
+                sewFaces=False,
+                makeSolids=False,
+            )
+
+        gmsh.model.occ.synchronize()
+
+        # After healing, entity tags may have been renumbered (healShapes
+        # rebuilds OCC topology even when all fix flags are off).
+        # Remap out_map entries using coordinate matching, similar to dedup.
+        if self.heal_shapes and len(out_map) > 0:
+            surviving = set()
+            # Build coordinate lookup for surviving entities per dimension.
+            # healShapes introduces ~1e-6 coordinate drift, so we round to
+            # 4 decimal places (0.1 mm) — enough to distinguish any two
+            # intentionally distinct points while absorbing the drift.
+            _HEAL_ROUND = 4
+            _heal_alive_by_dim = {0: {}, 1: {}, 2: {}}  # dim -> coord_key -> tag
+            for dim in range(3):
+                for dt in gmsh.model.getEntities(dim):
+                    d, t = int(dt[0]), int(dt[1])
+                    surviving.add((d, t))
+                    try:
+                        bb = gmsh.model.getBoundingBox(d, t)
+                        if d == 0:
+                            coord_key = (round(bb[0], _HEAL_ROUND), round(bb[1], _HEAL_ROUND), round(bb[2], _HEAL_ROUND))
+                        else:
+                            coord_key = (round(bb[0], _HEAL_ROUND), round(bb[1], _HEAL_ROUND), round(bb[2], _HEAL_ROUND),
+                                         round(bb[3], _HEAL_ROUND), round(bb[4], _HEAL_ROUND), round(bb[5], _HEAL_ROUND))
+                        _heal_alive_by_dim[d][coord_key] = t
+                    except Exception:
+                        logger.debug("Post-heal survey: no bounding box for "
+                                     "surviving entity (dim %d, tag %d).", d, t)
+
+            # healShapes can reuse the same tag number for a DIFFERENT entity,
+            # so we must ALWAYS remap by coordinates — never trust tag identity.
+            _heal_remapped = 0
+            _heal_pruned = 0
+            _heal_kept = 0
+            for i in range(len(out_map)):
+                new_entries = []
+                for dt in out_map[i]:
+                    d, t = int(dt[0]), int(dt[1])
+                    if (d, t) not in _pre_heal_coords:
+                        # Entity wasn't snapshotted (shouldn't happen); keep if alive
+                        if (d, t) in surviving:
+                            new_entries.append(dt)
+                            _heal_kept += 1
+                        else:
+                            _heal_pruned += 1
+                        continue
+
+                    # Look up the old coordinates and find the matching new tag
+                    old_coords = _pre_heal_coords[(d, t)]
+                    if d == 0:
+                        coord_key = (round(old_coords[0], _HEAL_ROUND),
+                                     round(old_coords[1], _HEAL_ROUND),
+                                     round(old_coords[2], _HEAL_ROUND))
+                    else:
+                        coord_key = (round(old_coords[0], _HEAL_ROUND), round(old_coords[1], _HEAL_ROUND),
+                                     round(old_coords[2], _HEAL_ROUND), round(old_coords[3], _HEAL_ROUND),
+                                     round(old_coords[4], _HEAL_ROUND), round(old_coords[5], _HEAL_ROUND))
+                    new_tag = _heal_alive_by_dim.get(d, {}).get(coord_key)
+                    if new_tag is not None:
+                        if new_tag == t:
+                            new_entries.append(dt)
+                            _heal_kept += 1
+                        else:
+                            new_entries.append((d, new_tag))
+                            _heal_remapped += 1
+                    else:
+                        _heal_pruned += 1
+                out_map[i] = new_entries
+
+            if _heal_remapped > 0 or _heal_pruned > 0:
+                logger.info(f"Heal post-processing: remapped {_heal_remapped}, pruned {_heal_pruned} tag(s) from fragment map.")
+
+            # DIAG: Per-feature point tracking after heal
+            if self.verbosity >= 2:
+                _pt_feat_heal = []
+                for i, input_dimtag in enumerate(object_tags):
+                    key = _to_key(input_dimtag[0], input_dimtag[1])
+                    info = input_tag_info.get(key, {})
+                    if info.get('type') == 'point':
+                        feat_id = info['id']
+                        dim0 = [dt for dt in (out_map[i] if i < len(out_map) else [])
+                                if int(dt[0]) == 0]
+                        alive = [(d, t) for d, t in dim0
+                                 if (int(d), int(t)) in surviving]
+                        _pt_feat_heal.append((feat_id, len(dim0), len(alive)))
+                _n_empty_h = sum(1 for _, n, a in _pt_feat_heal if a == 0)
+                logger.debug(f"[DIAG] Post-heal point features: {len(_pt_feat_heal)} total, "
+                             f"{_n_empty_h} with 0 alive tags (remapped {_heal_remapped}, pruned {_heal_pruned})")
+                if _n_empty_h > 0:
+                    for fid, nd, na in _pt_feat_heal:
+                        if na == 0:
+                            logger.debug(f"  [DIAG] Point feat_id={fid}: {nd} map entries, 0 alive after heal")
+                # Report what heal removed/added
+                heal_removed = pre_heal - surviving
+                heal_added = surviving - pre_heal
+                dim0_removed = [(d, t) for d, t in heal_removed if d == 0]
+                dim0_added = [(d, t) for d, t in heal_added if d == 0]
+                if dim0_removed or dim0_added:
+                    logger.debug(f"[DIAG] Heal dim-0 changes: removed {len(dim0_removed)}, added {len(dim0_added)}")
+                    if dim0_removed:
+                        logger.debug(f"  [DIAG] Removed point tags: {sorted(t for _, t in dim0_removed)}")
+                    if dim0_added:
+                        logger.debug(f"  [DIAG] Added point tags: {sorted(t for _, t in dim0_added)}")
+
+
     def _add_geometry(self, polygons_gdf, lines_gdf, points_gdf, launch_gmsh_gui=False):
         """
         Transfers Shapely geometries from GeoDataFrames into the Gmsh model.
@@ -496,8 +752,7 @@ class MeshGenerator:
         embedded_line_tags = []
         embedded_surface_tags = []
         
-        def to_key(dim, tag):
-            return (int(dim), int(tag))
+        to_key = _to_key
 
         def is_embedded(row) -> bool:
             val = row.get('embed', True)
@@ -1321,237 +1576,9 @@ class MeshGenerator:
         logger.info(f"Fragmenting {len(object_tags)} objects...")
         out_dt, out_map = gmsh.model.occ.fragment(object_tags, [])
 
-        # Remove geometrically coincident (duplicate) entities left by
-        # fragmentation.  Unlike healShapes this does NOT delete or merge
-        # entities based on a size tolerance, so it cannot destroy surfaces
-        # or convert interior lines into boundaries.
-        #
-        # Because removeAllDuplicates() can merge entities (changing tags)
-        # without returning a mapping, we snapshot the coordinates of all
-        # out_map entries beforehand and remap any that disappear.
-        _pre_dedup_coords = {}  # (dim, tag) -> (x, y, z)  for dim-0 entries
-        for i in range(len(out_map)):
-            for dt in out_map[i]:
-                d, t = int(dt[0]), int(dt[1])
-                if d == 0 and (d, t) not in _pre_dedup_coords:
-                    try:
-                        bb = gmsh.model.occ.getBoundingBox(0, t)
-                        _pre_dedup_coords[(d, t)] = (bb[0], bb[1], bb[2])
-                    except Exception:
-                        logger.debug("Pre-dedup snapshot: no bounding box for "
-                                     "point %d; it cannot be remapped if "
-                                     "removeAllDuplicates renumbers it.", t)
+        self._dedup_and_remap_fragment_map(out_map, object_tags, input_tag_info)
 
-        gmsh.model.occ.removeAllDuplicates()
-
-        # Refresh out_map: replace tags killed by removeAllDuplicates with
-        # the surviving entity at the same location.
-        if len(out_map) > 0:
-            occ_alive = set()
-            _alive_pts_by_coord = {}  # (round_x, round_y, round_z) -> tag
-            for dim in range(3):
-                for dt in gmsh.model.occ.getEntities(dim):
-                    d, t = int(dt[0]), int(dt[1])
-                    occ_alive.add((d, t))
-                    if d == 0:
-                        try:
-                            bb = gmsh.model.occ.getBoundingBox(0, t)
-                            # Round to ~nm precision to match coordinates
-                            coord_key = (round(bb[0], 6), round(bb[1], 6), round(bb[2], 6))
-                            _alive_pts_by_coord[coord_key] = t
-                        except Exception:
-                            logger.debug("Post-dedup survey: no bounding box "
-                                         "for surviving point %d.", t)
-
-            _dup_pruned = 0
-            _dup_remapped = 0
-            for i in range(len(out_map)):
-                new_entries = []
-                for dt in out_map[i]:
-                    d, t = int(dt[0]), int(dt[1])
-                    if (d, t) in occ_alive:
-                        new_entries.append(dt)
-                    elif d == 0 and (d, t) in _pre_dedup_coords:
-                        # Tag was killed by dedup — find the surviving point
-                        x, y, z = _pre_dedup_coords[(d, t)]
-                        coord_key = (round(x, 6), round(y, 6), round(z, 6))
-                        new_tag = _alive_pts_by_coord.get(coord_key)
-                        if new_tag is not None:
-                            new_entries.append((0, new_tag))
-                            _dup_remapped += 1
-                        else:
-                            _dup_pruned += 1
-                    else:
-                        _dup_pruned += 1
-                out_map[i] = new_entries
-            if _dup_pruned > 0 or _dup_remapped > 0:
-                logger.info(f"removeAllDuplicates: remapped {_dup_remapped}, pruned {_dup_pruned} tag(s) from fragment map.")
-
-            # DIAG: Per-feature point tracking after dedup
-            if self.verbosity >= 2:
-                _pt_feat_status = []
-                for i, input_dimtag in enumerate(object_tags):
-                    key = to_key(input_dimtag[0], input_dimtag[1])
-                    info = input_tag_info.get(key, {})
-                    if info.get('type') == 'point':
-                        feat_id = info['id']
-                        dim0 = [dt for dt in (out_map[i] if i < len(out_map) else [])
-                                if int(dt[0]) == 0]
-                        alive = [(d, t) for d, t in dim0 if (int(d), int(t)) in occ_alive]
-                        _pt_feat_status.append((feat_id, len(dim0), len(alive)))
-                _n_empty = sum(1 for _, n, a in _pt_feat_status if a == 0)
-                logger.debug(f"[DIAG] Post-dedup point features: {len(_pt_feat_status)} total, "
-                             f"{_n_empty} with 0 alive tags")
-                if _n_empty > 0:
-                    for fid, nd, na in _pt_feat_status:
-                        if na == 0:
-                            logger.debug(f"  [DIAG] Point feat_id={fid}: {nd} map entries, 0 alive")
-
-        if self.heal_shapes:
-            # Snapshot coordinates of ALL out_map entities before heal so we
-            # can remap tags that healShapes renumbers.
-            _pre_heal_coords = {}  # (dim, tag) -> (x, y, z) for dim-0 entries
-            for i in range(len(out_map)):
-                for dt in out_map[i]:
-                    d, t = int(dt[0]), int(dt[1])
-                    if (d, t) not in _pre_heal_coords and d in (0, 1, 2):
-                        try:
-                            bb = gmsh.model.occ.getBoundingBox(d, t)
-                            if d == 0:
-                                _pre_heal_coords[(d, t)] = (bb[0], bb[1], bb[2])
-                            else:
-                                _pre_heal_coords[(d, t)] = (bb[0], bb[1], bb[2], bb[3], bb[4], bb[5])
-                        except Exception:
-                            logger.debug("Pre-heal snapshot: no bounding box "
-                                         "for entity (dim %d, tag %d); it "
-                                         "cannot be remapped if healShapes "
-                                         "renumbers it.", d, t)
-
-            pre_heal = set()
-            for dim in range(3):
-                for dt in gmsh.model.occ.getEntities(dim):
-                    pre_heal.add((int(dt[0]), int(dt[1])))
-
-            if self.heal_tolerance > 1e-2:
-                logger.info(f"WARNING: heal_tolerance={self.heal_tolerance} is large. "
-                            f"This may destroy fragment boundaries and lose surfaces/lines. "
-                            f"Consider values <= 1e-3.")
-            logger.info(f"Healing OCC shapes (tolerance={self.heal_tolerance}, "
-                        f"degenerated={self.heal_fix_degenerated}, "
-                        f"small_edges={self.heal_fix_small_edges}, "
-                        f"small_faces={self.heal_fix_small_faces})...")
-            gmsh.model.occ.healShapes(
-                [], tolerance=self.heal_tolerance,
-                fixDegenerated=self.heal_fix_degenerated,
-                fixSmallEdges=self.heal_fix_small_edges,
-                fixSmallFaces=self.heal_fix_small_faces,
-                sewFaces=False,
-                makeSolids=False,
-            )
-
-        gmsh.model.occ.synchronize()
-
-        # After healing, entity tags may have been renumbered (healShapes
-        # rebuilds OCC topology even when all fix flags are off).
-        # Remap out_map entries using coordinate matching, similar to dedup.
-        if self.heal_shapes and len(out_map) > 0:
-            surviving = set()
-            # Build coordinate lookup for surviving entities per dimension.
-            # healShapes introduces ~1e-6 coordinate drift, so we round to
-            # 4 decimal places (0.1 mm) — enough to distinguish any two
-            # intentionally distinct points while absorbing the drift.
-            _HEAL_ROUND = 4
-            _heal_alive_by_dim = {0: {}, 1: {}, 2: {}}  # dim -> coord_key -> tag
-            for dim in range(3):
-                for dt in gmsh.model.getEntities(dim):
-                    d, t = int(dt[0]), int(dt[1])
-                    surviving.add((d, t))
-                    try:
-                        bb = gmsh.model.getBoundingBox(d, t)
-                        if d == 0:
-                            coord_key = (round(bb[0], _HEAL_ROUND), round(bb[1], _HEAL_ROUND), round(bb[2], _HEAL_ROUND))
-                        else:
-                            coord_key = (round(bb[0], _HEAL_ROUND), round(bb[1], _HEAL_ROUND), round(bb[2], _HEAL_ROUND),
-                                         round(bb[3], _HEAL_ROUND), round(bb[4], _HEAL_ROUND), round(bb[5], _HEAL_ROUND))
-                        _heal_alive_by_dim[d][coord_key] = t
-                    except Exception:
-                        logger.debug("Post-heal survey: no bounding box for "
-                                     "surviving entity (dim %d, tag %d).", d, t)
-
-            # healShapes can reuse the same tag number for a DIFFERENT entity,
-            # so we must ALWAYS remap by coordinates — never trust tag identity.
-            _heal_remapped = 0
-            _heal_pruned = 0
-            _heal_kept = 0
-            for i in range(len(out_map)):
-                new_entries = []
-                for dt in out_map[i]:
-                    d, t = int(dt[0]), int(dt[1])
-                    if (d, t) not in _pre_heal_coords:
-                        # Entity wasn't snapshotted (shouldn't happen); keep if alive
-                        if (d, t) in surviving:
-                            new_entries.append(dt)
-                            _heal_kept += 1
-                        else:
-                            _heal_pruned += 1
-                        continue
-
-                    # Look up the old coordinates and find the matching new tag
-                    old_coords = _pre_heal_coords[(d, t)]
-                    if d == 0:
-                        coord_key = (round(old_coords[0], _HEAL_ROUND),
-                                     round(old_coords[1], _HEAL_ROUND),
-                                     round(old_coords[2], _HEAL_ROUND))
-                    else:
-                        coord_key = (round(old_coords[0], _HEAL_ROUND), round(old_coords[1], _HEAL_ROUND),
-                                     round(old_coords[2], _HEAL_ROUND), round(old_coords[3], _HEAL_ROUND),
-                                     round(old_coords[4], _HEAL_ROUND), round(old_coords[5], _HEAL_ROUND))
-                    new_tag = _heal_alive_by_dim.get(d, {}).get(coord_key)
-                    if new_tag is not None:
-                        if new_tag == t:
-                            new_entries.append(dt)
-                            _heal_kept += 1
-                        else:
-                            new_entries.append((d, new_tag))
-                            _heal_remapped += 1
-                    else:
-                        _heal_pruned += 1
-                out_map[i] = new_entries
-
-            if _heal_remapped > 0 or _heal_pruned > 0:
-                logger.info(f"Heal post-processing: remapped {_heal_remapped}, pruned {_heal_pruned} tag(s) from fragment map.")
-
-            # DIAG: Per-feature point tracking after heal
-            if self.verbosity >= 2:
-                _pt_feat_heal = []
-                for i, input_dimtag in enumerate(object_tags):
-                    key = to_key(input_dimtag[0], input_dimtag[1])
-                    info = input_tag_info.get(key, {})
-                    if info.get('type') == 'point':
-                        feat_id = info['id']
-                        dim0 = [dt for dt in (out_map[i] if i < len(out_map) else [])
-                                if int(dt[0]) == 0]
-                        alive = [(d, t) for d, t in dim0
-                                 if (int(d), int(t)) in surviving]
-                        _pt_feat_heal.append((feat_id, len(dim0), len(alive)))
-                _n_empty_h = sum(1 for _, n, a in _pt_feat_heal if a == 0)
-                logger.debug(f"[DIAG] Post-heal point features: {len(_pt_feat_heal)} total, "
-                             f"{_n_empty_h} with 0 alive tags (remapped {_heal_remapped}, pruned {_heal_pruned})")
-                if _n_empty_h > 0:
-                    for fid, nd, na in _pt_feat_heal:
-                        if na == 0:
-                            logger.debug(f"  [DIAG] Point feat_id={fid}: {nd} map entries, 0 alive after heal")
-                # Report what heal removed/added
-                heal_removed = pre_heal - surviving
-                heal_added = surviving - pre_heal
-                dim0_removed = [(d, t) for d, t in heal_removed if d == 0]
-                dim0_added = [(d, t) for d, t in heal_added if d == 0]
-                if dim0_removed or dim0_added:
-                    logger.debug(f"[DIAG] Heal dim-0 changes: removed {len(dim0_removed)}, added {len(dim0_added)}")
-                    if dim0_removed:
-                        logger.debug(f"  [DIAG] Removed point tags: {sorted(t for _, t in dim0_removed)}")
-                    if dim0_added:
-                        logger.debug(f"  [DIAG] Added point tags: {sorted(t for _, t in dim0_added)}")
+        self._heal_and_remap_fragment_map(out_map, object_tags, input_tag_info)
 
         # >>> DIAG: Post-fragment summary
         if self.verbosity >= 2:
