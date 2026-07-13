@@ -1,7 +1,6 @@
 import warnings
 
 import pytest
-import geopandas as gpd
 from shapely.geometry import Polygon, LineString
 import gmsh
 

@@ -249,14 +249,17 @@ class AutoLinearField(MeshField):
         self.sampling = int(sampling)
 
     def create(self, gmsh_api, tags_dict, background_lc, feature_lc=None):
-        if feature_lc is None: return None
+        if feature_lc is None:
+            return None
         
         cs = float(feature_lc)
         cs_dom = float(background_lc)
         fac = self.fac
 
-        if fac <= 1.0: raise ValueError("Growth factor must be > 1.0")
-        if cs >= cs_dom: return None
+        if fac <= 1.0:
+            raise ValueError("Growth factor must be > 1.0")
+        if cs >= cs_dom:
+            return None
 
         # Calculate transition
         min_trans_cells = math.log(cs_dom / cs) / math.log(fac)
@@ -275,12 +278,14 @@ class AutoExponentialField(MeshField):
         self.fac = float(growth_factor)
 
     def create(self, gmsh_api, tags_dict, background_lc, feature_lc=None, sampling=10):
-        if feature_lc is None: return None
+        if feature_lc is None:
+            return None
         
         cs = float(feature_lc)
         fac = self.fac
         
-        if fac <= 1.0: raise ValueError("Growth factor must be > 1.0")
+        if fac <= 1.0:
+            raise ValueError("Growth factor must be > 1.0")
 
         f_dist = _distance_tags_for_growth(gmsh_api, tags_dict, int(sampling))
         if f_dist is None:

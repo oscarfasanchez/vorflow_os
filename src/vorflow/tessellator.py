@@ -5,9 +5,8 @@ import warnings
 import numpy as np
 import geopandas as gpd
 import pandas as pd
-import gmsh
 from scipy.spatial import Voronoi
-from shapely.geometry import Polygon, Point, LineString, MultiPolygon
+from shapely.geometry import Polygon, Point, MultiPolygon
 from shapely.ops import unary_union, split
 from shapely.validation import make_valid
 
@@ -320,7 +319,9 @@ class VoronoiTessellator:
             
         # We only need to cut barriers that were NOT handled by the "straddle"
         # method in the mesh generator. Straddled barriers are already aligned.
-        mask_barrier = self.cm.clean_lines['is_barrier'] == True
+        # fillna keeps the old `== True` semantics: rows with a missing
+        # is_barrier value are treated as non-barriers, not as errors.
+        mask_barrier = self.cm.clean_lines['is_barrier'].fillna(False).astype(bool)
         
         if 'straddle_width' in self.cm.clean_lines.columns:
             mask_no_straddle = (self.cm.clean_lines['straddle_width'].isna()) | (self.cm.clean_lines['straddle_width'] <= 0)

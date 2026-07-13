@@ -1,7 +1,7 @@
 import geopandas as gpd
 import numpy as np
 import pytest
-from shapely.geometry import Point, Polygon
+from shapely.geometry import Polygon
 from shapely.ops import unary_union
 
 from vorflow.blueprint import ConceptualMesh

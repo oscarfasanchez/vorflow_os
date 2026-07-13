@@ -5,10 +5,9 @@ import warnings
 import geopandas as gpd
 import pandas as pd
 import numpy as np
-from shapely.geometry import Polygon, LineString, Point, box, MultiPolygon
-from shapely.ops import unary_union, snap, linemerge
+from shapely.geometry import Polygon, LineString, MultiPolygon
+from shapely.ops import unary_union, snap
 from shapely.validation import make_valid
-from .fields import ThresholdField, ExponentialField, AutoLinearField, AutoExponentialField, ConstantField
 from shapely.strtree import STRtree
 
 logger = logging.getLogger(__name__)
@@ -503,7 +502,6 @@ class ConceptualMesh:
         df = pd.DataFrame(self.raw_polygons)
         df = df.sort_values(by='z_order', ascending=False)
         
-        processed_geoms = []
         occupied_space = None # Tracks the union of all higher-priority polygons.
         
         final_features = []
@@ -519,7 +517,7 @@ class ConceptualMesh:
                 # Subtract the already-occupied space from the current polygon.
                 try:
                     final_geo = current_geo.difference(occupied_space)
-                except Exception as e:
+                except Exception:
                     # If the standard difference fails, try again with valid geometries.
                     current_geo = make_valid(current_geo)
                     occupied_space = make_valid(occupied_space)

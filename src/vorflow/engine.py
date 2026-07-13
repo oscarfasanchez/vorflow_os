@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import gmsh
-import sys
 import math
 import warnings
 import numpy as np
@@ -11,7 +10,7 @@ import geopandas as gpd
 from shapely.geometry import Point, LineString, MultiLineString, MultiPolygon, Polygon
 from shapely.ops import linemerge, unary_union
 from shapely.validation import make_valid
-from .fields import MeshField, ThresholdField, ExponentialField, AutoLinearField, AutoExponentialField, ConstantField
+from .fields import MeshField, ThresholdField, AutoExponentialField, ConstantField
 from ._log import set_verbosity
 
 
@@ -1138,7 +1137,8 @@ class MeshGenerator:
                 
                 for part in parts:
                     # Filter out tiny fragments that might remain after trimming.
-                    if part.length < 1e-6: continue
+                    if part.length < 1e-6:
+                        continue
 
                     coords = self._sanitize_coords(list(part.coords), min_points=2)
                     if len(coords) < 2:
@@ -1151,7 +1151,7 @@ class MeshGenerator:
                     created_segments = 0
                     for i in range(len(pt_tags) - 1):
                         try:
-                            l = gmsh.model.occ.addLine(pt_tags[i], pt_tags[i+1])
+                            line_tag = gmsh.model.occ.addLine(pt_tags[i], pt_tags[i+1])
                         except Exception as e:
                             logger.warning(
                                 f"Warning: Skipping invalid line segment {i} for feature {idx} "
@@ -1159,7 +1159,7 @@ class MeshGenerator:
                             )
                             continue
 
-                        key = to_key(1, l)
+                        key = to_key(1, line_tag)
                         created_segments += 1
                         if embedded:
                             embedded_line_tags.append(key)
@@ -1286,7 +1286,7 @@ class MeshGenerator:
                     input_tag_info[key] = {'type': 'surface', 'id': idx}
                     embedded_surface_tags.append(key)
         #call the gui before fragmentation for debugging
-        if self.verbosity > 1 and launch_gmsh_gui==True:
+        if self.verbosity > 1 and launch_gmsh_gui:
             gmsh.model.occ.synchronize()
             gmsh.fltk.run()
 
@@ -1969,7 +1969,7 @@ class MeshGenerator:
             result = []
             for curves in chains_group:
                 lengths = [self._entity_length(1, curve) for curve in curves]
-                if any(l is None or not math.isfinite(l) or l <= 0 for l in lengths):
+                if any(v is None or not math.isfinite(v) or v <= 0 for v in lengths):
                     return None
                 result.append(lengths)
             return result
@@ -2133,7 +2133,7 @@ class MeshGenerator:
         refined near points, along lines, and within polygons.
         """
         if self.verbosity > 0:
-            logger.info(f"--- Setup Fields Debug ---")
+            logger.info("--- Setup Fields Debug ---")
             logger.info(f"Polygons GDF: {len(polygons_gdf)} rows")
             logger.info(f"Gmsh Surface Map: {len(gmsh_map.get('surfaces', {}))} entries")
             if not polygons_gdf.empty:
@@ -2460,7 +2460,8 @@ class MeshGenerator:
 
         def is_embedded(row):
             val = row.get('embed', True)
-            if pd.isna(val): return True
+            if pd.isna(val):
+                return True
             return bool(val)
 
         # 1. Collect Domain Surfaces (Candidate Pool)

@@ -1,6 +1,5 @@
 import warnings
 
-import geopandas as gpd
 import pytest
 from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union

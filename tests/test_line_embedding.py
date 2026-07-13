@@ -10,9 +10,7 @@ the triangular mesh when polygons were also present. Root causes:
 """
 
 import pytest
-import numpy as np
 from shapely.geometry import Polygon, LineString, Point
-import gmsh
 
 from vorflow.blueprint import ConceptualMesh
 from vorflow.engine import MeshGenerator, _unit_tangent
