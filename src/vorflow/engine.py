@@ -29,6 +29,30 @@ QUAD_BUFFER_CROSSING_GAP = 0.5
 DEFAULT_GROWTH_FACTOR = 1.2
 
 
+def _unit_tangent(line, d, probe):
+    """Unit tangent of ``line`` at distance ``d`` along it.
+
+    The direction is estimated from a short chord of length ``probe``. The
+    caller chooses ``probe`` proportional to the line length so the estimate
+    is CRS-unit independent (a fixed absolute step would span whole features
+    on short lines and blunt corners on curved ones).
+    """
+    length = line.length
+    if d >= length - probe:
+        p1 = line.interpolate(max(d - probe, 0.0))
+        p2 = line.interpolate(d)
+    else:
+        p1 = line.interpolate(d)
+        p2 = line.interpolate(d + probe)
+    dx, dy = p2.x - p1.x, p2.y - p1.y
+    mag = math.hypot(dx, dy)
+    if mag == 0:
+        # Degenerate (zero-length) input: any unit vector keeps the straddle
+        # pair perpendicular and non-coincident.
+        return 1.0, 0.0
+    return dx / mag, dy / mag
+
+
 def _assign_zones_to_elements(grid, zones_gdf):
     """Assign a zone to each element by spatially joining element centroids.
 
@@ -1053,19 +1077,13 @@ class MeshGenerator:
                 else:
                     epsilon = lc * 0.20
                 
+                # Tangent probe proportional to line length so the offsets
+                # work for any CRS units and for lines shorter than the old
+                # fixed 0.01 step.
+                probe = max(length * 1e-4, 1e-12)
                 for d in distances:
                     p = line.interpolate(d)
-                    t_val = d
-                    p_near = line.interpolate(min(t_val + 0.01, length))
-                    if t_val >= length - 0.001:
-                         p_near = line.interpolate(max(t_val - 0.01, 0))
-                         dx, dy = p.x - p_near.x, p.y - p_near.y
-                    else:
-                         dx, dy = p_near.x - p.x, p_near.y - p.y
-                    
-                    mag = np.sqrt(dx*dx + dy*dy)
-                    if mag == 0: mag = 1
-                    dx, dy = dx/mag, dy/mag
+                    dx, dy = _unit_tangent(line, d, probe)
                     nx, ny = -dy, dx
                     
                     # Create two points, offset from the original line by the normal.
