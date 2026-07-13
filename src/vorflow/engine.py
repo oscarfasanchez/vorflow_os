@@ -1,3 +1,4 @@
+import logging
 import gmsh
 import sys
 import math
@@ -9,6 +10,10 @@ from shapely.geometry import Point, LineString, MultiLineString, MultiPolygon, P
 from shapely.ops import linemerge, unary_union
 from shapely.validation import make_valid
 from .fields import MeshField, ThresholdField, ExponentialField, AutoLinearField, AutoExponentialField, ConstantField
+from ._log import set_verbosity
+
+
+logger = logging.getLogger(__name__)
 
 
 # Half-cell gap left between a trimmed (lower-priority) quad buffer and the
@@ -105,6 +110,9 @@ class MeshGenerator:
         """
         self.background_lc = background_lc
         self.verbosity = verbosity
+        # The documented verbosity scale (0=silent, 1=basic, 2=debug) also
+        # drives the package logger so console output honors it.
+        set_verbosity(verbosity)
         self.mesh_algorithm = mesh_algorithm
         self.smoothing_steps = smoothing_steps
         self.optimization_cycles = optimization_cycles
@@ -498,14 +506,14 @@ class MeshGenerator:
                     try:
                         l_tags.append(gmsh.model.occ.addLine(p1, p2))
                     except Exception as e:
-                        print(f"Error adding line {p1}-{p2}: {e}")
+                        logger.error(f"Error adding line {p1}-{p2}: {e}")
                         return None, []
 
                 try:
                     loop_tag = gmsh.model.occ.addCurveLoop(l_tags)
                     return loop_tag, l_tags
                 except Exception as e:
-                    print(f"Error adding curve loop: {e}")
+                    logger.error(f"Error adding curve loop: {e}")
                     return None, []
 
             exterior_loop_tag, exterior_lines = create_loop(list(poly.exterior.coords))
@@ -523,7 +531,7 @@ class MeshGenerator:
             try:
                 s_tag = gmsh.model.occ.addPlaneSurface(loops)
             except Exception as e:
-                print(f"Error creating surface: {e}")
+                logger.error(f"Error creating surface: {e}")
                 return None, []
 
             return s_tag, boundary_curve_tags
@@ -888,7 +896,7 @@ class MeshGenerator:
                 for basis, eps in corridors_by_feature.values()
             ]))
             if self.verbosity > 0:
-                print(f"Constructed Barrier Zone from {len(corridors_by_feature)} protected features.")
+                logger.info(f"Constructed Barrier Zone from {len(corridors_by_feature)} protected features.")
 
         # --- Quad-buffer crossing priority -------------------------------
         # Plan every quad-buffer footprint up front (pure geometry, no OCC) so
@@ -1028,7 +1036,7 @@ class MeshGenerator:
                         'n_surfaces_created': len(created),
                     }
                 elif self.verbosity > 0:
-                    print(f"Warning: Structured buffer requested for line {idx}, but no buffer surface was created.")
+                    logger.warning(f"Warning: Structured buffer requested for line {idx}, but no buffer surface was created.")
 
             elif use_virtual_straddle:
                 # For barriers or "straddle" lines, we don't add the line itself.
@@ -1092,10 +1100,10 @@ class MeshGenerator:
                             geom = geom.difference(barrier_zone)
                             
                             if self.verbosity > 1:
-                                print(f"  Line {idx} trimmed by barrier (Len: {original_len:.2f} -> {geom.length:.2f})")
+                                logger.info(f"  Line {idx} trimmed by barrier (Len: {original_len:.2f} -> {geom.length:.2f})")
                                 
                         except Exception as e:
-                            print(f"Warning: Failed to trim line {idx}: {e}")
+                            logger.warning(f"Warning: Failed to trim line {idx}: {e}")
                 
                 if geom.is_empty:
                     continue
@@ -1115,7 +1123,7 @@ class MeshGenerator:
                     coords = self._sanitize_coords(list(part.coords), min_points=2)
                     if len(coords) < 2:
                         if self.verbosity > 0:
-                            print(f"Warning: Skipping degenerate line part for feature {idx} after coordinate cleanup.")
+                            logger.warning(f"Warning: Skipping degenerate line part for feature {idx} after coordinate cleanup.")
                         continue
 
                     # Add each segment of the line to Gmsh.
@@ -1125,11 +1133,10 @@ class MeshGenerator:
                         try:
                             l = gmsh.model.occ.addLine(pt_tags[i], pt_tags[i+1])
                         except Exception as e:
-                            if self.verbosity > 0:
-                                print(
-                                    f"Warning: Skipping invalid line segment {i} for feature {idx} "
-                                    f"between {coords[i]} and {coords[i+1]}: {e}"
-                                )
+                            logger.warning(
+                                f"Warning: Skipping invalid line segment {i} for feature {idx} "
+                                f"between {coords[i]} and {coords[i+1]}: {e}"
+                            )
                             continue
 
                         key = to_key(1, l)
@@ -1141,7 +1148,7 @@ class MeshGenerator:
                             nonembedded_line_tags.setdefault(int(idx), []).append(key)
 
                     if created_segments == 0 and self.verbosity > 0:
-                        print(f"Warning: No valid line segments were created for feature {idx}.")
+                        logger.warning(f"Warning: No valid line segments were created for feature {idx}.")
 
         def push_ring_vertices_off_strips(poly):
             """Move polygon ring vertices out of structured strip interiors.
@@ -1182,12 +1189,12 @@ class MeshGenerator:
             if adjusted.geom_type != 'Polygon' or adjusted.is_empty:
                 return poly
             if self.verbosity > 0:
-                print(f"Moved {moved} zone-ring vertex(es) off structured buffer strips.")
+                logger.info(f"Moved {moved} zone-ring vertex(es) off structured buffer strips.")
             return adjusted
 
         # Add polygon features to the model.
         if not polygons_gdf.empty:
-            print(f"Adding {len(polygons_gdf)} polygons to Gmsh...")
+            logger.info(f"Adding {len(polygons_gdf)} polygons to Gmsh...")
             # First pass: create the quad-buffer band surfaces and collect their
             # footprints. The band hugs the full feature boundary, so it is
             # created once per feature rather than once per MultiPolygon part.
@@ -1206,7 +1213,7 @@ class MeshGenerator:
                     }
                     polygon_band_geoms.append(band_geom)
                 elif self.verbosity > 0:
-                    print(f"Warning: Structured buffer requested for polygon {idx}, but no buffer surface was created.")
+                    logger.warning(f"Warning: Structured buffer requested for polygon {idx}, but no buffer surface was created.")
             buffer_footprints = polygon_band_geoms + line_strip_polygons
             buffer_footprints_union = (
                 make_valid(unary_union(buffer_footprints)) if buffer_footprints else None
@@ -1252,7 +1259,7 @@ class MeshGenerator:
                     poly = push_ring_vertices_off_strips(poly)
                     s_tag, boundary_curve_tags = create_polygon_surface(poly)
                     if s_tag is None:
-                        print(f"Warning: Skipping degenerate polygon {idx}")
+                        logger.warning(f"Warning: Skipping degenerate polygon {idx}")
                         continue
 
                     key = to_key(2, s_tag)
@@ -1269,9 +1276,9 @@ class MeshGenerator:
                 input_tag_info.get(to_key(dt[0], dt[1]), {}).get('id', '?')
                 for dt in embedded_line_tags
             )) if embedded_line_tags else []
-            print(f"\n[DIAG] Pre-fragment: {len(embedded_surface_tags)} surfs, "
-                  f"{len(embedded_line_tags)} lines, {len(embedded_point_tags)} pts "
-                  f"| line features: {_line_feats}")
+            logger.debug(f"\n[DIAG] Pre-fragment: {len(embedded_surface_tags)} surfs, "
+                         f"{len(embedded_line_tags)} lines, {len(embedded_point_tags)} pts "
+                         f"| line features: {_line_feats}")
         # <<< DIAG
 
         # "Fragment" combines all the individual geometries into a single,
@@ -1281,7 +1288,7 @@ class MeshGenerator:
         object_tags = embedded_surface_tags + embedded_line_tags + embedded_point_tags
         
         if not object_tags:
-            print("Warning: No geometry to mesh.")
+            logger.warning("Warning: No geometry to mesh.")
             return {
                 'points': nonembedded_point_tags,
                 'lines': nonembedded_line_tags,
@@ -1291,7 +1298,7 @@ class MeshGenerator:
                 'poly_curves': nonembedded_poly_curve_tags,
             }
 
-        print(f"Fragmenting {len(object_tags)} objects...")
+        logger.info(f"Fragmenting {len(object_tags)} objects...")
         out_dt, out_map = gmsh.model.occ.fragment(object_tags, [])
 
         # Remove geometrically coincident (duplicate) entities left by
@@ -1355,7 +1362,7 @@ class MeshGenerator:
                         _dup_pruned += 1
                 out_map[i] = new_entries
             if _dup_pruned > 0 or _dup_remapped > 0:
-                print(f"removeAllDuplicates: remapped {_dup_remapped}, pruned {_dup_pruned} tag(s) from fragment map.")
+                logger.info(f"removeAllDuplicates: remapped {_dup_remapped}, pruned {_dup_pruned} tag(s) from fragment map.")
 
             # DIAG: Per-feature point tracking after dedup
             if self.verbosity >= 2:
@@ -1370,12 +1377,12 @@ class MeshGenerator:
                         alive = [(d, t) for d, t in dim0 if (int(d), int(t)) in occ_alive]
                         _pt_feat_status.append((feat_id, len(dim0), len(alive)))
                 _n_empty = sum(1 for _, n, a in _pt_feat_status if a == 0)
-                print(f"[DIAG] Post-dedup point features: {len(_pt_feat_status)} total, "
-                      f"{_n_empty} with 0 alive tags")
+                logger.debug(f"[DIAG] Post-dedup point features: {len(_pt_feat_status)} total, "
+                             f"{_n_empty} with 0 alive tags")
                 if _n_empty > 0:
                     for fid, nd, na in _pt_feat_status:
                         if na == 0:
-                            print(f"  [DIAG] Point feat_id={fid}: {nd} map entries, 0 alive")
+                            logger.debug(f"  [DIAG] Point feat_id={fid}: {nd} map entries, 0 alive")
 
         if self.heal_shapes:
             # Snapshot coordinates of ALL out_map entities before heal so we
@@ -1409,13 +1416,13 @@ class MeshGenerator:
                     pre_heal.add((int(dt[0]), int(dt[1])))
 
             if self.heal_tolerance > 1e-2:
-                print(f"WARNING: heal_tolerance={self.heal_tolerance} is large. "
-                      f"This may destroy fragment boundaries and lose surfaces/lines. "
-                      f"Consider values <= 1e-3.")
-            print(f"Healing OCC shapes (tolerance={self.heal_tolerance}, "
-                  f"degenerated={self.heal_fix_degenerated}, "
-                  f"small_edges={self.heal_fix_small_edges}, "
-                  f"small_faces={self.heal_fix_small_faces})...")
+                logger.info(f"WARNING: heal_tolerance={self.heal_tolerance} is large. "
+                            f"This may destroy fragment boundaries and lose surfaces/lines. "
+                            f"Consider values <= 1e-3.")
+            logger.info(f"Healing OCC shapes (tolerance={self.heal_tolerance}, "
+                        f"degenerated={self.heal_fix_degenerated}, "
+                        f"small_edges={self.heal_fix_small_edges}, "
+                        f"small_faces={self.heal_fix_small_faces})...")
             gmsh.model.occ.healShapes(
                 [], tolerance=self.heal_tolerance,
                 fixDegenerated=self.heal_fix_degenerated,
@@ -1494,7 +1501,7 @@ class MeshGenerator:
                 out_map[i] = new_entries
 
             if _heal_remapped > 0 or _heal_pruned > 0:
-                print(f"Heal post-processing: remapped {_heal_remapped}, pruned {_heal_pruned} tag(s) from fragment map.")
+                logger.info(f"Heal post-processing: remapped {_heal_remapped}, pruned {_heal_pruned} tag(s) from fragment map.")
 
             # DIAG: Per-feature point tracking after heal
             if self.verbosity >= 2:
@@ -1510,23 +1517,23 @@ class MeshGenerator:
                                  if (int(d), int(t)) in surviving]
                         _pt_feat_heal.append((feat_id, len(dim0), len(alive)))
                 _n_empty_h = sum(1 for _, n, a in _pt_feat_heal if a == 0)
-                print(f"[DIAG] Post-heal point features: {len(_pt_feat_heal)} total, "
-                      f"{_n_empty_h} with 0 alive tags (remapped {_heal_remapped}, pruned {_heal_pruned})")
+                logger.debug(f"[DIAG] Post-heal point features: {len(_pt_feat_heal)} total, "
+                             f"{_n_empty_h} with 0 alive tags (remapped {_heal_remapped}, pruned {_heal_pruned})")
                 if _n_empty_h > 0:
                     for fid, nd, na in _pt_feat_heal:
                         if na == 0:
-                            print(f"  [DIAG] Point feat_id={fid}: {nd} map entries, 0 alive after heal")
+                            logger.debug(f"  [DIAG] Point feat_id={fid}: {nd} map entries, 0 alive after heal")
                 # Report what heal removed/added
                 heal_removed = pre_heal - surviving
                 heal_added = surviving - pre_heal
                 dim0_removed = [(d, t) for d, t in heal_removed if d == 0]
                 dim0_added = [(d, t) for d, t in heal_added if d == 0]
                 if dim0_removed or dim0_added:
-                    print(f"[DIAG] Heal dim-0 changes: removed {len(dim0_removed)}, added {len(dim0_added)}")
+                    logger.debug(f"[DIAG] Heal dim-0 changes: removed {len(dim0_removed)}, added {len(dim0_added)}")
                     if dim0_removed:
-                        print(f"  [DIAG] Removed point tags: {sorted(t for _, t in dim0_removed)}")
+                        logger.debug(f"  [DIAG] Removed point tags: {sorted(t for _, t in dim0_removed)}")
                     if dim0_added:
-                        print(f"  [DIAG] Added point tags: {sorted(t for _, t in dim0_added)}")
+                        logger.debug(f"  [DIAG] Added point tags: {sorted(t for _, t in dim0_added)}")
 
         # >>> DIAG: Post-fragment summary
         if self.verbosity >= 2:
@@ -1568,24 +1575,24 @@ class MeshGenerator:
                 except Exception:
                     pass
 
-            print(f"[DIAG] Post-fragment: {len(all_surfs_post)} surfs, "
-                  f"{len(all_lines_post)} lines, {len(all_pts_post)} pts")
-            print(f"[DIAG] Line fragments: {_n_interior} interior, "
-                  f"{_n_boundary} BOUNDARY, {_n_orphan} orphan, "
-                  f"{_n_dim0} became-points | auto-embed surfs: {_n_auto}")
+            logger.debug(f"[DIAG] Post-fragment: {len(all_surfs_post)} surfs, "
+                         f"{len(all_lines_post)} lines, {len(all_pts_post)} pts")
+            logger.debug(f"[DIAG] Line fragments: {_n_interior} interior, "
+                         f"{_n_boundary} BOUNDARY, {_n_orphan} orphan, "
+                         f"{_n_dim0} became-points | auto-embed surfs: {_n_auto}")
             if _boundary_feats:
-                print(f"[DIAG] *** Lines from these features became BOUNDARIES: "
-                      f"{sorted(_boundary_feats)} ***")
+                logger.debug(f"[DIAG] *** Lines from these features became BOUNDARIES: "
+                             f"{sorted(_boundary_feats)} ***")
         # <<< DIAG
 
         if pending_nonembedded_polys:
             if self.verbosity > 0:
-                print(f"Adding {len(pending_nonembedded_polys)} field-only polygon surface(s)...")
+                logger.info(f"Adding {len(pending_nonembedded_polys)} field-only polygon surface(s)...")
             for idx, poly in pending_nonembedded_polys:
                 s_tag, boundary_curve_tags = create_polygon_surface(poly)
                 if s_tag is None:
                     if self.verbosity > 0:
-                        print(f"Warning: Skipping degenerate field-only polygon {idx}")
+                        logger.warning(f"Warning: Skipping degenerate field-only polygon {idx}")
                     continue
                 nonembedded_surface_tags.setdefault(int(idx), []).append(to_key(2, s_tag))
                 nonembedded_poly_curve_tags.setdefault(int(idx), []).extend(
@@ -1604,7 +1611,7 @@ class MeshGenerator:
             'poly_curves': dict(nonembedded_poly_curve_tags),
         }
         
-        print(f"Reconstructing Map (Input Tags: {len(object_tags)}, Out Map Len: {len(out_map)})...")
+        logger.info(f"Reconstructing Map (Input Tags: {len(object_tags)}, Out Map Len: {len(out_map)})...")
         
         for i, input_dimtag in enumerate(object_tags):
             if i < len(out_map):
@@ -1647,7 +1654,7 @@ class MeshGenerator:
                         final_map['structured_buffer_surfs'][feat_id] = []
                     final_map['structured_buffer_surfs'][feat_id].extend(res_tags)
             else:
-                print(f"Warning: Tag {key} lost during fragmentation mapping.")
+                logger.warning(f"Warning: Tag {key} lost during fragmentation mapping.")
 
         # DIAG: Final map point summary
         if self.verbosity >= 2:
@@ -1666,12 +1673,12 @@ class MeshGenerator:
                     for dt in dim0:
                         if (int(dt[0]), int(dt[1])) not in model_ents:
                             _stale_feats.append((fid, int(dt[1])))
-            print(f"[DIAG] Final map: {_n_pt_feats} point features, "
-                  f"{len(_empty_feats)} empty, {len(_stale_feats)} with stale tags")
+            logger.debug(f"[DIAG] Final map: {_n_pt_feats} point features, "
+                         f"{len(_empty_feats)} empty, {len(_stale_feats)} with stale tags")
             if _empty_feats:
-                print(f"  [DIAG] Empty point feat_ids: {sorted(_empty_feats)}")
+                logger.debug(f"  [DIAG] Empty point feat_ids: {sorted(_empty_feats)}")
             if _stale_feats:
-                print(f"  [DIAG] Stale point (feat_id, tag): {_stale_feats}")
+                logger.debug(f"  [DIAG] Stale point (feat_id, tag): {_stale_feats}")
 
         # Safety net: OCC's fragment map can omit pieces of an input surface
         # (observed when a buffer strip with boundaries coincident to the
@@ -1712,9 +1719,9 @@ class MeshGenerator:
                     final_map['surfaces'].setdefault(owner, []).append((2, surf_tag))
                     recovered += 1
             if recovered:
-                print(
-                    f"Recovered {recovered} orphan surface(s) the fragment map had "
-                    "dropped; re-attached to their containing polygon features."
+                logger.info(
+                          f"Recovered {recovered} orphan surface(s) the fragment map had "
+                          "dropped; re-attached to their containing polygon features."
                 )
 
         self._apply_structured_buffer_meshing(final_map, structured_buffer_specs)
@@ -2037,10 +2044,10 @@ class MeshGenerator:
 
             n_created = int(spec.get('n_surfaces_created', 0) or 0)
             if n_created and len(surf_tags) > n_created and self.verbosity > 0:
-                print(
-                    f"Structured buffer for feature {feat_id} was split by fragmentation "
-                    f"({n_created} surface(s) became {len(surf_tags)}); applying the "
-                    "transfinite structure per piece."
+                logger.info(
+                          f"Structured buffer for feature {feat_id} was split by fragmentation "
+                          f"({n_created} surface(s) became {len(surf_tags)}); applying the "
+                          "transfinite structure per piece."
                 )
 
             tol = max(1e-4, lc * 1e-3)
@@ -2090,10 +2097,10 @@ class MeshGenerator:
                     recombine_only_count += 1
 
         if self.verbosity > 0:
-            print(
-                f"Applied structured quad-buffer meshing to "
-                f"{transfinite_count + recombine_only_count} surface(s) "
-                f"({transfinite_count} transfinite, {recombine_only_count} recombine-only)."
+            logger.info(
+                      f"Applied structured quad-buffer meshing to "
+                      f"{transfinite_count + recombine_only_count} surface(s) "
+                      f"({transfinite_count} transfinite, {recombine_only_count} recombine-only)."
             )
     
     def _setup_fields(self, gmsh_map, polygons_gdf, lines_gdf, points_gdf):
@@ -2107,18 +2114,18 @@ class MeshGenerator:
         refined near points, along lines, and within polygons.
         """
         if self.verbosity > 0:
-            print(f"--- Setup Fields Debug ---")
-            print(f"Polygons GDF: {len(polygons_gdf)} rows")
-            print(f"Gmsh Surface Map: {len(gmsh_map.get('surfaces', {}))} entries")
+            logger.info(f"--- Setup Fields Debug ---")
+            logger.info(f"Polygons GDF: {len(polygons_gdf)} rows")
+            logger.info(f"Gmsh Surface Map: {len(gmsh_map.get('surfaces', {}))} entries")
             if not polygons_gdf.empty:
                 first_idx = polygons_gdf.index[0]
-                print(f"First Poly Index: {first_idx} (Type: {type(first_idx)})")
+                logger.info(f"First Poly Index: {first_idx} (Type: {type(first_idx)})")
                 if gmsh_map['surfaces']:
                     first_key = list(gmsh_map['surfaces'].keys())[0]
-                    print(f"First Map Key: {first_key} (Type: {type(first_key)})")
-                    print(f"Match? {first_idx in gmsh_map['surfaces']}")
+                    logger.info(f"First Map Key: {first_key} (Type: {type(first_key)})")
+                    logger.info(f"Match? {first_idx in gmsh_map['surfaces']}")
                 else:
-                    print("Gmsh Surface Map is EMPTY.")
+                    logger.info("Gmsh Surface Map is EMPTY.")
 
         # Collect all created Gmsh field ids so we can combine them at the end.
         field_list = []
@@ -2430,7 +2437,7 @@ class MeshGenerator:
         geometric discovery to find the correct surface for points/lines.
         """
         if self.verbosity > 0:
-            print("Explicitly embedding features into domain surfaces...")
+            logger.info("Explicitly embedding features into domain surfaces...")
 
         def is_embedded(row):
             val = row.get('embed', True)
@@ -2452,23 +2459,23 @@ class MeshGenerator:
             _gdf_idxs = list(polygons_gdf.index) if not polygons_gdf.empty else []
             _map_keys = list(gmsh_map.get('surfaces', {}).keys())
             _matching = [i for i in _gdf_idxs if i in gmsh_map.get('surfaces', {})]
-            print(f"[DIAG] Embed pool: GDF indices={_gdf_idxs}, map keys={_map_keys}, "
-                  f"matched={len(_matching)}, domain_surface_tags={sorted(domain_surface_tags)}")
+            logger.debug(f"[DIAG] Embed pool: GDF indices={_gdf_idxs}, map keys={_map_keys}, "
+                         f"matched={len(_matching)}, domain_surface_tags={sorted(domain_surface_tags)}")
             # Dump bbox of ALL surfaces - shows which surfaces cover which area
             _all_surfs = gmsh.model.getEntities(2)
             for _s in _all_surfs:
                 _in_pool = "POOL" if _s[1] in domain_surface_tags else "----"
                 try:
                     _sbb = gmsh.model.getBoundingBox(2, _s[1])
-                    print(f"[DIAG]   surf {_s[1]:3d} [{_in_pool}] "
-                          f"x=[{_sbb[0]:7.1f},{_sbb[3]:7.1f}] "
-                          f"y=[{_sbb[1]:7.1f},{_sbb[4]:7.1f}]")
+                    logger.debug(f"[DIAG]   surf {_s[1]:3d} [{_in_pool}] "
+                                 f"x=[{_sbb[0]:7.1f},{_sbb[3]:7.1f}] "
+                                 f"y=[{_sbb[1]:7.1f},{_sbb[4]:7.1f}]")
                 except Exception:
-                    print(f"[DIAG]   surf {_s[1]:3d} [{_in_pool}] bbox FAILED")
+                    logger.debug(f"[DIAG]   surf {_s[1]:3d} [{_in_pool}] bbox FAILED")
             # Which feature id maps to which surface tags?
             for _feat_id, _dts in gmsh_map.get('surfaces', {}).items():
                 _stags = [int(dt[1]) for dt in _dts if isinstance(dt, (tuple,list)) and dt[0]==2]
-                print(f"[DIAG]   map[surfaces][{_feat_id}] -> tags {_stags}")
+                logger.debug(f"[DIAG]   map[surfaces][{_feat_id}] -> tags {_stags}")
         # <<< DIAG
 
         if not domain_surface_tags:
@@ -2659,31 +2666,31 @@ class MeshGenerator:
         # >>> DIAG: Embed summary
         if self.verbosity >= 2:
             _filt = _elog.get('skip_filtered', 0)
-            print(f"[DIAG] Embed results: {_elog['ok']} OK, "
-                  f"{_elog['conflict']} boundary-conflicts, "
-                  f"{_elog['failed']} failed, "
-                  f"{_elog['skip_bbox']} no-bbox, "
-                  f"{_elog['skip_no_cand']} empty-bbox, "
-                  f"{_filt} filtered-out, "
-                  f"{_elog['skip_no_match']} no-match, "
-                  f"{_elog['boundary_skip']} boundary-skip, "
-                  f"{_elog['multi_match']} multi-match, "
-                  f"{_elog['inside_failed']} inside-failed")
+            logger.debug(f"[DIAG] Embed results: {_elog['ok']} OK, "
+                         f"{_elog['conflict']} boundary-conflicts, "
+                         f"{_elog['failed']} failed, "
+                         f"{_elog['skip_bbox']} no-bbox, "
+                         f"{_elog['skip_no_cand']} empty-bbox, "
+                         f"{_filt} filtered-out, "
+                         f"{_elog['skip_no_match']} no-match, "
+                         f"{_elog['boundary_skip']} boundary-skip, "
+                         f"{_elog['multi_match']} multi-match, "
+                         f"{_elog['inside_failed']} inside-failed")
             if _filt > 0:
-                print(f"[DIAG] *** {_filt} entities found nearby surfaces but NONE "
-                      f"were in domain_surface_tags — likely missing domain surface! ***")
+                logger.debug(f"[DIAG] *** {_filt} entities found nearby surfaces but NONE "
+                             f"were in domain_surface_tags — likely missing domain surface! ***")
             if _elog['conflict_tags']:
                 uniq = sorted(set(_elog['conflict_tags']))
-                print(f"[DIAG] *** {len(uniq)} unique line tags had BOUNDARY CONFLICTS "
-                      f"(first 10): {uniq[:10]} ***")
+                logger.debug(f"[DIAG] *** {len(uniq)} unique line tags had BOUNDARY CONFLICTS "
+                             f"(first 10): {uniq[:10]} ***")
             if _elog['fail_tags']:
-                print(f"[DIAG] *** Failed embeds: {_elog['fail_tags'][:5]} ***")
+                logger.debug(f"[DIAG] *** Failed embeds: {_elog['fail_tags'][:5]} ***")
             if _elog['boundary_tags']:
                 uniq = _elog['boundary_tags'][:10]
-                print(f"[DIAG] Boundary line fragments skipped (first 10): {uniq}")
+                logger.debug(f"[DIAG] Boundary line fragments skipped (first 10): {uniq}")
             if _elog['multi_tags']:
-                print(f"[DIAG] Multi-surface embed candidates collapsed "
-                      f"(first 10): {_elog['multi_tags'][:10]}")
+                logger.debug(f"[DIAG] Multi-surface embed candidates collapsed "
+                             f"(first 10): {_elog['multi_tags'][:10]}")
         # <<< DIAG
 
         self.diagnostics['embedding'] = {
@@ -2734,7 +2741,7 @@ class MeshGenerator:
         self.element_grid = None
         self._initialize_gmsh()
         try:
-            print("Transferring Geometry to Gmsh...")
+            logger.info("Transferring Geometry to Gmsh...")
             gmsh_map = self._add_geometry(clean_polys, clean_lines, clean_points, launch_gmsh_gui=launch_gmsh_gui)
             
             # Ensure features are correctly embedded in surfaces before meshing
@@ -2770,13 +2777,13 @@ class MeshGenerator:
                                 _map_int += 1
                         except Exception:
                             _map_miss += 1
-                print(f"[DIAG] Post-embed: {_with_emb}/{len(all_surfs)} surfaces have embeddings "
-                      f"({_total_emb} total entities) | "
-                      f"{_without_emb} surfaces empty")
-                print(f"[DIAG] Line map: {_map_int} interior, {_map_bnd} boundary, {_map_miss} missing")
+                logger.debug(f"[DIAG] Post-embed: {_with_emb}/{len(all_surfs)} surfaces have embeddings "
+                             f"({_total_emb} total entities) | "
+                             f"{_without_emb} surfaces empty")
+                logger.debug(f"[DIAG] Line map: {_map_int} interior, {_map_bnd} boundary, {_map_miss} missing")
             # <<< DIAG
             
-            print("Setting up Resolution Fields...")
+            logger.info("Setting up Resolution Fields...")
             self._setup_fields(gmsh_map, clean_polys, clean_lines, clean_points)
             
             # Set the core meshing algorithm.
@@ -2789,17 +2796,17 @@ class MeshGenerator:
             # "Could not insert point" from near-degenerate geometry.
             gmsh.option.setNumber("Mesh.ToleranceInitialDelaunay", self.tolerance_initial_delaunay)
 
-            print("Generating Triangular Mesh...")
+            logger.info("Generating Triangular Mesh...")
             gmsh.model.mesh.generate(2)
             
             # Run explicit optimization passes after generation for higher quality.
             if self.optimization_cycles > 0:
                 if self.verbosity > 0:
-                    print(f"Running {self.optimization_cycles} Optimization Cycles (Relocate2D & Laplace2D)...")
+                    logger.info(f"Running {self.optimization_cycles} Optimization Cycles (Relocate2D & Laplace2D)...")
                 
                 for i in range(self.optimization_cycles):
                     if self.verbosity > 1:
-                        print(f"  -> Cycle {i+1}/{self.optimization_cycles}")
+                        logger.info(f"  -> Cycle {i+1}/{self.optimization_cycles}")
                     # Moves nodes to improve element shape (compactness).
                     gmsh.model.mesh.optimize("Relocate2D",niter=1)
                     # Smooths the mesh to relax gradients (reduces drift).
@@ -2891,6 +2898,6 @@ class MeshGenerator:
             return True
 
         except Exception as e:
-            print(f"Mesh Generation Failed: {e}")
+            logger.info(f"Mesh Generation Failed: {e}")
             self._finalize_gmsh()
             raise e

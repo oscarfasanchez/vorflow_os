@@ -1,9 +1,13 @@
+import logging
 from typing import Optional
 
 import numpy as np
 import geopandas as gpd
 import pandas as pd
 from shapely.geometry import LineString, MultiLineString, Point, Polygon, MultiPolygon
+
+
+logger = logging.getLogger(__name__)
 
 
 CONNECTIVITY_COLUMNS = [
@@ -500,8 +504,8 @@ def summarize_quality(gdf: gpd.GeoDataFrame):
     if 'compactness' not in gdf.columns:
         gdf = calculate_mesh_quality(gdf, calc_ortho=False)
         
-    print("\n--- Mesh Quality Report ---")
-    print(f"Total Cells: {len(gdf)}")
+    logger.info("\n--- Mesh Quality Report ---")
+    logger.info(f"Total Cells: {len(gdf)}")
     
     # 1. Distinguish between internal and boundary cells.
     # A simple heuristic is that for a boundary cell, its generator point
@@ -518,8 +522,8 @@ def summarize_quality(gdf: gpd.GeoDataFrame):
     internal_df = gdf[~is_boundary]
     boundary_df = gdf[is_boundary]
     
-    print(f"  - Internal Cells: {len(internal_df)}")
-    print(f"  - Boundary Cells: {len(boundary_df)}")
+    logger.info(f"  - Internal Cells: {len(internal_df)}")
+    logger.info(f"  - Boundary Cells: {len(boundary_df)}")
 
     metrics = ['area', 'compactness', 'convexity']
     if 'drift_ratio' in gdf.columns:
@@ -529,50 +533,50 @@ def summarize_quality(gdf: gpd.GeoDataFrame):
     if 'skewness' in gdf.columns:
         metrics.append('skewness')
         
-    print("\n-- Internal Cells Statistics --")
+    logger.info("\n-- Internal Cells Statistics --")
     if not internal_df.empty:
         stats_in = internal_df[metrics].describe(percentiles=[0.05, 0.5, 0.95])
-        print(stats_in.T[['min', '5%', '50%', '95%', 'max']].to_string())
+        logger.info(stats_in.T[['min', '5%', '50%', '95%', 'max']].to_string())
     else:
-        print("No internal cells.")
+        logger.info("No internal cells.")
 
-    print("\n-- Boundary Cells Statistics --")
+    logger.info("\n-- Boundary Cells Statistics --")
     if not boundary_df.empty:
         stats_bnd = boundary_df[metrics].describe(percentiles=[0.05, 0.5, 0.95])
-        print(stats_bnd.T[['min', '5%', '50%', '95%', 'max']].to_string())
+        logger.info(stats_bnd.T[['min', '5%', '50%', '95%', 'max']].to_string())
     else:
-        print("No boundary cells.")
+        logger.info("No boundary cells.")
     
     # Provide some diagnostic warnings based on common quality thresholds.
-    print("\n--- Diagnostics ---")
+    logger.info("\n--- Diagnostics ---")
     
     # Internal cells should be high quality.
     if not internal_df.empty:
         slivers = len(internal_df[internal_df['compactness'] < 0.6])
         if slivers > 0:
-            print(f"[WARNING] {slivers} INTERNAL cells have low compactness (< 0.6).")
+            logger.info(f"[WARNING] {slivers} INTERNAL cells have low compactness (< 0.6).")
             
         if 'drift_ratio' in internal_df.columns:
             high_drift = len(internal_df[internal_df['drift_ratio'] > 0.25])
             if high_drift > 0:
-                print(f"[WARNING] {high_drift} INTERNAL cells have high drift (> 0.25).")
+                logger.info(f"[WARNING] {high_drift} INTERNAL cells have high drift (> 0.25).")
             else:
-                print("[OK] Internal drift is excellent.")
+                logger.info("[OK] Internal drift is excellent.")
 
     # Boundary cells have different geometric norms.
     if not boundary_df.empty:
         # Boundary cells are naturally less compact.
         bad_bnd = len(boundary_df[boundary_df['compactness'] < 0.4])
         if bad_bnd > 0:
-            print(f"[WARNING] {bad_bnd} BOUNDARY cells are potential slivers (< 0.4).")
+            logger.info(f"[WARNING] {bad_bnd} BOUNDARY cells are potential slivers (< 0.4).")
             
         # Boundary cells also have a naturally higher drift.
         if 'drift_ratio' in boundary_df.columns:
             high_drift_bnd = len(boundary_df[boundary_df['drift_ratio'] > 0.45])
             if high_drift_bnd > 0:
-                print(f"[WARNING] {high_drift_bnd} BOUNDARY cells have excessive drift (> 0.45).")
+                logger.info(f"[WARNING] {high_drift_bnd} BOUNDARY cells have excessive drift (> 0.45).")
             else:
-                print("[OK] Boundary drift is within geometric norms (~0.34).")
+                logger.info("[OK] Boundary drift is within geometric norms (~0.34).")
 
 
 def check_geometry_resolution(gdf):

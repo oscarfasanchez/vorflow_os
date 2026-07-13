@@ -1,3 +1,4 @@
+import logging
 import geopandas as gpd
 import pandas as pd
 import numpy as np
@@ -6,6 +7,8 @@ from shapely.ops import unary_union, snap, linemerge
 from shapely.validation import make_valid
 from .fields import ThresholdField, ExponentialField, AutoLinearField, AutoExponentialField, ConstantField
 from shapely.strtree import STRtree
+
+logger = logging.getLogger(__name__)
 
 # Constants for geometry simplification and reporting
 SIGNIFICANT_REDUCTION_PCT = 1.0
@@ -352,9 +355,9 @@ class ConceptualMesh:
                 if new_area < org_area and org_area > 0:
                     reduction_pct = 100 * (org_area - new_area) / org_area
                     if reduction_pct > SIGNIFICANT_REDUCTION_PCT:
-                        print(
-                            f"Simplified polygon (zone_id={poly_data['zone_id']}) "
-                            f"reduced area by {reduction_pct:.2f}% using tolerance {tol}."
+                        logger.info(
+                                  f"Simplified polygon (zone_id={poly_data['zone_id']}) "
+                                  f"reduced area by {reduction_pct:.2f}% using tolerance {tol}."
                         )
 
         # Simplify Lines
@@ -374,9 +377,9 @@ class ConceptualMesh:
                 if new_length < org_length and org_length > 0:
                     reduction_pct = 100 * (org_length - new_length) / org_length
                     if reduction_pct > SIGNIFICANT_REDUCTION_PCT:
-                        print(
-                            f"Simplified line (line_id={line_data['line_id']}) "
-                            f"reduced length by {reduction_pct:.2f}% using tolerance {tol}."
+                        logger.info(
+                                  f"Simplified line (line_id={line_data['line_id']}) "
+                                  f"reduced length by {reduction_pct:.2f}% using tolerance {tol}."
                         )
 
         # Merge points that are very close to each other (deduplication)
@@ -425,9 +428,9 @@ class ConceptualMesh:
                     kept_indices.add(i)
 
             if len(self.raw_points) != len(final_points):
-                print(
-                    f"Simplification merged {len(self.raw_points) - len(final_points)} "
-                    f"points out of {len(self.raw_points)}"
+                logger.info(
+                          f"Simplification merged {len(self.raw_points) - len(final_points)} "
+                          f"points out of {len(self.raw_points)}"
                 )
             self.raw_points = final_points
 
@@ -530,7 +533,7 @@ class ConceptualMesh:
         # 2. Snap lines to polygon boundaries.
         # This ensures that features like rivers connect precisely to zone edges.
         if self.raw_lines and poly_boundaries is not None and not poly_boundaries.is_empty:
-            print(f"Snapping {len(self.raw_lines)} lines to polygon boundaries (tol={tolerance})...")
+            logger.info(f"Snapping {len(self.raw_lines)} lines to polygon boundaries (tol={tolerance})...")
             for i, line_data in enumerate(self.raw_lines):
                 original_line = line_data['geometry']
                 snapped_line = snap(original_line, poly_boundaries, tolerance)
@@ -551,7 +554,7 @@ class ConceptualMesh:
             if geoms_to_snap_to:
                 reference_geom = unary_union(geoms_to_snap_to)
                 
-                print(f"Snapping {len(self.raw_points)} points to geometry (tol={tolerance})...")
+                logger.info(f"Snapping {len(self.raw_points)} points to geometry (tol={tolerance})...")
                 for i, point_data in enumerate(self.raw_points):
                     original_point = point_data['geometry']
                     snapped_point = snap(original_point, reference_geom, tolerance)
@@ -604,7 +607,7 @@ class ConceptualMesh:
 
         removed_lines = len(self.raw_lines) - len(clipped_lines)
         if removed_lines > 0:
-            print(f"Clipped/removed {removed_lines} line feature(s) outside the domain.")
+            logger.info(f"Clipped/removed {removed_lines} line feature(s) outside the domain.")
         self.raw_lines = clipped_lines
 
         kept_points = []
@@ -617,7 +620,7 @@ class ConceptualMesh:
 
         removed_points = len(self.raw_points) - len(kept_points)
         if removed_points > 0:
-            print(f"Removed {removed_points} point feature(s) outside the domain.")
+            logger.info(f"Removed {removed_points} point feature(s) outside the domain.")
         self.raw_points = kept_points
 
 
@@ -631,7 +634,7 @@ class ConceptualMesh:
             connectivity_tolerance (float, optional): Override for the instance's
                 default topology snapping tolerance during this preprocessing run.
         """
-        print("Applying optional geometry simplification...")
+        logger.info("Applying optional geometry simplification...")
         self._apply_simplification()
 
         # --- Embed semantics for polygons ---
@@ -645,13 +648,13 @@ class ConceptualMesh:
         # Only embedded polygons are used to build the domain partition.
         self.raw_polygons = embedded_polys
 
-        print("Resolving polygon overlaps...")
+        logger.info("Resolving polygon overlaps...")
         self._resolve_overlaps()
         
-        print("Enforcing strict topology...")
+        logger.info("Enforcing strict topology...")
         self._enforce_connectivity(connectivity_tolerance=connectivity_tolerance)
 
-        print("Clipping features to domain...")
+        logger.info("Clipping features to domain...")
         self._clip_features_to_domain()
         
         # Promote the processed raw geometries to final "clean" GeoDataFrames.
@@ -745,7 +748,7 @@ class ConceptualMesh:
                     crs=self.crs,
                 )
 
-        print("Densifying geometry...")
+        logger.info("Densifying geometry...")
         self._apply_densification()
         
         return self.clean_polygons, self.clean_lines, self.clean_points

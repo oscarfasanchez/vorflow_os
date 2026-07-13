@@ -1,4 +1,8 @@
+import logging
 import math
+
+logger = logging.getLogger(__name__)
+
 
 class MeshField:
     """
@@ -117,11 +121,10 @@ def _distance_tags_for_growth(gmsh_api, tags_dict, sampling):
     # If no boundary curves could be recovered, fall back to the old surface
     # distance behavior instead of dropping the field.
     if polygon_surfaces and not boundary_curves:
-        if int(tags_dict.get("_verbosity", 0)) > 0:
-            print(
-                "Warning: could not recover boundary curves for a polygon size "
-                "field; falling back to surface-distance growth."
-            )
+        logger.warning(
+            "Warning: could not recover boundary curves for a polygon size "
+            "field; falling back to surface-distance growth."
+        )
         growth_tags["surfaces"].extend(polygon_surfaces)
 
     return DistanceField(include_surfaces=True, sampling=sampling).create(
