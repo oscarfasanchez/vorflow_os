@@ -46,13 +46,23 @@ or useful enough to port.
 
 ## Milestones
 
-| # | Milestone | Risk | Behavior change | Doc |
-|---|-----------|------|-----------------|-----|
-| 1 | Quality metrics | Low | Additive only | [01-quality-metrics.md](docs/roadmap/01-quality-metrics.md) |
-| 2 | Active-domain filtering workflow | Low | No core API change | [02-robust-clipping.md](docs/roadmap/02-robust-clipping.md) |
-| 3 | Boundary inset/mirror points | Medium | Opt-in | [03-boundary-mirror-points.md](docs/roadmap/03-boundary-mirror-points.md) |
-| 4 | Structured-quad transfinite buffer | High | Opt-in | [04-structured-quad-buffer.md](docs/roadmap/04-structured-quad-buffer.md) |
-| 5 | Triangular/mixed element-grid output | Low-Med | Additive exporter | [05-triangular-grid-output.md](docs/roadmap/05-triangular-grid-output.md) |
+| # | Milestone | Status | Risk | Behavior change | Doc |
+|---|-----------|--------|------|-----------------|-----|
+| 1 | Quality metrics | Done | Low | Additive only | [01-quality-metrics.md](docs/roadmap/01-quality-metrics.md) |
+| 2 | Active-domain filtering workflow | Done (example) | Low | No core API change | [02-robust-clipping.md](docs/roadmap/02-robust-clipping.md) |
+| 3 | Boundary inset/mirror points | Done | Medium | Opt-in | [03-boundary-mirror-points.md](docs/roadmap/03-boundary-mirror-points.md) |
+| 4 | Structured-quad transfinite buffer | Done | High | Opt-in | [04-structured-quad-buffer.md](docs/roadmap/04-structured-quad-buffer.md) |
+| 5 | Triangular/mixed element-grid output | Done | Low-Med | Additive exporter | [05-triangular-grid-output.md](docs/roadmap/05-triangular-grid-output.md) |
+
+All five milestones are implemented: quality metrics and connectivity reports
+(`get_triangular_quality`, `utils.build_connectivity`), the active-domain
+workflow example (`examples/active_domain_quality_example.py`), opt-in boundary
+inset/mirror points (`VoronoiTessellator(boundary_centering="inset_mirror")`),
+opt-in structured quad buffers (`add_polygon`/`add_line` with
+`quad_buffer=True`), and the element-grid exporter
+(`MeshGenerator.get_element_grid()`, see
+`examples/triangular_grid_example.py` and
+`examples/structured_buffer_example.py`).
 
 ## Summary per Milestone
 

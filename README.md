@@ -28,17 +28,28 @@ The typical workflow follows these steps:
 
 ## Installation
 
-The package dependencies are listed in `pyproject.toml`. You can install them using pip:
-
-```bash
-pip install numpy pandas geopandas shapely scipy gmsh matplotlib
-```
-
-To install `vorflow` itself, you can install it in editable mode from the root of the repository:
+Install `vorflow` in editable mode from the root of the repository; its
+dependencies (declared in `pyproject.toml`) are installed automatically:
 
 ```bash
 pip install -e .
 ```
+
+`matplotlib` is optional (the library itself never imports it). To run the
+plotting examples and notebooks, install it via the `examples` extra:
+
+```bash
+pip install -e .[examples]
+```
+
+For development (tests, linting, notebooks):
+
+```bash
+pip install -e .[dev]
+```
+
+Alternatively, create the full conda development environment from
+[`etc/environment.yml`](etc/environment.yml). Requires Python >= 3.10.
 
 ## Basic Usage
 
@@ -74,3 +85,23 @@ grid_gdf.to_file("mf6_grid.shp")
 
 print("Grid generation complete.")
 ```
+
+> **Coordinate systems:** always work in a *projected* CRS (e.g. UTM or a
+> national grid) so mesh sizes are in real length units (meters/feet).
+> Geographic coordinates (lat/lon degrees, e.g. EPSG:4326) produce
+> physically meaningless MODFLOW grids — reproject your data first with
+> `GeoDataFrame.to_crs()`.
+
+## Examples
+
+The [`examples/`](examples/) folder contains runnable scripts and notebooks
+covering field-based refinement, mesh quality diagnostics, structured quad
+buffers, active-domain workflows, and triangular element-grid export.
+
+## Roadmap
+
+See [ROADMAP.md](ROADMAP.md) for planned and completed milestones.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
