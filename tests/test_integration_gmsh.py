@@ -6,7 +6,7 @@ import gmsh
 
 from vorflow.blueprint import ConceptualMesh
 from vorflow.engine import MeshGenerator
-from vorflow.fields import AutoExponentialField
+from vorflow.fields import GeometricGrowthField
 from vorflow.tessellator import VoronoiTessellator
 
 pytestmark = pytest.mark.slow  # gmsh-heavy end-to-end tests
@@ -170,7 +170,7 @@ def test_embedded_polygon_field_has_constant_interior():
         zone_id=2,
         resolution=2.0,
         z_order=1,
-        fields=[AutoExponentialField(growth_factor=1.2)],
+        fields=[GeometricGrowthField(growth_factor=1.2)],
     )
     clean_polys, clean_lines, clean_points = cm.generate()
 
@@ -205,7 +205,7 @@ def test_field_only_polygon_field_has_constant_interior_without_partitioning():
         field_poly,
         zone_id="field-only",
         resolution=2.0,
-        fields=[AutoExponentialField(growth_factor=1.2)],
+        fields=[GeometricGrowthField(growth_factor=1.2)],
         embed=False,
     )
     clean_polys, clean_lines, clean_points = cm.generate()
@@ -325,9 +325,9 @@ def _domain_with_fine_zone(*, growth_factor=None, dist_min=None, dist_max=None, 
     return mg, clean
 
 
-def test_default_field_is_auto_exponential_and_refines_without_dist_or_fields():
+def test_default_field_is_geometric_growth_and_refines_without_dist_or_fields():
     # A feature finer than the background now refines by default via an implicit
-    # AutoExponentialField -- no dist_min/dist_max or explicit fields required,
+    # GeometricGrowthField -- no dist_min/dist_max or explicit fields required,
     # and no deprecation warning.
     mg, clean = _domain_with_fine_zone()
     with warnings.catch_warnings(record=True) as caught:
@@ -340,13 +340,13 @@ def test_default_field_is_auto_exponential_and_refines_without_dist_or_fields():
     inner = grid[cent.x.between(8, 12) & cent.y.between(8, 12)]
     outer = grid[(cent.x < 4) | (cent.x > 16)]
     assert not inner.empty and not outer.empty
-    # Exponential halo: cells in the fine zone are much smaller than far away.
+    # Graded halo: cells in the fine zone are much smaller than far away.
     assert inner.geometry.area.mean() < 0.25 * outer.geometry.area.mean()
 
 
 def test_dist_params_emit_deprecation_warning_but_still_mesh():
     # The legacy dist_min/dist_max linear-threshold path still works (back-compat)
-    # but now warns that it is deprecated in favor of the AutoExponentialField.
+    # but now warns that it is deprecated in favor of GeometricGrowthField.
     mg, clean = _domain_with_fine_zone(dist_min=0.5, dist_max=10.0)
     with pytest.warns(DeprecationWarning, match="dist_min/dist_max are deprecated"):
         assert mg.generate(*clean)
@@ -365,3 +365,22 @@ def test_growth_factor_controls_default_refinement_spread():
     fast = len(mg_fast.get_element_grid())
 
     assert slow > fast
+
+
+def test_engine_rejects_invalid_growth_factor_in_prebuilt_feature_table():
+    mg, clean = _domain_with_fine_zone()
+    clean_polys, clean_lines, clean_points = clean
+    fine = clean_polys["zone_id"] == "fine"
+    clean_polys.loc[fine, "growth_factor"] = 1.0
+
+    with pytest.raises(ValueError, match="growth_factor"):
+        mg.generate(clean_polys, clean_lines, clean_points)
+
+
+@pytest.mark.parametrize("background_lc", [0.0, -1.0, float("nan"), float("inf")])
+def test_engine_rejects_invalid_background_size(background_lc):
+    mg, clean = _domain_with_fine_zone()
+    mg.background_lc = background_lc
+
+    with pytest.raises(ValueError, match="background_lc"):
+        mg.generate(*clean)

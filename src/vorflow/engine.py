@@ -10,7 +10,13 @@ import geopandas as gpd
 from shapely.geometry import Point, LineString, MultiLineString, MultiPolygon, Polygon
 from shapely.ops import linemerge, unary_union
 from shapely.validation import make_valid
-from .fields import MeshField, ThresholdField, AutoExponentialField, ConstantField
+from .fields import (
+    DEFAULT_GROWTH_FACTOR,
+    ConstantField,
+    GeometricGrowthField,
+    MeshField,
+    ThresholdField,
+)
 from ._log import set_verbosity
 
 
@@ -23,12 +29,6 @@ logger = logging.getLogger(__name__)
 # against the winner's structured node row with one clean unstructured row in
 # between. Tunable; larger values widen the gap if slivers appear.
 QUAD_BUFFER_CROSSING_GAP = 0.5
-
-# Default cell-to-cell growth ratio for the implicit AutoExponentialField that
-# now backs a feature's resolution (replacing the legacy linear ThresholdField
-# that was implied by dist_min/dist_max).
-DEFAULT_GROWTH_FACTOR = 1.2
-
 
 def _unit_tangent(line, d, probe):
     """Unit tangent of ``line`` at distance ``d`` along it.
@@ -2184,6 +2184,11 @@ class MeshGenerator:
                 "If you don't want to constrain the mesh, pass a very large value."
             )
         global_max_lc = float(self.background_lc)
+        if not math.isfinite(global_max_lc) or global_max_lc <= 0.0:
+            raise ValueError(
+                "MeshGenerator.background_lc must be a positive finite number. "
+                f"Got {self.background_lc!r}."
+            )
 
         def extract_tags(entry_list):
             """Return a clean list of integer tags from Gmsh's dimtag-ish output.
@@ -2225,7 +2230,7 @@ class MeshGenerator:
         def _auto_field_from_row(row, background_lc, has_explicit_fields):
             """Build the implicit size field that backs a feature's resolution.
 
-            Default (new): an AutoExponentialField that grows the mesh from the
+            Default: a GeometricGrowthField that grows the mesh from the
             feature size up to the background size at the feature's growth_factor
             (DEFAULT_GROWTH_FACTOR when unset). Created only when the feature is
             finer than the background and has no explicit ``fields``.
@@ -2252,7 +2257,7 @@ class MeshGenerator:
                 warnings.warn(
                     "dist_min/dist_max are deprecated for feature size transitions; they "
                     "select the legacy linear ThresholdField. Omit them to use the default "
-                    "AutoExponentialField (tune it with growth_factor), or pass an explicit "
+                    "GeometricGrowthField (tune it with growth_factor), or pass an explicit "
                     "ThresholdField in `fields` to keep a linear ramp.",
                     DeprecationWarning,
                     stacklevel=2,
@@ -2271,7 +2276,7 @@ class MeshGenerator:
                     dist_max = dist_min + max(float(background_lc), feature_lc, 1e-3)
                 return ThresholdField(size_min=feature_lc, dist_min=dist_min, dist_max=dist_max, size_max=background_lc)
 
-            # --- Default AutoExponentialField ---
+            # --- Default GeometricGrowthField ---
             # Only when the user has not supplied an explicit field and the
             # feature is actually finer than the background (else nothing to do).
             if has_explicit_fields or feature_lc >= float(background_lc):
@@ -2280,9 +2285,7 @@ class MeshGenerator:
             if growth is None or (isinstance(growth, float) and pd.isna(growth)):
                 growth = DEFAULT_GROWTH_FACTOR
             growth = float(growth)
-            if growth <= 1.0:
-                growth = DEFAULT_GROWTH_FACTOR
-            return AutoExponentialField(growth_factor=growth)
+            return GeometricGrowthField(growth_factor=growth)
 
         # Configure mesh size fields using MeshField objects attached to features.
         #
@@ -2293,7 +2296,7 @@ class MeshGenerator:
         #
         # How fields can be specified per feature:
         # - `fields`: list[MeshField] (the only supported explicit mechanism)
-        # - resolution (+ growth_factor): default implicit AutoExponentialField
+        # - resolution (+ growth_factor): default implicit GeometricGrowthField
         # - `dist_min/dist_max` (+ lc): DEPRECATED shorthand for a linear ThresholdField
         #
         # Grouping:
@@ -2313,7 +2316,7 @@ class MeshGenerator:
                 row_fields = list(explicit_fields)
 
                 # 2) Add the implicit size field backing the feature's
-                #    resolution: AutoExponentialField by default, or the legacy
+                #    resolution: GeometricGrowthField by default, or the legacy
                 #    ThresholdField when dist_min/dist_max are given (deprecated).
                 auto_field = _auto_field_from_row(
                     row, global_max_lc, has_explicit_fields=bool(explicit_fields)

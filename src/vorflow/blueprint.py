@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import warnings
 import geopandas as gpd
 import pandas as pd
@@ -25,6 +26,8 @@ def _validate_growth_factor(value):
         raise ValueError(
             f"growth_factor must be a number greater than 1.0 (or None). Got {value!r}."
         )
+    if not math.isfinite(value):
+        raise ValueError(f"growth_factor must be finite. Got {value}.")
     if value <= 1.0:
         raise ValueError(f"growth_factor must be greater than 1.0. Got {value}.")
     return float(value)
@@ -138,11 +141,11 @@ class ConceptualMesh:
             dist_min (float, optional): DEPRECATED. Distance from the polygon boundary where
                 the mesh size is held constant at the boundary's resolution. Supplying
                 dist_min/dist_max selects the legacy linear ThresholdField transition and
-                emits a DeprecationWarning; omit them to use the default AutoExponentialField.
+                emits a DeprecationWarning; omit them to use the default GeometricGrowthField.
             dist_max (float, optional): DEPRECATED. Distance from the polygon boundary over
                 which the mesh transitions to the background resolution. See dist_min.
             growth_factor (float, optional): Cell-to-cell growth ratio (>1.0) for the default
-                AutoExponentialField size transition away from the feature. Defaults to 1.2.
+                GeometricGrowthField size transition away from the feature. Defaults to 1.2.
                 Ignored when an explicit ``fields`` list or the legacy dist_min/dist_max is given.
             densify (float|bool|None, optional): Controls polygon boundary densification:
                 - If False, disables densification.
@@ -242,7 +245,7 @@ class ConceptualMesh:
             dist_min (float, optional): DEPRECATED. Distance from the line where the mesh size
                 is held constant at the line's resolution. Supplying dist_min/dist_max selects
                 the legacy linear ThresholdField transition and emits a DeprecationWarning;
-                omit them to use the default AutoExponentialField.
+                omit them to use the default GeometricGrowthField.
             dist_max (float, optional): DEPRECATED. Distance from the line over which the mesh
                 transitions to the background resolution. See dist_min.
             straddle_width (float, optional): If set, forces Voronoi cell edges to align
@@ -279,7 +282,7 @@ class ConceptualMesh:
                 higher ``z_order`` keeps its strip continuous and the other is
                 trimmed. Lines do not participate in polygon overlap stacking.
             growth_factor (float, optional): Cell-to-cell growth ratio (>1.0) for the default
-                AutoExponentialField size transition away from the line. Defaults to 1.2.
+                GeometricGrowthField size transition away from the line. Defaults to 1.2.
                 Ignored when an explicit ``fields`` list or the legacy dist_min/dist_max is given.
         """
         if not geometry.is_valid:
@@ -333,14 +336,14 @@ class ConceptualMesh:
             dist_min (float, optional): DEPRECATED. Distance from the point where the mesh size
                 is held constant at the point's resolution. Supplying dist_min/dist_max selects
                 the legacy linear ThresholdField transition and emits a DeprecationWarning;
-                omit them to use the default AutoExponentialField.
+                omit them to use the default GeometricGrowthField.
             dist_max (float, optional): DEPRECATED. Distance from the point over which the mesh
                 transitions to the background resolution. See dist_min.
             simplify_tolerance (float|int|None, optional): If a number > 0, merges points that are closer
                 than this tolerance. If None or 0, no merging is applied. Raises ValueError if negative.
                 Boolean values are not supported.
             growth_factor (float, optional): Cell-to-cell growth ratio (>1.0) for the default
-                AutoExponentialField size transition away from the point. Defaults to 1.2.
+                GeometricGrowthField size transition away from the point. Defaults to 1.2.
                 Ignored when an explicit ``fields`` list or the legacy dist_min/dist_max is given.
         """
         if isinstance(simplify_tolerance, bool):

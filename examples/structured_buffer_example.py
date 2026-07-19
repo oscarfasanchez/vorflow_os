@@ -34,10 +34,10 @@ from shapely.affinity import translate
 
 from vorflow import ConceptualMesh, MeshGenerator, VoronoiTessellator
 from vorflow.utils import build_connectivity, calculate_mesh_quality
-from vorflow.fields import AutoExponentialField
+from vorflow.fields import GeometricGrowthField
 
 #%%
-field = AutoExponentialField(growth_factor=1.5)
+field = GeometricGrowthField(growth_factor=1.5)
 domain = box(0, 0, 12, 22)
 fault = LineString([(0, 5), (12, 5)])    # crosses inner_zone's band
 drain = LineString([(0, 10), (12, 10)])  # passes between the two zones

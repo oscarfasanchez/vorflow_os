@@ -38,6 +38,18 @@ def test_growth_factor_must_exceed_one():
         cm.add_point(Point(0, 0), point_id="p", resolution=0.5, growth_factor=True)
 
 
+@pytest.mark.parametrize("growth_factor", [float("nan"), float("inf"), -float("inf")])
+def test_growth_factor_must_be_finite(growth_factor):
+    cm = ConceptualMesh(crs=None)
+    with pytest.raises(ValueError, match="finite"):
+        cm.add_point(
+            Point(0, 0),
+            point_id="p",
+            resolution=0.5,
+            growth_factor=growth_factor,
+        )
+
+
 def test_growth_factor_defaults_to_none_and_is_stored():
     cm = ConceptualMesh()
     square = Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])

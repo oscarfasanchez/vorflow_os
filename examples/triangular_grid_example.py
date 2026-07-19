@@ -22,13 +22,13 @@ import matplotlib.pyplot as plt
 from shapely.geometry import LineString, Polygon, box
 
 from vorflow import ConceptualMesh, MeshGenerator
-from vorflow.fields import AutoExponentialField
+from vorflow.fields import GeometricGrowthField
 from vorflow.utils import build_connectivity
 
 #%%
 # Conceptual model: a domain with a refined inner zone and a structured quad
 # buffer along a fault, so the exported grid is a mixed tri/quad mesh.
-field = AutoExponentialField(growth_factor=1.2)
+field = GeometricGrowthField(growth_factor=1.2)
 domain = box(0, 0, 20, 12)
 inner_zone = Polygon([(6, 3), (14, 3), (14, 9), (6, 9)])
 fault = LineString([(2, 6), (18, 6)])

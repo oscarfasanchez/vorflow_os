@@ -67,7 +67,7 @@ fault_line = LineString([(100, 0), (100, 150)])
 # 2. Create a blueprint
 blueprint = ConceptualMesh(crs="EPSG:3857")
 blueprint.add_polygon(domain, zone_id=1)
-blueprint.add_point(well_point, point_id="Well-A", resolution=2, dist_max=300)
+blueprint.add_point(well_point, point_id="Well-A", resolution=2, growth_factor=1.2)
 blueprint.add_line(fault_line, line_id="Fault-1", resolution=1, is_barrier=True)
 
 clean_polys, clean_lines, clean_pts = blueprint.generate()
@@ -85,6 +85,22 @@ grid_gdf.to_file("mf6_grid.shp")
 
 print("Grid generation complete.")
 ```
+
+### Mesh gradation
+
+Feature resolutions use `GeometricGrowthField` by default. Its
+`growth_factor` is an upper target for neighboring characteristic edge-length
+growth, not cell area growth and not an exact guarantee for every generated
+neighbor pair. The default `growth_factor=1.2` uses the transparent spatial law
+
+```text
+h(d) = feature_lc + (growth_factor - 1) * d.
+```
+
+For the continuous-metric convention, pass an explicit
+`GeometricGrowthField(growth_model="continuous_metric")`; this uses the gentler
+gradient `log(growth_factor)`. In normal `MeshGenerator` use, the global
+background field caps either result at `background_lc`.
 
 > **Coordinate systems:** always work in a *projected* CRS (e.g. UTM or a
 > national grid) so mesh sizes are in real length units (meters/feet).

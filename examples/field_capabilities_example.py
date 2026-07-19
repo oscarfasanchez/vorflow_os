@@ -8,9 +8,7 @@ This example duplicates polygon and line geometries to exercise multiple mesh
 field types:
 - Implicit threshold via `dist_min`/`dist_max`
 - Explicit `ThresholdField`
-- `ExponentialField`
-- `AutoLinearField`
-- `AutoExponentialField`
+- `GeometricGrowthField` with edge-ratio and continuous-metric conventions
 - Field-only polygon via `embed=False`
 - Barrier/straddle line to validate point-pair representation
 """
@@ -25,8 +23,7 @@ from shapely.geometry import LineString, Point, box
 
 from vorflow import ConceptualMesh, MeshGenerator, VoronoiTessellator
 from vorflow.fields import (
-    AutoExponentialField,
-    AutoLinearField,
+    GeometricGrowthField,
     ThresholdField,
 )
 from vorflow.utils import build_connectivity, calculate_mesh_quality, summarize_quality
@@ -72,8 +69,10 @@ points = {
 #%%
 # Fields used below
 
-auto_linear = AutoLinearField(growth_factor=1.1)
-auto_exp = AutoExponentialField(growth_factor=1.1)
+edge_growth = GeometricGrowthField(growth_factor=1.1)
+metric_growth = GeometricGrowthField(
+    growth_factor=1.1, growth_model="continuous_metric"
+)
 threshold = ThresholdField(size_min=5.0, dist_min=5.0, dist_max=50.0, size_max=20.0)
 
 
@@ -104,7 +103,7 @@ blueprint.add_polygon(
     zone_id="upper-center",
     resolution=feature_lc/5,
     z_order=10,
-    fields=[auto_exp],
+    fields=[edge_growth],
     embed=False,  # field-only polygon 
 )
 
@@ -113,7 +112,7 @@ blueprint.add_polygon(
     zone_id="upper-right",
     resolution=feature_lc/5,
     z_order=10,
-    fields=[auto_linear],
+    fields=[metric_growth],
 )
 
 
@@ -124,7 +123,7 @@ blueprint.add_line(
     # z_order=5,
     dist_min=feature_lc/2,
     dist_max=background_lc * 1.5,
-    fields=[auto_linear],
+    fields=[metric_growth],
     embed=False,  # field-only boundary line
 )
 
@@ -133,7 +132,7 @@ blueprint.add_polygon(
     zone_id="lower-center",
     resolution=feature_lc/5,
     z_order=5,
-    fields=[auto_exp],
+    fields=[edge_growth],
 )
 
 blueprint.add_polygon(
@@ -158,7 +157,7 @@ blueprint.add_line(
     line_id="river-center-down",
     resolution=feature_lc/4,
     is_barrier=False,
-    fields=[auto_exp],
+    fields=[edge_growth],
     embed=False,  # field-only line
 )
 
@@ -175,7 +174,7 @@ blueprint.add_point(
     points["pt-lower-center"],
     point_id="pt-lower-center",
     resolution=feature_lc/5,
-    fields=[auto_exp],
+    fields=[edge_growth],
     embed=False,  # field-only point
 )
 
@@ -183,7 +182,7 @@ blueprint.add_point(
     points["pt-lower-right"],
     point_id="pt-lower-right",
     resolution=feature_lc/5,
-    fields=[auto_linear],
+    fields=[metric_growth],
     embed=False,  # field-only point
 )
 

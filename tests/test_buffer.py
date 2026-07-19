@@ -349,9 +349,9 @@ def test_strip_crossing_embedded_zone_stays_transfinite():
 def test_size_field_attached_to_quad_buffer_line_refines_halo():
     # Regression: distance-growth fields on quad_buffer lines were silently
     # dropped because the strip surfaces were not listed as embedded surfaces.
-    # An explicit exponential field must still grade the halo outward from the
+    # An explicit geometric-growth field must still grade the halo outward from the
     # strip (now also the default behavior -- see test_default_field_*).
-    from vorflow.fields import AutoExponentialField
+    from vorflow.fields import GeometricGrowthField
 
     cm = ConceptualMesh(crs=None)
     cm.add_polygon(box(0, 0, 20, 12), zone_id="domain", resolution=4.0, densify=True)
@@ -361,7 +361,7 @@ def test_size_field_attached_to_quad_buffer_line_refines_halo():
         resolution=0.5,
         quad_buffer=True,
         quad_buffer_thickness=1,
-        fields=[AutoExponentialField(growth_factor=1.2)],
+        fields=[GeometricGrowthField(growth_factor=1.2)],
     )
     clean_polys, clean_lines, clean_points = cm.generate()
     mesher = MeshGenerator(background_lc=4.0, verbosity=0, smoothing_steps=0, optimization_cycles=0)
