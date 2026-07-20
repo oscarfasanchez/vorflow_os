@@ -79,6 +79,22 @@ that the release-specific changes are easy to review.
    environment.
 10. Record the result and stop without publishing to real PyPI.
 
+## Roadmap Cleanup
+
+`ROADMAP.md` is retained as both the current work map and the historical record
+of completed work. It is reorganized rather than erased:
+
+- Milestone 6 becomes the single current objective.
+- Milestones 1 through 5 remain in a compact completed-milestones section.
+- Their detailed files under `docs/roadmap/` remain available as decision and
+  verification history.
+- The stale `Suggested Sequencing` text for already completed milestones is
+  removed.
+- After a successful TestPyPI rehearsal, Milestone 6 is recorded as
+  `TestPyPI verified`, not `Done`.
+- Milestone 6 becomes `Done` only after the separate future production release
+  makes `pip install vorflow` available from real PyPI.
+
 ## Version Design
 
 `pyproject.toml` is the only authoritative source containing the candidate
@@ -299,6 +315,18 @@ Trusted Publishing uses short-lived OIDC credentials rather than a stored
 TestPyPI API token. The publish job cannot authenticate if its repository,
 workflow filename, or environment differs from the registered identity.
 
+Account creation is an explicit user-owned manual step because it uses Oscar's
+email, password, email-verification link, recovery information, and account
+security settings. The implementation work prepares the workflow and exact
+publisher values, then pauses while Oscar completes those personal steps.
+Passwords, recovery information, and two-factor authentication values are not
+requested, stored, or handled by the implementation process.
+
+TestPyPI is a rehearsal service rather than permanent storage. Its database may
+periodically remove projects, releases, and accounts. The durable record is the
+Git repository, release tag, changelog, workflow, and verification notes; the
+TestPyPI project page is not treated as a backup or permanent release archive.
+
 ## Failure Handling
 
 - A source-test, lint, minimum-dependency, tag/version, build, metadata,
@@ -359,4 +387,7 @@ remains.
 - A second clean environment installs the candidate from TestPyPI and repeats
   the smoke checks.
 - The TestPyPI page renders correctly with working links and expected metadata.
+- `ROADMAP.md` identifies Milestone 6 as the only current objective, preserves
+  Milestones 1 through 5 as completed history, and contains no obsolete
+  implementation sequencing.
 - No real-PyPI workflow, tag, credential, or upload is created.
