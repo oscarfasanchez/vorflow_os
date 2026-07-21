@@ -1,10 +1,9 @@
-from importlib.metadata import version, PackageNotFoundError
+from importlib.metadata import PackageNotFoundError, version
 
 try:
     __version__ = version("vorflow")
 except PackageNotFoundError:
-    # Package is not installed (e.g. running from source)
-    __version__ = "0.0.2"
+    __version__ = "0+unknown"
 
 from ._log import set_verbosity
 
