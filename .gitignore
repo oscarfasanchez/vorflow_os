@@ -222,3 +222,6 @@ benchmarks/
 # Local conda environment in repo root
 .conda/
 
+# Superpowers visual brainstorming state
+.superpowers/
+

@@ -44,15 +44,25 @@ or useful enough to port.
 - A general `merge_many_multilinestring_into_one_linestring` helper: add only a
   localized repair if structured buffers actually encounter offset-curve splits.
 
-## Milestones
+## Current Objective
 
 | # | Milestone | Status | Risk | Behavior change | Doc |
 |---|-----------|--------|------|-----------------|-----|
-| 1 | Quality metrics | Done | Low | Additive only | [01-quality-metrics.md](docs/roadmap/01-quality-metrics.md) |
-| 2 | Active-domain filtering workflow | Done (example) | Low | No core API change | [02-robust-clipping.md](docs/roadmap/02-robust-clipping.md) |
-| 3 | Boundary inset/mirror points | Done | Medium | Opt-in | [03-boundary-mirror-points.md](docs/roadmap/03-boundary-mirror-points.md) |
-| 4 | Structured-quad transfinite buffer | Done | High | Opt-in | [04-structured-quad-buffer.md](docs/roadmap/04-structured-quad-buffer.md) |
-| 5 | Triangular/mixed element-grid output | Done | Low-Med | Additive exporter | [05-triangular-grid-output.md](docs/roadmap/05-triangular-grid-output.md) |
+| 6 | First PyPI release | In progress | Low | None (packaging only) | [06-pypi-publishing.md](docs/roadmap/06-pypi-publishing.md) |
+
+The current release scope is a `0.1.0rc1` TestPyPI rehearsal. A successful
+rehearsal changes this status to **TestPyPI verified**. The milestone becomes
+**Done** only after `vorflow` is published to real PyPI.
+
+## Completed Milestones
+
+| # | Milestone | Status | Doc |
+|---|-----------|--------|-----|
+| 1 | Quality metrics | Done | [01-quality-metrics.md](docs/roadmap/01-quality-metrics.md) |
+| 2 | Active-domain filtering workflow | Done (example) | [02-robust-clipping.md](docs/roadmap/02-robust-clipping.md) |
+| 3 | Boundary inset/mirror points | Done | [03-boundary-mirror-points.md](docs/roadmap/03-boundary-mirror-points.md) |
+| 4 | Structured-quad transfinite buffer | Done | [04-structured-quad-buffer.md](docs/roadmap/04-structured-quad-buffer.md) |
+| 5 | Triangular/mixed element-grid output | Done | [05-triangular-grid-output.md](docs/roadmap/05-triangular-grid-output.md) |
 
 All five milestones are implemented: quality metrics and connectivity reports
 (`get_triangular_quality`, `utils.build_connectivity`), the active-domain
@@ -78,18 +88,6 @@ opt-in structured quad buffers (`add_polygon`/`add_line` with
 5. **Triangular/mixed element-grid output**: add a separate `MeshGenerator`
    exporter for gmsh element polygons, supporting triangles now and mixed tri/quad
    meshes for structured buffers.
-
-## Suggested Sequencing
-
-Milestone 2 is documentation/example work only. Implement the remaining code
-milestones as **3 -> 5 -> 4**:
-
-1. Boundary inset/mirror points.
-2. Element-grid exporter.
-3. Structured-quad buffer.
-
-Milestones 4 and 5 should still be designed together, because quad recombination
-and mixed-element output directly interact.
 
 ## Verification
 
