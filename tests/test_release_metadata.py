@@ -1,4 +1,7 @@
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 try:
     import tomllib
@@ -42,3 +45,20 @@ def test_source_fallback_is_not_a_duplicate_release_version():
     )
     assert '__version__ = "0+unknown"' in source
     assert '__version__ = "0.0.2"' not in source
+
+
+def test_basic_usage_script_runs_from_a_clean_directory(tmp_path):
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(ROOT / "src")
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "examples" / "basic_usage.py")],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Generated " in result.stdout
+    assert " Voronoi cells" in result.stdout

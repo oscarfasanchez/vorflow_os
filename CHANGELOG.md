@@ -1,0 +1,26 @@
+# Changelog
+
+All notable changes to `vorflow` are documented in this file.
+
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.1.0rc1] - 2026-07-21
+
+### Added
+
+- Voronoi and triangular/mixed-element grid generation for MODFLOW 6 workflows.
+- Mesh-quality and connectivity diagnostics.
+- Optional boundary inset/mirror points and structured quad buffers.
+- Explicit mesh-size growth fields and runnable examples.
+- Cross-platform tests and TestPyPI release automation.
+
+### Changed
+
+- Prepared project metadata, installation documentation, and dependency floors
+  for the first public release candidate.
+
+[Unreleased]: https://github.com/oscarfasanchez/vorflow_os/compare/v0.1.0rc1...HEAD
+[0.1.0rc1]: https://github.com/oscarfasanchez/vorflow_os/tree/v0.1.0rc1

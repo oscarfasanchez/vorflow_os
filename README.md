@@ -1,8 +1,8 @@
 # vorflow
 
-Voronoi mesh generation for MODFLOW 6 using Gmsh and Geopandas.
+Voronoi mesh generation for MODFLOW 6 using Gmsh and GeoPandas.
 
-`vorflow` is a Python package for creating 2D unstructured Voronoi cell meshes for groundwater modeling, particularly for MODFLOW 6. It leverages the power of `Gmsh` for robust triangular meshing and `Shapely`/`Geopandas` for geometric operations.
+`vorflow` is a Python package for creating 2D unstructured Voronoi cell meshes for groundwater modeling, particularly for MODFLOW 6. It leverages the power of `Gmsh` for robust triangular meshing and `Shapely`/`GeoPandas` for geometric operations.
 
 The process is designed to translate a conceptual model—defined by geometric features like polygons, lines, and points—into a high-quality Voronoi grid suitable for numerical simulation.
 
@@ -28,62 +28,75 @@ The typical workflow follows these steps:
 
 ## Installation
 
-Install `vorflow` in editable mode from the root of the repository; its
-dependencies (declared in `pyproject.toml`) are installed automatically:
+Install the latest published release:
 
 ```bash
-pip install -e .
+pip install vorflow
 ```
 
-`matplotlib` is optional (the library itself never imports it). To run the
-plotting examples and notebooks, install it via the `examples` extra:
+`vorflow` requires Python 3.10 or newer.
 
-```bash
-pip install -e .[examples]
-```
+### Development installation
 
-For development (tests, linting, notebooks):
+Clone the repository and install it in editable mode:
 
 ```bash
 pip install -e .[dev]
 ```
 
-Alternatively, create the full conda development environment from
-[`etc/environment.yml`](etc/environment.yml). Requires Python >= 3.10.
+For plotting examples and notebooks without all development tools:
+
+```bash
+pip install -e .[examples]
+```
+
+Alternatively, create the Conda development environment from
+[`etc/environment.yml`](https://github.com/oscarfasanchez/vorflow_os/blob/main/etc/environment.yml).
 
 ## Basic Usage
 
-Here is a simple example of how to generate a grid:
+Here is a simple example of how to generate a non-empty Voronoi grid:
 
 ```python
-from vorflow import ConceptualMesh, MeshGenerator, VoronoiTessellator
-from shapely.geometry import box, Point, LineString
+from shapely.geometry import LineString, Point, box
 
-# 1. Define conceptual model features
+from vorflow import ConceptualMesh, MeshGenerator, VoronoiTessellator
+
 domain = box(0, 0, 200, 200)
 well_point = Point(25, 25)
 fault_line = LineString([(100, 0), (100, 150)])
 
-# 2. Create a blueprint
 blueprint = ConceptualMesh(crs="EPSG:3857")
 blueprint.add_polygon(domain, zone_id=1)
-blueprint.add_point(well_point, point_id="Well-A", resolution=2, growth_factor=1.2)
-blueprint.add_line(fault_line, line_id="Fault-1", resolution=1, is_barrier=True)
+blueprint.add_point(
+    well_point,
+    point_id="Well-A",
+    resolution=2,
+    growth_factor=1.2,
+)
+blueprint.add_line(
+    fault_line,
+    line_id="Fault-1",
+    resolution=1,
+    is_barrier=True,
+)
 
 clean_polys, clean_lines, clean_pts = blueprint.generate()
 
-# 3. Generate the triangular mesh
 mesher = MeshGenerator(background_lc=100)
 mesher.generate(clean_polys, clean_lines, clean_pts)
 
-# 4. Convert to Voronoi grid
 tessellator = VoronoiTessellator(mesher, blueprint, clip_to_boundary=True)
 grid_gdf = tessellator.generate()
+```
 
-# 5. Save the output
-grid_gdf.to_file("mf6_grid.shp")
+### Optional file export
 
-print("Grid generation complete.")
+GeoPandas writes formats such as Shapefile and GeoPackage through an I/O engine
+such as Pyogrio or Fiona. Install one of those engines before calling:
+
+```python
+grid_gdf.to_file("mf6_grid.gpkg", driver="GPKG")
 ```
 
 ### Mesh gradation
@@ -110,14 +123,16 @@ background field caps either result at `background_lc`.
 
 ## Examples
 
-The [`examples/`](examples/) folder contains runnable scripts and notebooks
+The [examples/](https://github.com/oscarfasanchez/vorflow_os/tree/main/examples)
+folder contains runnable scripts and notebooks
 covering field-based refinement, mesh quality diagnostics, structured quad
 buffers, active-domain workflows, and triangular element-grid export.
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for planned and completed milestones.
+See [ROADMAP.md](https://github.com/oscarfasanchez/vorflow_os/blob/main/ROADMAP.md)
+for planned and completed milestones.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](https://github.com/oscarfasanchez/vorflow_os/blob/main/LICENSE).
