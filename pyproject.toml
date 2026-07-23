@@ -57,6 +57,13 @@ dev = [
     "tomli>=2; python_version < '3.11'",
 ]
 
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = false
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
 [tool.ruff.lint.per-file-ignores]
 # set_verbosity(1) must run before the submodules are imported so their
 # loggers inherit the default console behavior.
