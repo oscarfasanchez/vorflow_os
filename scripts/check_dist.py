@@ -9,6 +9,8 @@ from pathlib import Path, PurePosixPath
 import tarfile
 import zipfile
 
+from packaging.version import InvalidVersion, Version
+
 
 FORBIDDEN_DIRECTORIES = {".conda", "benchmarks", "docs", "__pycache__"}
 EXPECTED_REQUIREMENTS = {
@@ -19,12 +21,26 @@ EXPECTED_REQUIREMENTS = {
     "scipy>=1.10",
     "gmsh>=4.11",
 }
+EXPECTED_URLS = {
+    "Repository, https://github.com/oscarfasanchez/vorflow_os",
+    "Issues, https://github.com/oscarfasanchez/vorflow_os/issues",
+    "Changelog, https://github.com/oscarfasanchez/vorflow_os/blob/main/CHANGELOG.md",
+}
 
 
 def version_from_tag(tag: str) -> str:
-    if not tag.startswith("v") or "rc" not in tag:
+    if not tag.startswith("v"):
         raise ValueError(f"expected a release-candidate tag, received {tag!r}")
-    return tag[1:]
+    value = tag[1:]
+    try:
+        version = Version(value)
+    except InvalidVersion as error:
+        raise ValueError(
+            f"expected a release-candidate tag, received {tag!r}"
+        ) from error
+    if version.pre is None or version.pre[0] != "rc" or tag != f"v{version}":
+        raise ValueError(f"expected a release-candidate tag, received {tag!r}")
+    return str(version)
 
 
 def forbidden_members(names: list[str]) -> list[str]:
@@ -56,6 +72,49 @@ def _normalized_requirement(value: str) -> str:
     return value.replace(" ", "")
 
 
+def _validate_metadata(metadata, expected_version: str, archive_kind: str) -> None:
+    project_name = metadata["Name"]
+    if project_name is None or project_name.lower().replace("_", "-") != "vorflow":
+        raise ValueError(f"unexpected {archive_kind} project name: {project_name}")
+    if metadata["Version"] != expected_version:
+        raise ValueError(
+            f"{archive_kind} version {metadata['Version']} does not match "
+            f"{expected_version}"
+        )
+    if metadata["Requires-Python"] != ">=3.10":
+        raise ValueError(
+            f"unexpected {archive_kind} Requires-Python: "
+            f"{metadata['Requires-Python']}"
+        )
+    requirements = {
+        _normalized_requirement(value)
+        for value in metadata.get_all("Requires-Dist", [])
+        if "extra==" not in _normalized_requirement(value)
+    }
+    if requirements != EXPECTED_REQUIREMENTS:
+        raise ValueError(
+            f"unexpected {archive_kind} runtime requirements: {requirements}"
+        )
+    if metadata["License-Expression"] != "MIT":
+        raise ValueError(
+            f"{archive_kind} does not declare the MIT SPDX expression"
+        )
+    if "LICENSE" not in metadata.get_all("License-File", []):
+        raise ValueError(f"{archive_kind} metadata does not declare LICENSE")
+    if "Oscar Sanchez" not in (metadata["Author-email"] or ""):
+        raise ValueError(f"primary author is missing from {archive_kind} metadata")
+    if "rhugman" not in (metadata["Author"] or ""):
+        raise ValueError(f"original author is missing from {archive_kind} metadata")
+    if "Oscar Sanchez" not in (metadata["Maintainer-email"] or ""):
+        raise ValueError(f"maintainer is missing from {archive_kind} metadata")
+    project_urls = set(metadata.get_all("Project-URL", []))
+    if not EXPECTED_URLS.issubset(project_urls):
+        raise ValueError(
+            f"{archive_kind} is missing project URLs: "
+            f"{EXPECTED_URLS - project_urls}"
+        )
+
+
 def validate_wheel(wheel: Path, expected_version: str) -> None:
     with zipfile.ZipFile(wheel) as archive:
         names = archive.namelist()
@@ -72,56 +131,44 @@ def validate_wheel(wheel: Path, expected_version: str) -> None:
             raise ValueError("wheel has no .dist-info/METADATA")
         metadata = BytesParser(policy=default).parsebytes(archive.read(metadata_name))
 
-    if metadata["Name"].lower().replace("_", "-") != "vorflow":
-        raise ValueError(f"unexpected project name: {metadata['Name']}")
-    if metadata["Version"] != expected_version:
-        raise ValueError(
-            f"wheel version {metadata['Version']} does not match {expected_version}"
-        )
-    if metadata["Requires-Python"] != ">=3.10":
-        raise ValueError(f"unexpected Requires-Python: {metadata['Requires-Python']}")
-    requirements = {
-        _normalized_requirement(value)
-        for value in metadata.get_all("Requires-Dist", [])
-        if "extra==" not in _normalized_requirement(value)
-    }
-    if requirements != EXPECTED_REQUIREMENTS:
-        raise ValueError(f"unexpected runtime requirements: {requirements}")
-    if metadata["License-Expression"] != "MIT":
-        raise ValueError("wheel does not declare the MIT SPDX expression")
-    if "LICENSE" not in metadata.get_all("License-File", []):
-        raise ValueError("wheel metadata does not declare LICENSE")
-    if "Oscar Sanchez" not in (metadata["Author-email"] or ""):
-        raise ValueError("primary author is missing from wheel metadata")
-    if "rhugman" not in (metadata["Author"] or ""):
-        raise ValueError("original author is missing from wheel metadata")
-    if "Oscar Sanchez" not in (metadata["Maintainer-email"] or ""):
-        raise ValueError("maintainer is missing from wheel metadata")
-    project_urls = set(metadata.get_all("Project-URL", []))
-    expected_urls = {
-        "Repository, https://github.com/oscarfasanchez/vorflow_os",
-        "Issues, https://github.com/oscarfasanchez/vorflow_os/issues",
-        "Changelog, https://github.com/oscarfasanchez/vorflow_os/blob/main/CHANGELOG.md",
-    }
-    if not expected_urls.issubset(project_urls):
-        raise ValueError(f"wheel is missing project URLs: {expected_urls - project_urls}")
+    _validate_metadata(metadata, expected_version, "wheel")
 
 
 def validate_sdist(sdist: Path, expected_version: str) -> None:
+    expected_filename = f"vorflow-{expected_version}.tar.gz"
+    if sdist.name != expected_filename:
+        raise ValueError(
+            f"sdist filename {sdist.name!r} does not match {expected_filename!r}"
+        )
+    root = f"vorflow-{expected_version}"
     with tarfile.open(sdist, "r:gz") as archive:
         names = archive.getnames()
-    bad = forbidden_members(names)
-    if bad:
-        raise ValueError(f"sdist contains forbidden members: {bad}")
-    root = f"vorflow-{expected_version}/"
-    for required in (
-        "pyproject.toml",
-        "README.md",
-        "LICENSE",
-        "src/vorflow/__init__.py",
-    ):
-        if root + required not in names:
-            raise ValueError(f"sdist is missing {root + required}")
+        bad = forbidden_members(names)
+        if bad:
+            raise ValueError(f"sdist contains forbidden members: {bad}")
+        roots = {
+            PurePosixPath(name).parts[0]
+            for name in names
+            if PurePosixPath(name).parts
+        }
+        if roots != {root}:
+            raise ValueError(f"sdist has unexpected top-level paths: {sorted(roots)}")
+        for required in (
+            "PKG-INFO",
+            "pyproject.toml",
+            "README.md",
+            "LICENSE",
+            "src/vorflow/__init__.py",
+        ):
+            member_name = f"{root}/{required}"
+            if member_name not in names:
+                raise ValueError(f"sdist is missing {member_name}")
+        metadata_file = archive.extractfile(f"{root}/PKG-INFO")
+        if metadata_file is None:
+            raise ValueError(f"sdist cannot read {root}/PKG-INFO")
+        metadata = BytesParser(policy=default).parsebytes(metadata_file.read())
+
+    _validate_metadata(metadata, expected_version, "sdist")
 
 
 def validate_dist(directory: Path, expected_version: str) -> None:

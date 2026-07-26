@@ -57,6 +57,9 @@ Alternatively, create the Conda development environment from
 
 Here is a simple example of how to generate a non-empty Voronoi grid:
 
+The complete runnable version is
+[examples/basic_usage.py](https://github.com/oscarfasanchez/vorflow_os/blob/main/examples/basic_usage.py).
+
 ```python
 from shapely.geometry import LineString, Point, box
 
@@ -88,6 +91,8 @@ mesher.generate(clean_polys, clean_lines, clean_pts)
 
 tessellator = VoronoiTessellator(mesher, blueprint, clip_to_boundary=True)
 grid_gdf = tessellator.generate()
+if grid_gdf.empty:
+    raise RuntimeError("Basic Usage generated an empty Voronoi grid")
 ```
 
 ### Optional file export
