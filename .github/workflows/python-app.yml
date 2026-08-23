@@ -60,6 +60,7 @@ jobs:
           shapely==2.0.0
           scipy==1.10.0
           gmsh==4.11.1
+          'fiona<1.10'
       - name: Install vorflow development tools
         run: python -m pip install --no-deps -e . && python -m pip install pytest pytest-cov tomli
       - name: Verify installed dependency versions

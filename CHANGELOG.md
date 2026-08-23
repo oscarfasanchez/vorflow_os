@@ -14,6 +14,8 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Made overlapping-zone tie-breaking deterministic.
 - Honored the `snap_to_polygons=False` opt-out for line features.
 - Preserved integer cell IDs when splitting cells along barrier lines.
+- Kept quality reports usable with Gmsh 4.11 by retaining unsupported metrics as `NaN`.
+- Restored Shapely 2.0 resampling plus stable lint and minimum-dependency CI.
 
 ### Added
 

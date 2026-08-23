@@ -655,7 +655,7 @@ def resample_geometry(geom, target_spacing):
         # Generate distances along the line
         distances = np.linspace(0, length, num_segments + 1)
         # Interpolate points at these distances
-        points = [geom.interpolate(d) for d in distances]
+        points = [geom.interpolate(d).coords[0] for d in distances]
         return LineString(points)
     
     elif geom.geom_type == 'Polygon':
@@ -664,7 +664,7 @@ def resample_geometry(geom, target_spacing):
         num_ext = max(int(np.ceil(ext_len / target_spacing)), 3) # Min 3 pts for polygon
         ext_dists = np.linspace(0, ext_len, num_ext + 1)
         # Note: interpolate(0) and interpolate(length) are the same for rings
-        ext_points = [geom.exterior.interpolate(d) for d in ext_dists]
+        ext_points = [geom.exterior.interpolate(d).coords[0] for d in ext_dists]
         
         # Resample interior rings (holes)
         interiors = []
@@ -672,7 +672,7 @@ def resample_geometry(geom, target_spacing):
             int_len = interior.length
             num_int = max(int(np.ceil(int_len / target_spacing)), 3)
             int_dists = np.linspace(0, int_len, num_int + 1)
-            int_points = [interior.interpolate(d) for d in int_dists]
+            int_points = [interior.interpolate(d).coords[0] for d in int_dists]
             interiors.append(int_points)
             
         return Polygon(ext_points, interiors)

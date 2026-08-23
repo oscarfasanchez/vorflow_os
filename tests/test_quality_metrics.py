@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 from shapely.geometry import MultiPolygon, Polygon, box
 
+import vorflow.engine as engine_module
 from vorflow import ConceptualMesh, MeshGenerator
 from vorflow.utils import build_connectivity, calculate_mesh_quality, calculate_orthogonality
 
@@ -231,6 +232,65 @@ def test_get_triangular_quality_requires_generation():
         mesher.get_element_grid()
 
 
+def test_collect_triangular_quality_preserves_unavailable_metric_columns(monkeypatch):
+    mesher = MeshGenerator(background_lc=2.0, verbosity=0)
+    monkeypatch.setattr(
+        mesher,
+        "_get_2d_elements",
+        lambda _surface_tags: ([2], [np.array([101])], [np.array([1, 2, 3])]),
+    )
+    monkeypatch.setattr(
+        engine_module.gmsh.model.mesh,
+        "getElementProperties",
+        lambda _element_type: ("Triangle 3", 2, 1, 3, [], 3),
+    )
+
+    unavailable = {"minDetJac", "maxDetJac", "innerRadius"}
+
+    def get_element_qualities(_tags, measure):
+        if measure in unavailable:
+            raise Exception(f"Unknown quality name '{measure}'")
+        return np.array([0.5])
+
+    monkeypatch.setattr(
+        engine_module.gmsh.model.mesh,
+        "getElementQualities",
+        get_element_qualities,
+    )
+
+    quality = mesher._collect_triangular_quality()
+
+    assert list(quality.columns) == TRIANGULAR_QUALITY_COLUMNS
+    assert quality[list(unavailable)].isna().all().all()
+    assert quality["minSICN"].tolist() == [0.5]
+
+
+def test_collect_triangular_quality_propagates_unrelated_gmsh_errors(monkeypatch):
+    mesher = MeshGenerator(background_lc=2.0, verbosity=0)
+    monkeypatch.setattr(
+        mesher,
+        "_get_2d_elements",
+        lambda _surface_tags: ([2], [np.array([101])], [np.array([1, 2, 3])]),
+    )
+    monkeypatch.setattr(
+        engine_module.gmsh.model.mesh,
+        "getElementProperties",
+        lambda _element_type: ("Triangle 3", 2, 1, 3, [], 3),
+    )
+
+    def raise_invalid_model_error(_tags, _measure):
+        raise Exception("Invalid element tag in current model")
+
+    monkeypatch.setattr(
+        engine_module.gmsh.model.mesh,
+        "getElementQualities",
+        raise_invalid_model_error,
+    )
+
+    with pytest.raises(Exception, match="Invalid element tag"):
+        mesher._collect_triangular_quality()
+
+
 def test_get_triangular_quality_returns_cached_gmsh_metrics_after_generate():
     cm = ConceptualMesh()
     cm.add_polygon(
@@ -255,10 +315,19 @@ def test_get_triangular_quality_returns_cached_gmsh_metrics_after_generate():
     assert not quality.empty
     assert quality["element_tag"].is_unique
     assert quality["is_triangle"].all()
-    metric_values = quality.drop(
-        columns=["element_tag", "element_type", "element_name", "is_triangle"]
+    always_supported = quality[["minSICN", "minSJ", "minSIGE", "gamma"]]
+    assert np.isfinite(always_supported.to_numpy()).all()
+    optional_metrics = quality.drop(
+        columns=[
+            "element_tag",
+            "element_type",
+            "element_name",
+            "is_triangle",
+            *always_supported.columns,
+        ]
     )
-    assert np.isfinite(metric_values.to_numpy()).all()
+    for _, values in optional_metrics.items():
+        assert values.isna().all() or np.isfinite(values.to_numpy()).all()
     assert quality["gamma"].between(0.0, 1.0).all()
     assert quality["minSICN"].between(-1.0, 1.0).all()
 

@@ -310,6 +310,7 @@ class MeshGenerator:
             return pd.DataFrame(columns=metadata_columns + quality_columns)
 
         frames = []
+        unavailable_quality_measures = {}
         for element_type, tags_for_type in zip(element_types, element_tags):
             tags = np.asarray(tags_for_type, dtype=np.int64)
             if len(tags) == 0:
@@ -323,12 +324,29 @@ class MeshGenerator:
                 "is_triangle": "triangle" in element_name.lower(),
             }
             for measure in quality_columns:
-                qualities[measure] = gmsh.model.mesh.getElementQualities(tags, measure)
+                if measure in unavailable_quality_measures:
+                    qualities[measure] = np.full(len(tags), np.nan)
+                    continue
+                try:
+                    qualities[measure] = gmsh.model.mesh.getElementQualities(tags, measure)
+                except Exception as exc:
+                    if "Unknown quality name" not in str(exc):
+                        raise
+                    unavailable_quality_measures[measure] = str(exc)
+                    qualities[measure] = np.full(len(tags), np.nan)
 
             frames.append(pd.DataFrame(qualities))
 
         if not frames:
             return pd.DataFrame(columns=metadata_columns + quality_columns)
+
+        if unavailable_quality_measures:
+            logger.warning(
+                "Gmsh %s does not provide quality measures %s; "
+                "their report columns contain NaN.",
+                getattr(gmsh, "__version__", "unknown"),
+                ", ".join(sorted(unavailable_quality_measures)),
+            )
 
         return pd.concat(frames, ignore_index=True)[metadata_columns + quality_columns]
 
