@@ -9,6 +9,12 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.1.0rc1]
 
+### Fixed
+
+- Made overlapping-zone tie-breaking deterministic.
+- Honored the `snap_to_polygons=False` opt-out for line features.
+- Preserved integer cell IDs when splitting cells along barrier lines.
+
 ### Added
 
 - Voronoi and triangular/mixed-element grid generation for MODFLOW 6 workflows.
