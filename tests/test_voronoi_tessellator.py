@@ -1,10 +1,13 @@
+import logging
+
 import geopandas as gpd
 import numpy as np
 import pytest
-from shapely.geometry import Polygon
+from shapely.geometry import LineString, Polygon
 from shapely.ops import unary_union
 
 from vorflow.blueprint import ConceptualMesh
+import vorflow.tessellator as tessellator_module
 from vorflow.tessellator import VoronoiTessellator
 from vorflow.utils import boundary_connectivity_report, build_connectivity
 
@@ -21,6 +24,64 @@ def _build_conceptual_mesh():
     box = Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
     cm.add_polygon(box, zone_id=42)
     return cm
+
+
+def _plain_barrier_tessellator():
+    cm = _build_conceptual_mesh()
+    cm.add_line(
+        LineString([(0.75, 0), (0.75, 1)]),
+        line_id="barrier",
+        resolution=1.0,
+        is_barrier=True,
+    )
+    cm.generate()
+    mesh_gen = DummyMeshGenerator(nodes=np.empty((0, 2)), tags=[], zones_gdf=cm.clean_polygons)
+    return VoronoiTessellator(mesh_gen, cm), cm.clean_lines.iloc[0].geometry
+
+
+def test_enforce_barriers_preserves_uint64_ids_and_split_fragments():
+    """Catches coercion of newly assigned barrier-fragment IDs to float."""
+    tessellator, barrier = _plain_barrier_tessellator()
+    original_id = 2**64 - 2
+    grid = gpd.GeoDataFrame(
+        {"node_id": np.array([original_id], dtype=np.uint64), "x": [0.5], "y": [0.5]},
+        geometry=[Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])],
+    )
+
+    result = tessellator._enforce_barriers(grid)
+
+    assert result["node_id"].dtype == np.dtype("uint64")
+    assert result["node_id"].is_unique
+    assert set(result["node_id"]) == {original_id, original_id + 1}
+    assert result.loc[result["node_id"] == original_id, "geometry"].iloc[0].area == pytest.approx(0.75)
+    assert result.loc[result["node_id"] == original_id + 1, "geometry"].iloc[0].area == pytest.approx(0.25)
+    assert result.geometry.area.sum() == pytest.approx(1.0)
+    assert not result.geometry.crosses(barrier).any()
+
+
+def test_enforce_barriers_retains_cell_and_logs_warning_when_split_fails(monkeypatch, caplog):
+    """Catches removing a cell when Shapely raises while splitting it."""
+    tessellator, _ = _plain_barrier_tessellator()
+    grid = gpd.GeoDataFrame(
+        {"node_id": np.array([7], dtype=np.uint64), "x": [0.5], "y": [0.5]},
+        geometry=[Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])],
+    )
+
+    def raise_split_error(*args, **kwargs):
+        raise RuntimeError("split failed")
+
+    monkeypatch.setattr(tessellator_module, "split", raise_split_error)
+    vorflow_logger = logging.getLogger("vorflow")
+    old_propagate = vorflow_logger.propagate
+    vorflow_logger.propagate = True
+    try:
+        with caplog.at_level("WARNING", logger="vorflow.tessellator"):
+            result = tessellator._enforce_barriers(grid)
+    finally:
+        vorflow_logger.propagate = old_propagate
+
+    assert result.equals(grid)
+    assert "Warning: Failed to split cell 7: split failed" in caplog.messages
 
 
 def test_voronoi_clips_to_domain_and_assigns_zones():

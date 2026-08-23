@@ -347,8 +347,10 @@ class VoronoiTessellator:
         
         current_grid = grid_gdf
 
-        # Keep track of the highest node ID to assign to new cell fragments.
-        max_id = grid_gdf['node_id'].max()
+        # Keep the caller's integer dtype while assigning fragment IDs with
+        # Python integers, avoiding NumPy scalar arithmetic during increments.
+        node_id_dtype = grid_gdf['node_id'].dtype
+        max_id = int(grid_gdf['node_id'].max())
 
         for idx, row in barriers_to_cut.iterrows():
             line = row.geometry
@@ -407,6 +409,7 @@ class VoronoiTessellator:
                 new_df = gpd.GeoDataFrame(cells_to_keep, crs=current_grid.crs)
                 current_grid = pd.concat([current_grid, new_df], ignore_index=True)
         
+        current_grid['node_id'] = current_grid['node_id'].astype(node_id_dtype)
         return current_grid
 
     def generate(self):
