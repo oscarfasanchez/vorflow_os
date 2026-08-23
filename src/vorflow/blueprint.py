@@ -311,6 +311,7 @@ class ConceptualMesh:
             'geometry': geometry,
             'line_id': line_id,
             'lc': resolution,
+            'snap_to_polygons': snap_to_polygons,
             'is_barrier': is_barrier,
             'dist_min': dist_min,
             'dist_max': dist_max,
@@ -504,7 +505,7 @@ class ConceptualMesh:
             )
             return
         df = pd.DataFrame(self.raw_polygons)
-        df = df.sort_values(by='z_order', ascending=False)
+        df = df.sort_values(by='z_order', ascending=False, kind='mergesort')
         
         occupied_space = None # Tracks the union of all higher-priority polygons.
         
@@ -575,6 +576,8 @@ class ConceptualMesh:
         if self.raw_lines and poly_boundaries is not None and not poly_boundaries.is_empty:
             logger.info(f"Snapping {len(self.raw_lines)} lines to polygon boundaries (tol={tolerance})...")
             for i, line_data in enumerate(self.raw_lines):
+                if not line_data.get('snap_to_polygons', True):
+                    continue
                 original_line = line_data['geometry']
                 snapped_line = snap(original_line, poly_boundaries, tolerance)
                 self.raw_lines[i]['geometry'] = snapped_line
@@ -715,6 +718,7 @@ class ConceptualMesh:
                     'geometry',
                     'line_id',
                     'lc',
+                    'snap_to_polygons',
                     'is_barrier',
                     'dist_min',
                     'dist_max',

@@ -54,6 +54,46 @@ def test_voronoi_clips_to_domain_and_assigns_zones():
     assert "centroid_y" in grid.columns
 
 
+def test_voronoi_assigns_equal_priority_shared_border_nodes_by_zone_index(monkeypatch):
+    cm = ConceptualMesh()
+    cm.add_polygon(Polygon([(0, 0), (1, 0), (1, 1), (0, 1)]), zone_id="left", z_order=0)
+    cm.add_polygon(Polygon([(1, 0), (2, 0), (2, 1), (1, 1)]), zone_id="right", z_order=0)
+    clean_polys, _, _ = cm.generate()
+
+    nodes = np.array([[0.5, 0.5], [1.0, 0.5], [1.5, 0.5], [1.0, 0.25]])
+    tags = np.arange(1, len(nodes) + 1)
+    mesh_gen = DummyMeshGenerator(nodes=nodes, tags=tags, zones_gdf=clean_polys)
+
+    def reversed_shared_border_matches(points, zones, how, predicate):
+        records = []
+        for _, point in points.iterrows():
+            records.extend(
+                [
+                    {
+                        "node_id": point["node_id"],
+                        "geometry": point.geometry,
+                        "index_right": 1,
+                        "zone_id": "right",
+                        "z_order": 0,
+                    },
+                    {
+                        "node_id": point["node_id"],
+                        "geometry": point.geometry,
+                        "index_right": 0,
+                        "zone_id": "left",
+                        "z_order": 0,
+                    },
+                ]
+            )
+        return gpd.GeoDataFrame(records, geometry="geometry", crs=points.crs)
+
+    monkeypatch.setattr(gpd, "sjoin", reversed_shared_border_matches)
+    grid = VoronoiTessellator(mesh_gen, cm, clip_to_boundary=True).generate()
+
+    shared_border_zones = grid.loc[grid["node_id"].isin([2, 4]), "zone_id"]
+    assert shared_border_zones.tolist() == ["left", "left"]
+
+
 def test_boundary_centering_default_matches_clip_mode():
     cm = _build_conceptual_mesh()
     clean_polys, _, _ = cm.generate()

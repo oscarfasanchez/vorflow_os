@@ -516,8 +516,14 @@ class VoronoiTessellator:
         # 3. If a point falls on a boundary between zones, it may have multiple
         # matches. We use the `z_order` from the conceptual model to pick the
         # highest-priority zone.
+        sort_columns, ascending = ['node_id'], [True]
         if 'z_order' in joined.columns:
-            joined = joined.sort_values('z_order', ascending=False)
+            sort_columns += ['z_order', 'index_right']
+            ascending += [False, True]
+        else:
+            sort_columns += ['index_right']
+            ascending += [True]
+        joined = joined.sort_values(sort_columns, ascending=ascending, kind='mergesort')
         
         joined = joined.drop_duplicates(subset='node_id')
         

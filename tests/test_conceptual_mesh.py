@@ -27,6 +27,26 @@ def test_resolve_overlaps_respects_z_order():
     assert pytest.approx(expected_union.area, rel=1e-6) == resolved_union.area
 
 
+def test_resolve_overlaps_keeps_first_added_polygon_for_equal_z_order():
+    cm = ConceptualMesh()
+    for zone_id in range(20):
+        cm.add_polygon(
+            Polygon([(100, 0), (101, 0), (101, 1), (100, 1)]),
+            zone_id=f"background-{zone_id}",
+            z_order=-1,
+        )
+        cm.add_polygon(
+            Polygon([(zone_id, 0), (zone_id + 2, 0), (zone_id + 2, 1), (zone_id, 1)]),
+            zone_id=zone_id,
+            z_order=0,
+        )
+
+    clean_polys, _, _ = cm.generate()
+
+    containing_zone = clean_polys[clean_polys.geometry.contains(Point(3.5, 0.5))]
+    assert containing_zone["zone_id"].tolist() == [2]
+
+
 def test_growth_factor_must_exceed_one():
     cm = ConceptualMesh()
     square = Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
@@ -83,6 +103,26 @@ def test_lines_and_points_snap_to_polygons():
     tolerance = 1e-3
     assert snapped_line.distance(boundary) <= tolerance
     assert snapped_point.distance(boundary) <= tolerance
+
+
+def test_line_snapping_defaults_to_enabled_and_can_be_disabled():
+    cm = ConceptualMesh(connectivity_tolerance=0.25)
+    cm.add_polygon(Polygon([(0, 0), (2, 0), (2, 2), (0, 2)]), zone_id=1)
+    cm.add_line(LineString([(0.1, 0.1), (1, 1)]), line_id="default", resolution=0.1, densify=False)
+    cm.add_line(
+        LineString([(0.1, 1.9), (1, 1.5)]),
+        line_id="disabled",
+        resolution=0.1,
+        snap_to_polygons=False,
+        densify=False,
+    )
+
+    _, clean_lines, _ = cm.generate()
+
+    default_line = clean_lines.loc[clean_lines["line_id"] == "default", "geometry"].iloc[0]
+    disabled_line = clean_lines.loc[clean_lines["line_id"] == "disabled", "geometry"].iloc[0]
+    assert default_line.coords[0] == (0.0, 0.0)
+    assert disabled_line.coords[0] == (0.1, 1.9)
 
 
 def test_points_outside_domain_are_removed_after_connectivity():
