@@ -79,9 +79,13 @@ except where a review item explicitly calls for a correction.
 
 **Review decisions.** Package-facing URLs target `rhugman/vorflow`, while
 Oscar Sanchez remains the first author and Oscar and rhugman are both listed
-as maintainers (without publishing rhugman's email). The four removed
-`add_polygon` keywords are documented with migration guidance rather than
-reintroduced before the first release candidate. All verified review work
+as maintainers. A [public Vorflow commit](https://github.com/rhugman/vorflow/commit/02c82b60947ac1d8d0f8c01315ce6480b0e307dc)
+uses `rthugman@gmail.com` as rhugman's author email, although his GitHub
+profile does not list a contact email. Propose that address for maintainer
+metadata, but obtain rhugman's confirmation before release; remove or replace
+it if he prefers. The four removed `add_polygon` keywords are documented with
+migration guidance rather than reintroduced before the first release candidate.
+All verified review work
 stays in PR #12. Existing fixes for issues #13–#16 at commit `01b2d43` are
 retained; the issues stay open until merge. The TestPyPI trusted-publisher
 configuration belongs to the upstream repository and must be confirmed with
@@ -177,14 +181,15 @@ the two reviews appears once here.
 
 Change package-facing repository, issue, changelog, and README links to
 `https://github.com/rhugman/vorflow` without changing the `0.1.0rc1` version.
-Preserve Oscar as first author; list both Oscar and rhugman as maintainers, with
-no invented rhugman email. Update `scripts/check_dist.py`, its fixture tests,
-and release-metadata tests to assert the canonical URLs; update the release
-milestone's ownership statement. Do not alter the TestPyPI publisher identity
-in code: verify its upstream repository/environment configuration before any
-tag is pushed. A focused metadata test should fail against the current fork
-URLs and pass after the change; then check built wheel and sdist metadata,
-README/changelog links, Ruff, and the full suite. Commit and report this unit
+Preserve Oscar as first author; list both Oscar and rhugman as maintainers,
+provisionally using rhugman's publicly committed address. Update
+`scripts/check_dist.py`, its fixture tests, and release-metadata tests to
+assert the canonical URLs; update the release milestone's ownership statement.
+Do not alter the TestPyPI publisher identity
+in code: verify its upstream repository/environment configuration and confirm
+the maintainer email with rhugman before any tag is pushed. A focused metadata
+test should fail against the current fork URLs and pass after the change; then
+check built wheel and sdist metadata, README/changelog links, Ruff, and the full suite. Commit and report this unit
 alone, then pause before item 2.
 
 ## Completed Milestones
