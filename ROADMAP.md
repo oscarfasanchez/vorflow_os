@@ -102,8 +102,8 @@ the two reviews appears once here.
 
 | # | Status | Review item and acceptance evidence |
 |---|--------|-------------------------------------|
-| 1 | Awaiting CI and user review | Canonical release ownership: upstream URLs in package metadata, README, changelog, distribution validator, tests, and release milestone; built wheel/sdist metadata and links checked. Confirm upstream TestPyPI trusted-publisher setup separately. |
-| 2 | Queued | `ConceptualMesh.generate()` preserves raw polygon, line, and point inputs across repeated calls; identical inputs produce identical clean frames, including `embed=False` fields. Includes the missing idempotency test. |
+| 1 | Verified; release gates pending | Canonical release ownership: upstream URLs in package metadata, README, changelog, distribution validator, tests, and release milestone; built wheel/sdist metadata and links checked. Confirm upstream TestPyPI trusted-publisher setup separately. |
+| 2 | Awaiting CI and user review | `ConceptualMesh.generate()` preserves raw polygon, line, and point inputs across repeated calls; identical inputs produce identical clean frames, including `embed=False` fields. Includes the missing idempotency test. |
 | 3 | Queued | Constructing `MeshGenerator` cannot change the package logger's level; per-instance verbosity still controls Gmsh and diagnostics. |
 | 4 | Queued | Clipped or dropped out-of-domain lines and points produce warnings naming affected feature IDs; a boundary-epsilon case is tested. |
 | 5 | Queued | Failed point or line embedding produces an actionable warning identifying source feature IDs; existing diagnostic counts remain available. |
@@ -203,6 +203,20 @@ before this item is considered resolved; the tag-triggered release workflow
 will verify an isolated build at the separate release gate. The upstream
 TestPyPI publisher identity and rhugman's preferred contact address still
 require confirmation before tagging.
+
+**Item 1 CI.** The [exact-head run](https://github.com/oscarfasanchez/vorflow_os/actions/runs/35480928726)
+passed lint, all nine OS/Python test-matrix jobs, and minimum dependencies
+(11/11). The external release gates above remain open.
+
+### Second implementation unit: repeatable conceptual-mesh preprocessing
+
+Run geometry cleanup on per-call feature-record copies, restoring the original
+raw polygon, line, and point lists even when processing raises. Preserve the
+existing clean output API. Regression tests cover unchanged raw inputs,
+identical clean frames on repeated calls with a field-only polygon, and
+restoration after an error. Locally, the focused conceptual-mesh file passed
+(31 tests), and the full suite passed (219 tests) in the activated Vorflow
+Conda environment; PR CI is pending for this item.
 
 ## Completed Milestones
 

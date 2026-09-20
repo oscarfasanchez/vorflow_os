@@ -1,11 +1,13 @@
 import warnings
 
 import pytest
+from geopandas.testing import assert_geodataframe_equal
 from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
 
 import vorflow.blueprint as blueprint_module
 from vorflow.blueprint import ConceptualMesh
+from vorflow.fields import GeometricGrowthField
 
 
 def test_resolve_overlaps_respects_z_order():
@@ -45,6 +47,76 @@ def test_resolve_overlaps_keeps_first_added_polygon_for_equal_z_order():
 
     containing_zone = clean_polys[clean_polys.geometry.contains(Point(3.5, 0.5))]
     assert containing_zone["zone_id"].tolist() == [2]
+
+
+def test_generate_preserves_registered_raw_features():
+    cm = ConceptualMesh(connectivity_tolerance=0.1)
+    domain = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
+    field_only = Polygon([(8, 8), (12, 8), (12, 12), (8, 12)])
+    crossing_line = LineString([(-1, 5), (5, 5)])
+    near_corner = Point(0.05, 0.05)
+    outside_point = Point(20, 20)
+    cm.add_polygon(domain, zone_id="domain")
+    cm.add_polygon(field_only, zone_id="field", embed=False)
+    cm.add_line(crossing_line, line_id="line", resolution=1, densify=False)
+    cm.add_point(near_corner, point_id="near", resolution=1)
+    cm.add_point(outside_point, point_id="outside", resolution=1)
+
+    cm.generate()
+
+    assert [feature["zone_id"] for feature in cm.raw_polygons] == ["domain", "field"]
+    assert cm.raw_polygons[0]["geometry"].equals(domain)
+    assert cm.raw_polygons[1]["geometry"].equals(field_only)
+    assert cm.raw_lines[0]["geometry"].equals(crossing_line)
+    assert [feature["point_id"] for feature in cm.raw_points] == ["near", "outside"]
+    assert cm.raw_points[0]["geometry"].equals(near_corner)
+    assert cm.raw_points[1]["geometry"].equals(outside_point)
+
+
+def test_generate_repeated_calls_return_identical_clean_frames_with_field_only_polygon():
+    cm = ConceptualMesh(connectivity_tolerance=0.1)
+    field = GeometricGrowthField(growth_factor=1.2)
+    cm.add_polygon(Polygon([(0, 0), (10, 0), (10, 10), (0, 10)]), zone_id="domain")
+    cm.add_polygon(
+        Polygon([(8, 8), (12, 8), (12, 12), (8, 12)]),
+        zone_id="field",
+        fields=[field],
+        embed=False,
+    )
+    cm.add_line(
+        LineString([(-1, 5), (5, 5)]),
+        line_id="line",
+        resolution=1,
+        densify=False,
+    )
+    cm.add_point(Point(20, 20), point_id="outside", resolution=1)
+
+    first = tuple(frame.copy(deep=True) for frame in cm.generate())
+    second = cm.generate()
+
+    assert first[0]["zone_id"].tolist() == ["domain", "field"]
+    assert first[0].iloc[1]["fields"] == [field]
+    for first_frame, second_frame in zip(first, second):
+        assert_geodataframe_equal(first_frame, second_frame)
+
+
+def test_generate_preserves_raw_inputs_when_processing_fails():
+    cm = ConceptualMesh()
+    cm.add_polygon(Polygon([(0, 0), (10, 0), (10, 10), (0, 10)]), zone_id="domain")
+    cm.add_polygon(Polygon([(2, 2), (4, 2), (4, 4), (2, 4)]), zone_id="field", embed=False)
+    original_line = LineString([(1, 1), (2, 1.01), (3, 1)])
+    cm.add_line(
+        original_line,
+        line_id="noisy",
+        resolution=1,
+        simplify_tolerance=0.1,
+    )
+
+    with pytest.raises(ValueError, match="connectivity_tolerance"):
+        cm.generate(connectivity_tolerance=True)
+
+    assert [feature["zone_id"] for feature in cm.raw_polygons] == ["domain", "field"]
+    assert cm.raw_lines[0]["geometry"].equals(original_line)
 
 
 def test_growth_factor_must_exceed_one():

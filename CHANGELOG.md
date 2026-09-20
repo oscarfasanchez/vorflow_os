@@ -11,6 +11,7 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Kept conceptual-mesh inputs intact across repeated preprocessing calls.
 - Made overlapping-zone tie-breaking deterministic.
 - Honored the `snap_to_polygons=False` opt-out for line features.
 - Preserved integer cell IDs when splitting cells along barrier lines.

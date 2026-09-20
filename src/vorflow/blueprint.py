@@ -680,12 +680,26 @@ class ConceptualMesh:
         """
         Runs the full preprocessing workflow: resolves polygon overlaps,
         ensures topological connectivity, and prepares clean GeoDataFrames
-        for the mesher.
+        for the mesher. Registered raw features remain unchanged so repeated
+        calls with the same inputs produce the same clean features.
 
         Args:
             connectivity_tolerance (float, optional): Override for the instance's
                 default topology snapping tolerance during this preprocessing run.
         """
+        raw_inputs = self.raw_polygons, self.raw_lines, self.raw_points
+        # Preprocessing replaces geometries and filters feature records, but does
+        # not modify their nested field objects. Copy each record for this run.
+        self.raw_polygons, self.raw_lines, self.raw_points = (
+            [feature.copy() for feature in raw_features]
+            for raw_features in raw_inputs
+        )
+        try:
+            return self._generate_working_features(connectivity_tolerance)
+        finally:
+            self.raw_polygons, self.raw_lines, self.raw_points = raw_inputs
+
+    def _generate_working_features(self, connectivity_tolerance):
         logger.info("Applying optional geometry simplification...")
         self._apply_simplification()
 
