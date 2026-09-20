@@ -33,13 +33,14 @@ def _metadata(version="0.1.0rc1"):
         f"Version: {version}\n"
         "Author: rhugman\n"
         "Author-email: Oscar Sanchez <oscarfasanchez@gmail.com>\n"
-        "Maintainer-email: Oscar Sanchez <oscarfasanchez@gmail.com>\n"
+        "Maintainer-email: Oscar Sanchez <oscarfasanchez@gmail.com>, "
+        "rhugman <rthugman@gmail.com>\n"
         "License-Expression: MIT\n"
         "License-File: LICENSE\n"
         "Requires-Python: >=3.10\n"
-        "Project-URL: Repository, https://github.com/oscarfasanchez/vorflow_os\n"
-        "Project-URL: Issues, https://github.com/oscarfasanchez/vorflow_os/issues\n"
-        "Project-URL: Changelog, https://github.com/oscarfasanchez/vorflow_os/blob/main/CHANGELOG.md\n"
+        "Project-URL: Repository, https://github.com/rhugman/vorflow\n"
+        "Project-URL: Issues, https://github.com/rhugman/vorflow/issues\n"
+        "Project-URL: Changelog, https://github.com/rhugman/vorflow/blob/main/CHANGELOG.md\n"
         f"{requirements}\n"
         "\n"
         "Synthetic package metadata for archive validation tests.\n"
@@ -62,12 +63,14 @@ def _write_sdist(path, metadata=_metadata(), root="vorflow-0.1.0rc1"):
             archive.addfile(info, io.BytesIO(content))
 
 
-def _write_wheel(path):
+def _write_wheel(path, metadata=None):
     dist_info = "vorflow-0.1.0rc1.dist-info"
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr("vorflow/__init__.py", "")
         archive.writestr(f"{dist_info}/licenses/LICENSE", "MIT")
-        archive.writestr(f"{dist_info}/METADATA", _metadata())
+        archive.writestr(
+            f"{dist_info}/METADATA", _metadata() if metadata is None else metadata
+        )
 
 
 def test_version_from_tag():
@@ -118,6 +121,53 @@ def test_validate_sdist_accepts_complete_metadata(tmp_path):
     _write_sdist(sdist)
 
     check_dist.validate_sdist(sdist, "0.1.0rc1")
+
+
+def test_validate_wheel_rejects_legacy_fork_urls(tmp_path):
+    wheel = tmp_path / "vorflow-0.1.0rc1-py3-none-any.whl"
+    legacy = _metadata().replace(
+        b"https://github.com/rhugman/vorflow",
+        b"https://github.com/oscarfasanchez/vorflow_os",
+    )
+    _write_wheel(wheel, legacy)
+    with pytest.raises(ValueError, match="project URLs"):
+        check_dist.validate_wheel(wheel, "0.1.0rc1")
+
+
+def test_validate_wheel_rejects_extra_legacy_fork_url(tmp_path):
+    wheel = tmp_path / "vorflow-0.1.0rc1-py3-none-any.whl"
+    legacy_urls = b"\n".join(
+        (
+            b"Project-URL: Repository, https://github.com/oscarfasanchez/vorflow_os",
+            b"Project-URL: Issues, https://github.com/oscarfasanchez/vorflow_os/issues",
+            b"Project-URL: Changelog, https://github.com/oscarfasanchez/vorflow_os/blob/main/CHANGELOG.md",
+        )
+    )
+    mixed = _metadata().replace(
+        b"\n\nSynthetic package metadata",
+        b"\n" + legacy_urls + b"\n\nSynthetic package metadata",
+    )
+    _write_wheel(wheel, mixed)
+    with pytest.raises(ValueError, match="project URLs"):
+        check_dist.validate_wheel(wheel, "0.1.0rc1")
+
+
+def test_validate_wheel_rejects_missing_co_maintainer(tmp_path):
+    wheel = tmp_path / "vorflow-0.1.0rc1-py3-none-any.whl"
+    missing = _metadata().replace(b", rhugman <rthugman@gmail.com>", b"")
+    _write_wheel(wheel, missing)
+    with pytest.raises(ValueError, match="maintainer"):
+        check_dist.validate_wheel(wheel, "0.1.0rc1")
+
+
+def test_validate_sdist_rejects_wrong_co_maintainer_email(tmp_path):
+    sdist = tmp_path / "vorflow-0.1.0rc1.tar.gz"
+    wrong = _metadata().replace(
+        b"rhugman <rthugman@gmail.com>", b"rhugman <wrong@example.com>"
+    )
+    _write_sdist(sdist, metadata=wrong)
+    with pytest.raises(ValueError, match="maintainer"):
+        check_dist.validate_sdist(sdist, "0.1.0rc1")
 
 
 def test_validate_sdist_rejects_missing_pkg_info(tmp_path):

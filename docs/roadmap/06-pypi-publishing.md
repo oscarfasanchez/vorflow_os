@@ -14,8 +14,9 @@ verifying `0.1.0rc1`; real PyPI publication remains a separate approval gate.
 
 ## Current state (release candidate prepared locally)
 
-- Explicit PEP 621/639 metadata for `0.1.0rc1`, with Oscar Sanchez as primary
-  author and maintainer and rhugman retained as an original author.
+- Explicit PEP 621/639 metadata for `0.1.0rc1`, with Oscar Sanchez as first
+  author and Oscar and rhugman as maintainers. Rhugman's public commit author
+  email is provisionally used in maintainer metadata pending his confirmation.
 - MIT SPDX metadata, dependency floors, keywords, repository links, changelog,
   and absolute README links suitable for package-index rendering.
 - One canonical Basic Usage script that runs against an installed wheel.
@@ -27,9 +28,10 @@ verifying `0.1.0rc1`; real PyPI publication remains a separate approval gate.
 - `__version__` resolved from installed metadata, with a neutral source-tree
   fallback instead of a duplicated release number.
 
-The local rehearsal passes Ruff, the full test suite, isolated archive builds,
-Twine checks, archive validation, fresh-wheel installation, `pip check`, and
-the Basic Usage example outside the source tree.
+An earlier local rehearsal passed Ruff, the full test suite, isolated archive
+builds, Twine checks, archive validation, fresh-wheel installation, `pip check`,
+and the Basic Usage example outside the source tree. The current PR head still
+requires fresh CI and release-workflow verification.
 
 ## Completed release preparation
 
@@ -38,8 +40,8 @@ the Basic Usage example outside the source tree.
 - [x] Smoke-test the wheel in a fresh environment outside the repository.
 - [x] Add PyPI-facing installation documentation and absolute links.
 - [x] Add and test runtime dependency floors without upper caps.
-- [x] Confirm public authorship and maintainer metadata without publishing
-  rhugman's email.
+- [x] Record Oscar's primary authorship and provisional co-maintainer metadata
+  for rhugman.
 - [x] Add the changelog, modern licence metadata, and package keywords.
 - [x] Add an RC-only, TestPyPI-only Trusted Publishing workflow.
 
@@ -47,6 +49,9 @@ the Basic Usage example outside the source tree.
 
 - [ ] Address release code-review findings and integrate the focused release
   branch into `main`.
+- [ ] Confirm with rhugman that `rthugman@gmail.com` is the contact address he
+  wants exposed in package maintainer metadata, and verify the upstream
+  `testpypi` GitHub environment and TestPyPI Trusted Publisher identity.
 - [ ] Create and push the annotated `v0.1.0rc1` tag.
 - [ ] Review the GitHub build and manually approve the protected `testpypi`
   deployment.

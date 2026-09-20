@@ -30,5 +30,5 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Prepared project metadata, installation documentation, and dependency floors
   for the first public release candidate.
 
-[Unreleased]: https://github.com/oscarfasanchez/vorflow_os/compare/v0.1.0rc1...HEAD
-[0.1.0rc1]: https://github.com/oscarfasanchez/vorflow_os/tree/v0.1.0rc1
+[Unreleased]: https://github.com/rhugman/vorflow/compare/v0.1.0rc1...HEAD
+[0.1.0rc1]: https://github.com/rhugman/vorflow/tree/v0.1.0rc1

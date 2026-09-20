@@ -15,6 +15,7 @@ authors = [
 ]
 maintainers = [
     {name = "Oscar Sanchez", email = "oscarfasanchez@gmail.com"},
+    {name = "rhugman", email = "rthugman@gmail.com"},
 ]
 requires-python = ">=3.10"
 keywords = ["modflow", "groundwater", "voronoi", "mesh", "gmsh"]
@@ -37,9 +38,9 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/oscarfasanchez/vorflow_os"
-Issues = "https://github.com/oscarfasanchez/vorflow_os/issues"
-Changelog = "https://github.com/oscarfasanchez/vorflow_os/blob/main/CHANGELOG.md"
+Repository = "https://github.com/rhugman/vorflow"
+Issues = "https://github.com/rhugman/vorflow/issues"
+Changelog = "https://github.com/rhugman/vorflow/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 examples = [

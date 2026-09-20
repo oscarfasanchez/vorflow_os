@@ -102,7 +102,7 @@ the two reviews appears once here.
 
 | # | Status | Review item and acceptance evidence |
 |---|--------|-------------------------------------|
-| 1 | Next | Canonical release ownership: upstream URLs in package metadata, README, changelog, distribution validator, tests, and release milestone; built wheel/sdist metadata and links checked. Confirm upstream TestPyPI trusted-publisher setup separately. |
+| 1 | Awaiting CI and user review | Canonical release ownership: upstream URLs in package metadata, README, changelog, distribution validator, tests, and release milestone; built wheel/sdist metadata and links checked. Confirm upstream TestPyPI trusted-publisher setup separately. |
 | 2 | Queued | `ConceptualMesh.generate()` preserves raw polygon, line, and point inputs across repeated calls; identical inputs produce identical clean frames, including `embed=False` fields. Includes the missing idempotency test. |
 | 3 | Queued | Constructing `MeshGenerator` cannot change the package logger's level; per-instance verbosity still controls Gmsh and diagnostics. |
 | 4 | Queued | Clipped or dropped out-of-domain lines and points produce warnings naming affected feature IDs; a boundary-epsilon case is tested. |
@@ -191,6 +191,18 @@ the maintainer email with rhugman before any tag is pushed. A focused metadata
 test should fail against the current fork URLs and pass after the change; then
 check built wheel and sdist metadata, README/changelog links, Ruff, and the full suite. Commit and report this unit
 alone, then pause before item 2.
+
+**Item 1 verification (local; PR CI pending).** Twenty focused release tests
+passed in the Vorflow Conda environment with the Gmsh smoke test deselected.
+`ruff check src tests scripts`, Twine, and `scripts/check_dist.py` passed for a
+fresh `0.1.0rc1` wheel and sdist built with installed setuptools. The normal
+isolated build could not download setuptools in the network-restricted local
+sandbox, and the full pytest run produced no output after about 100 seconds
+while importing local dependencies. GitHub PR CI must verify the full suite
+before this item is considered resolved; the tag-triggered release workflow
+will verify an isolated build at the separate release gate. The upstream
+TestPyPI publisher identity and rhugman's preferred contact address still
+require confirmation before tagging.
 
 ## Completed Milestones
 

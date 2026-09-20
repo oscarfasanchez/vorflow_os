@@ -26,8 +26,14 @@ def test_release_metadata_is_complete():
         {"name": "rhugman"},
     ]
     assert project["maintainers"] == [
-        {"name": "Oscar Sanchez", "email": "oscarfasanchez@gmail.com"}
+        {"name": "Oscar Sanchez", "email": "oscarfasanchez@gmail.com"},
+        {"name": "rhugman", "email": "rthugman@gmail.com"},
     ]
+    assert project["urls"] == {
+        "Repository": "https://github.com/rhugman/vorflow",
+        "Issues": "https://github.com/rhugman/vorflow/issues",
+        "Changelog": "https://github.com/rhugman/vorflow/blob/main/CHANGELOG.md",
+    }
     assert project["dependencies"] == [
         "numpy>=1.24",
         "pandas>=1.5",
@@ -37,6 +43,13 @@ def test_release_metadata_is_complete():
         "gmsh>=4.11",
     ]
     assert "License :: OSI Approved :: MIT License" not in project["classifiers"]
+
+
+def test_public_docs_link_to_upstream():
+    for name in ("README.md", "CHANGELOG.md"):
+        content = (ROOT / name).read_text(encoding="utf-8")
+        assert "https://github.com/oscarfasanchez/vorflow_os" not in content
+        assert "https://github.com/rhugman/vorflow" in content
 
 
 def test_source_fallback_is_not_a_duplicate_release_version():

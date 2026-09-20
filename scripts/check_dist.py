@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from email.parser import BytesParser
 from email.policy import default
+from email.utils import getaddresses
 from pathlib import Path, PurePosixPath
 import tarfile
 import zipfile
@@ -22,9 +23,13 @@ EXPECTED_REQUIREMENTS = {
     "gmsh>=4.11",
 }
 EXPECTED_URLS = {
-    "Repository, https://github.com/oscarfasanchez/vorflow_os",
-    "Issues, https://github.com/oscarfasanchez/vorflow_os/issues",
-    "Changelog, https://github.com/oscarfasanchez/vorflow_os/blob/main/CHANGELOG.md",
+    "Repository, https://github.com/rhugman/vorflow",
+    "Issues, https://github.com/rhugman/vorflow/issues",
+    "Changelog, https://github.com/rhugman/vorflow/blob/main/CHANGELOG.md",
+}
+EXPECTED_MAINTAINERS = {
+    ("Oscar Sanchez", "oscarfasanchez@gmail.com"),
+    ("rhugman", "rthugman@gmail.com"),
 }
 
 
@@ -105,13 +110,18 @@ def _validate_metadata(metadata, expected_version: str, archive_kind: str) -> No
         raise ValueError(f"primary author is missing from {archive_kind} metadata")
     if "rhugman" not in (metadata["Author"] or ""):
         raise ValueError(f"original author is missing from {archive_kind} metadata")
-    if "Oscar Sanchez" not in (metadata["Maintainer-email"] or ""):
-        raise ValueError(f"maintainer is missing from {archive_kind} metadata")
-    project_urls = set(metadata.get_all("Project-URL", []))
-    if not EXPECTED_URLS.issubset(project_urls):
+    maintainers = set(getaddresses(metadata.get_all("Maintainer-email", [])))
+    if maintainers != EXPECTED_MAINTAINERS:
         raise ValueError(
-            f"{archive_kind} is missing project URLs: "
-            f"{EXPECTED_URLS - project_urls}"
+            f"unexpected {archive_kind} maintainer metadata: {maintainers}"
+        )
+    project_urls = set(metadata.get_all("Project-URL", []))
+    if not EXPECTED_URLS.issubset(project_urls) or any(
+        "https://github.com/oscarfasanchez/vorflow_os" in url
+        for url in project_urls
+    ):
+        raise ValueError(
+            f"{archive_kind} has incorrect project URLs: {project_urls}"
         )
 
 

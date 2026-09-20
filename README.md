@@ -51,14 +51,14 @@ pip install -e .[examples]
 ```
 
 Alternatively, create the Conda development environment from
-[`etc/environment.yml`](https://github.com/oscarfasanchez/vorflow_os/blob/main/etc/environment.yml).
+[`etc/environment.yml`](https://github.com/rhugman/vorflow/blob/main/etc/environment.yml).
 
 ## Basic Usage
 
 Here is a simple example of how to generate a non-empty Voronoi grid:
 
 The complete runnable version is
-[examples/basic_usage.py](https://github.com/oscarfasanchez/vorflow_os/blob/main/examples/basic_usage.py).
+[examples/basic_usage.py](https://github.com/rhugman/vorflow/blob/main/examples/basic_usage.py).
 
 ```python
 from shapely.geometry import LineString, Point, box
@@ -128,16 +128,16 @@ background field caps either result at `background_lc`.
 
 ## Examples
 
-The [examples/](https://github.com/oscarfasanchez/vorflow_os/tree/main/examples)
+The [examples/](https://github.com/rhugman/vorflow/tree/main/examples)
 folder contains runnable scripts and notebooks
 covering field-based refinement, mesh quality diagnostics, structured quad
 buffers, active-domain workflows, and triangular element-grid export.
 
 ## Roadmap
 
-See [ROADMAP.md](https://github.com/oscarfasanchez/vorflow_os/blob/main/ROADMAP.md)
+See [ROADMAP.md](https://github.com/rhugman/vorflow/blob/main/ROADMAP.md)
 for planned and completed milestones.
 
 ## License
 
-MIT — see [LICENSE](https://github.com/oscarfasanchez/vorflow_os/blob/main/LICENSE).
+MIT — see [LICENSE](https://github.com/rhugman/vorflow/blob/main/LICENSE).
