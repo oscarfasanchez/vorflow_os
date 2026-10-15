@@ -11,8 +11,10 @@ from shapely.ops import unary_union, snap, polygonize
 from shapely.prepared import prep
 from shapely.validation import make_valid
 
+from . import _junctions
 from ._features import line_parts as _line_parts
 from ._features import positive_number, row_bool
+from ._plot import features_frame, get_ax, plot_features
 from ._straddle import is_straddle_line, straddle_epsilon
 from .fields import DEFAULT_GROWTH_FACTOR, GeometricGrowthField, MeshField, ThresholdField
 from shapely.strtree import STRtree
@@ -22,6 +24,12 @@ logger = logging.getLogger(__name__)
 # Constants for geometry simplification and reporting
 SIGNIFICANT_REDUCTION_PCT = 1.0
 DEFAULT_CONNECTIVITY_TOLERANCE = 1e-3
+# Where embedded lines meet, ends that miss another line by less than this
+# fraction of their vertex spacing are snapped onto it, shorter overshoots are
+# trimmed, and line vertices closer than it to the junction are dropped (#31).
+# 0.5 keeps the nearest line node at least half a cell from the junction node
+# while moving any line end by at most half a cell.
+DEFAULT_LINE_JUNCTION_FRACTION = 0.5
 # A hex_ring point's ring seeds sit at 1 x lc; every other node-bearing feature
 # must stay at least HEX_RING_CLEARANCE x lc away, so at least one cell width
 # separates the ring from foreign nodes (closer ones would cut the hexagon).
@@ -45,6 +53,68 @@ def _validate_growth_factor(value):
     if value <= 1.0:
         raise ValueError(f"growth_factor must be greater than 1.0. Got {value}.")
     return float(value)
+
+def _coerce_line_junction_fraction(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"line_junction_fraction must be a non-negative number. Got {value!r}.")
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"line_junction_fraction must be finite and non-negative. Got {value}.")
+    return float(value)
+
+
+def _line_densify_spacing(feature) -> float | None:
+    """Densification spacing of a line: a numeric ``densify``, else its ``lc``; None when ``densify=False``."""
+    d = feature.get('densify')
+    if d is False:
+        return None
+    if isinstance(d, (int, float)) and not isinstance(d, bool) and d > 0:
+        return d
+    return feature.get('lc')
+
+
+def _line_vertex_spacing(feature) -> float | None:
+    """Spacing of a line's nodes: its densification spacing, else (``densify=False``) its ``lc``."""
+    spacing = positive_number(_line_densify_spacing(feature))
+    return spacing if spacing is not None else positive_number(feature.get('lc'))
+
+
+def _empty_junction_diagnostics() -> dict:
+    """The ``junction_diagnostics`` of a run that joined no lines."""
+    return {'junctions': [], 'snapped_ends': [], 'trimmed_ends': []}
+
+
+def _junction_diagnostics(line_ids, junctions, moves, trims) -> dict:
+    """Readable record of the junction step, keyed by ``line_id``."""
+    end_name = {0: 'start', -1: 'end'}
+    lines_at = {}
+    for k, points in enumerate(junctions):
+        for xy in points:
+            lines_at.setdefault(xy, []).append(line_ids[k])
+    return {
+        'junctions': [{'point': xy, 'line_ids': ids} for xy, ids in lines_at.items()],
+        'snapped_ends': [
+            {'line_id': line_ids[k], 'end': end_name[end], 'from': old, 'to': new}
+            for k, end, old, new in moves
+        ],
+        'trimmed_ends': [
+            {'line_id': line_ids[k], 'end': end_name[end], 'length': cut}
+            for k, end, cut in trims
+        ],
+    }
+
+
+def _takes_part_in_junctions(feature) -> bool:
+    """True for embedded plain lines: not field-only, straddle/barrier or quad-buffer lines."""
+    geom = feature.get('geometry')
+    return (
+        isinstance(geom, LineString)
+        and geom.length > 0
+        and row_bool(feature, 'embed', True)
+        and not row_bool(feature, 'quad_buffer', False)
+        and not is_straddle_line(feature)
+        and _line_vertex_spacing(feature) is not None
+    )
+
 
 def _coerce_connectivity_tolerance(value, parameter_name="connectivity_tolerance"):
     if isinstance(value, bool):
@@ -322,29 +392,47 @@ def _warn_if_geographic_crs(crs):
 
 
 class ConceptualMesh:
-    def __init__(self, crs=None, connectivity_tolerance=DEFAULT_CONNECTIVITY_TOLERANCE):
-        """
-        Initializes the conceptual model, which holds raw geometric inputs.
+    """
+    Conceptual model: the raw geometric inputs of a vorflow mesh.
 
-        This class acts as a staging area for geometric features (polygons, lines,
-        points) before they are processed into a clean, non-overlapping set of
-        inputs for the mesh generator.
+    This class acts as a staging area for geometric features (polygons, lines,
+    points) before they are processed into a clean, non-overlapping set of
+    inputs for the mesh generator.
 
-        Args:
-            crs: The coordinate reference system for the project. Use a
-                *projected* CRS (e.g. a UTM zone like "EPSG:32618") so mesh
-                sizes are in real length units. Geographic CRSs (lat/lon
-                degrees, e.g. "EPSG:4326") produce physically meaningless
-                grids and trigger a warning -- reproject your data first with
-                GeoDataFrame.to_crs(). None (default) means local/unspecified
-                coordinates; output GeoDataFrames then carry no CRS.
-            connectivity_tolerance (float, optional): Default snapping tolerance used
-                during topology cleanup in generate(). Larger values make lines and
-                points connect more aggressively to nearby geometry.
-        """
+    Args:
+        crs: The coordinate reference system for the project. Use a
+            *projected* CRS (e.g. a UTM zone like "EPSG:32618") so mesh
+            sizes are in real length units. Geographic CRSs (lat/lon
+            degrees, e.g. "EPSG:4326") produce physically meaningless
+            grids and trigger a warning -- reproject your data first with
+            GeoDataFrame.to_crs(). None (default) means local/unspecified
+            coordinates; output GeoDataFrames then carry no CRS.
+        connectivity_tolerance (float, optional): Default snapping tolerance used
+            during topology cleanup in generate(). Larger values make lines and
+            points connect more aggressively to nearby geometry.
+        line_junction_fraction (float, optional): Where embedded lines meet
+            or nearly meet, a line end that misses another line by less than
+            this fraction of its vertex spacing (``densify`` if numeric,
+            else ``resolution``) is snapped onto it, an overshoot shorter
+            than that is trimmed, each junction becomes a vertex of every
+            line through it, and line vertices closer than that to a
+            junction are dropped, so one node sits at the junction instead
+            of two a few units apart. Barrier/straddle, quad-buffer and
+            field-only lines are left out; line ends on polygon boundaries
+            never move. Default 0.5; 0 turns the step off. Each
+            ``generate()`` records what it did in ``junction_diagnostics``:
+            ``junctions`` (``point`` and the ``line_ids`` through it),
+            ``snapped_ends`` (``line_id``, ``end``, ``from``, ``to``) and
+            ``trimmed_ends`` (``line_id``, ``end``, cut ``length``).
+    """
+
+    def __init__(self, crs=None, connectivity_tolerance=DEFAULT_CONNECTIVITY_TOLERANCE,
+                 line_junction_fraction=DEFAULT_LINE_JUNCTION_FRACTION):
         self.crs = crs
         _warn_if_geographic_crs(crs)
         self.connectivity_tolerance = _coerce_connectivity_tolerance(connectivity_tolerance)
+        self.line_junction_fraction = _coerce_line_junction_fraction(line_junction_fraction)
+        self.junction_diagnostics = _empty_junction_diagnostics()
         # Store raw geometric inputs before processing.
         self.raw_polygons = [] 
         self.raw_lines = []
@@ -375,6 +463,7 @@ class ConceptualMesh:
         border_density=None,
         dist_max_in=None,
         dist_max_out=None,
+        label=None,
     ):
         """
         Adds a polygon feature, such as a model boundary or a refinement zone.
@@ -390,12 +479,6 @@ class ConceptualMesh:
                 another quad-buffered feature (higher stays continuous). To control
                 the two independently, add the zone without ``quad_buffer`` and add
                 its boundary as a separate quad-buffered line with its own z_order.
-            dist_min (float, optional): DEPRECATED. Distance from the polygon boundary where
-                the mesh size is held constant at the boundary's resolution. Supplying
-                dist_min/dist_max selects the legacy linear ThresholdField transition and
-                emits a DeprecationWarning; omit them to use the default GeometricGrowthField.
-            dist_max (float, optional): DEPRECATED. Distance from the polygon boundary over
-                which the mesh transitions to the background resolution. See dist_min.
             growth_factor (float, optional): Cell-to-cell growth ratio (>1.0) for the default
                 GeometricGrowthField size transition away from the feature. Defaults to 1.2.
                 Ignored when an explicit ``fields`` list or the legacy dist_min/dist_max is given.
@@ -432,15 +515,25 @@ class ConceptualMesh:
             quad_buffer_thickness (int): Band width in local cell widths
                 (multiples of ``resolution``, like gmshflow's ``cs_thick``).
                 Supported values are 1 and 2.
-            mesh_refinement (bool, optional): DEPRECATED, has no effect (it was
+            label (str, optional): Legend label for ``plot()``. Features sharing a
+                label share one legend entry; unlabelled features get none.
+
+        Deprecated parameters:
+            dist_min (float, optional): Distance from the polygon boundary where
+                the mesh size is held constant at the boundary's resolution. Supplying
+                dist_min/dist_max selects the legacy linear ThresholdField transition and
+                emits a DeprecationWarning; omit them to use the default GeometricGrowthField.
+            dist_max (float, optional): Distance from the polygon boundary over
+                which the mesh transitions to the background resolution. See dist_min.
+            mesh_refinement (bool, optional): Has no effect (it was
                 never read by the mesh generator).
-            border_density (float, optional): DEPRECATED. Densifies the boundary
+            border_density (float, optional): Densifies the boundary
                 to this spacing (use ``densify``) and grades the interior from this
                 finer border size up to ``resolution`` over ``dist_min`` to
                 ``dist_max_in``.
-            dist_max_in (float, optional): DEPRECATED. Interior grading distance
+            dist_max_in (float, optional): Interior grading distance
                 for ``border_density``.
-            dist_max_out (float, optional): DEPRECATED alias for ``dist_max``.
+            dist_max_out (float, optional): Alias for ``dist_max``.
         """
         if not geometry.is_valid:
             geometry = make_valid(geometry)
@@ -498,13 +591,14 @@ class ConceptualMesh:
                 'growth_factor': growth_factor,
                 'border_lc': border_lc,
                 'dist_max_in': dist_max_in if border_lc is not None else None,
+                'label': label,
             }
         )
 
     def add_line(self, geometry, line_id, resolution, snap_to_polygons=True, is_barrier=False,
                   dist_min=None, dist_max=None, straddle_width=None, fields=None, embed=True, densify=True,
                   simplify_tolerance=None, quad_buffer=False, quad_buffer_thickness=1, z_order=0,
-                  growth_factor=None):
+                  growth_factor=None, label=None, color=None):
         """
         Adds a line feature, such as a river, fault, or other linear boundary.
 
@@ -516,12 +610,6 @@ class ConceptualMesh:
                 nearby polygon boundaries to ensure connectivity.
             is_barrier (bool): If True, the line is treated as a flow barrier. The mesh
                 will be constructed to prevent cell faces from crossing it.
-            dist_min (float, optional): DEPRECATED. Distance from the line where the mesh size
-                is held constant at the line's resolution. Supplying dist_min/dist_max selects
-                the legacy linear ThresholdField transition and emits a DeprecationWarning;
-                omit them to use the default GeometricGrowthField.
-            dist_max (float, optional): DEPRECATED. Distance from the line over which the mesh
-                transitions to the background resolution. See dist_min.
             straddle_width (float, optional): If set, forces Voronoi cell edges to align
                 perfectly with the line by creating a "virtual straddle" of mesh nodes.
             fields (list, optional): List of MeshField objects.
@@ -558,6 +646,18 @@ class ConceptualMesh:
             growth_factor (float, optional): Cell-to-cell growth ratio (>1.0) for the default
                 GeometricGrowthField size transition away from the line. Defaults to 1.2.
                 Ignored when an explicit ``fields`` list or the legacy dist_min/dist_max is given.
+            label (str, optional): Legend label for ``plot()``. Features sharing a
+                label share one legend entry; unlabelled features get none.
+            color (optional): Matplotlib colour for the line in ``plot()``. None
+                (default) draws barriers red and other lines blue.
+
+        Deprecated parameters:
+            dist_min (float, optional): Distance from the line where the mesh size
+                is held constant at the line's resolution. Supplying dist_min/dist_max selects
+                the legacy linear ThresholdField transition and emits a DeprecationWarning;
+                omit them to use the default GeometricGrowthField.
+            dist_max (float, optional): Distance from the line over which the mesh
+                transitions to the background resolution. See dist_min.
         """
         if not geometry.is_valid:
             geometry = make_valid(geometry)
@@ -600,10 +700,13 @@ class ConceptualMesh:
             'quad_buffer_thickness': int(quad_buffer_thickness),
             'z_order': z_order,
             'growth_factor': growth_factor,
+            'label': label,
+            'color': color,
         })
 
     def add_point(self, geometry, point_id, resolution, dist_min=None, dist_max=None, fields=None,
-                  embed=True, simplify_tolerance=None, growth_factor=None, hex_ring=False):
+                  embed=True, simplify_tolerance=None, growth_factor=None, hex_ring=False,
+                  label=None):
         """
         Adds a point feature, such as a well or an observation point.
 
@@ -611,12 +714,6 @@ class ConceptualMesh:
             geometry (shapely.Point): The point geometry.
             point_id (str): A unique identifier for the point.
             resolution (float): Target mesh size at the point.
-            dist_min (float, optional): DEPRECATED. Distance from the point where the mesh size
-                is held constant at the point's resolution. Supplying dist_min/dist_max selects
-                the legacy linear ThresholdField transition and emits a DeprecationWarning;
-                omit them to use the default GeometricGrowthField.
-            dist_max (float, optional): DEPRECATED. Distance from the point over which the mesh
-                transitions to the background resolution. See dist_min.
             fields (list, optional): List of MeshField objects. When given, they replace
                 the default size transition around the point.
             embed (bool): If True (default), the point becomes a mesh node (and so a
@@ -646,6 +743,16 @@ class ConceptualMesh:
                 below the ring radius) are caught after meshing: ``MeshGenerator``
                 warns when a ring was split and records the outcome per point in
                 ``diagnostics['hex_rings']``.
+            label (str, optional): Legend label for ``plot()``. Features sharing a
+                label share one legend entry; unlabelled features get none.
+
+        Deprecated parameters:
+            dist_min (float, optional): Distance from the point where the mesh size
+                is held constant at the point's resolution. Supplying dist_min/dist_max selects
+                the legacy linear ThresholdField transition and emits a DeprecationWarning;
+                omit them to use the default GeometricGrowthField.
+            dist_max (float, optional): Distance from the point over which the mesh
+                transitions to the background resolution. See dist_min.
         """
         if not isinstance(hex_ring, (bool, np.bool_)):
             raise ValueError(f"hex_ring must be True or False. Got {hex_ring!r}.")
@@ -678,6 +785,7 @@ class ConceptualMesh:
             'simplify_tolerance': simplify_tolerance,
             'growth_factor': growth_factor,
             'hex_ring': bool(hex_ring),
+            'label': label,
         })
 
     def _apply_simplification(self):
@@ -779,6 +887,7 @@ class ConceptualMesh:
                     "growth_factor",
                     "border_lc",
                     "dist_max_in",
+                    "label",
                 ],
                 crs=self.crs,
             )
@@ -831,6 +940,12 @@ class ConceptualMesh:
 
         self.clean_polygons = gpd.GeoDataFrame(final_features, crs=self.crs)
 
+    def _resolve_connectivity_tolerance(self, connectivity_tolerance=None):
+        """The per-run override if given (validated), else the instance default."""
+        if connectivity_tolerance is None:
+            return self.connectivity_tolerance
+        return _coerce_connectivity_tolerance(connectivity_tolerance)
+
     def _enforce_connectivity(self, connectivity_tolerance=None):
         """
         Snaps features together to ensure they are topologically connected before
@@ -838,10 +953,7 @@ class ConceptualMesh:
 
         interpret shared boundaries.
         """
-        if connectivity_tolerance is None:
-            tolerance = self.connectivity_tolerance
-        else:
-            tolerance = _coerce_connectivity_tolerance(connectivity_tolerance)
+        tolerance = self._resolve_connectivity_tolerance(connectivity_tolerance)
 
         # 1. Collect all polygon boundaries into a single geometry.
         # We snap to the linear boundaries, not the polygon areas.
@@ -955,6 +1067,46 @@ class ConceptualMesh:
         self.raw_points = kept_points
 
 
+    def _join_line_junctions(self, connectivity_tolerance=None):
+        """Snap, trim, pin and thin embedded lines where they meet (see ``_junctions``).
+
+        Only line geometries change; the list keeps its order and length, so
+        the clean-line index (the feature ID) is unchanged.
+        """
+        self.junction_diagnostics = _empty_junction_diagnostics()
+        if self.line_junction_fraction <= 0:
+            return
+        members = [i for i, line in enumerate(self.raw_lines) if _takes_part_in_junctions(line)]
+        if len(members) < 2:
+            return
+        eps = max(self._resolve_connectivity_tolerance(connectivity_tolerance), _junctions.TOUCH_FLOOR)
+        tolerances = [
+            self.line_junction_fraction * _line_vertex_spacing(self.raw_lines[i]) for i in members
+        ]
+        anchors = None
+        if not self.clean_polygons.empty:
+            anchors = unary_union(self.clean_polygons.geometry.boundary)
+
+        lines = [self.raw_lines[i]['geometry'] for i in members]
+        lines, moves = _junctions.snap_line_ends(lines, tolerances, eps, anchors)
+        junctions = _junctions.find_junctions(lines, eps)
+        lines, trims = _junctions.trim_short_stubs(lines, junctions, tolerances, eps, anchors)
+        if trims:
+            junctions = _junctions.find_junctions(lines, eps)
+        for k, i in enumerate(members):
+            self.raw_lines[i]['geometry'] = _junctions.pin_junctions(
+                lines[k], junctions[k], tolerances[k], eps, anchors
+            )
+
+        line_ids = [self.raw_lines[i].get('line_id') for i in members]
+        self.junction_diagnostics = _junction_diagnostics(line_ids, junctions, moves, trims)
+        n_junctions = len(self.junction_diagnostics['junctions'])
+        if moves or trims or n_junctions:
+            logger.info(
+                f"Line junctions: {n_junctions} pinned, {len(moves)} line end(s) snapped, "
+                f"{len(trims)} overshoot(s) trimmed."
+            )
+
     def _hex_ring_obstacles(self):
         """Embedded polygon boundaries and lines as ``(label, geometry, half_width)`` hex-ring obstacles.
 
@@ -1051,6 +1203,46 @@ class ConceptualMesh:
                 continue
             point_data['ring_seeds'] = seeds
 
+    def plot(self, ax=None, clean=False, column="zone_id", **kwargs):
+        """
+        Plots the conceptual model: polygons coloured by ``column``, with lines
+        and points on top. Lines take the ``color`` given to ``add_line``
+        (default: barriers red, others blue), and features with a ``label``
+        get one legend entry per label for ``ax.legend()``.
+
+        Field-only (``embed=False``) features are drawn as dashed outlines,
+        dashed lines and hollow points. Needs Matplotlib
+        (``pip install vorflow[plot]``).
+
+        Args:
+            ax (matplotlib.axes.Axes, optional): Axes to draw on; a new figure
+                is created when None.
+            clean (bool): Plot the features from the last ``generate()``
+                instead of the registered raw features.
+            column (str, optional): Polygon column to colour by. Default
+                ``"zone_id"``; None draws them in one colour.
+            **kwargs: Passed to ``GeoDataFrame.plot`` for the polygons.
+
+        Returns:
+            matplotlib.axes.Axes: The axes drawn on.
+
+        Raises:
+            RuntimeError: If ``clean=True`` before ``generate()`` has run.
+        """
+        ax = get_ax(ax)
+        if clean:
+            if self.clean_polygons.empty:
+                raise RuntimeError(
+                    "Clean features are not available. Call ConceptualMesh.generate() first."
+                )
+            frames = (self.clean_polygons, self.clean_lines, self.clean_points)
+        else:
+            frames = tuple(
+                features_frame(features, self.crs)
+                for features in (self.raw_polygons, self.raw_lines, self.raw_points)
+            )
+        return plot_features(ax, *frames, column=column, **kwargs)
+
     def generate(self, connectivity_tolerance=None):
         """
         Runs the full preprocessing workflow: resolves polygon overlaps,
@@ -1098,6 +1290,9 @@ class ConceptualMesh:
         logger.info("Clipping features to domain...")
         self._clip_features_to_domain()
 
+        logger.info("Joining line junctions...")
+        self._join_line_junctions(connectivity_tolerance=connectivity_tolerance)
+
         # After snapping and clipping, so each ring is built about the final point.
         self._assign_hex_ring_seeds(field_only_polys)
         
@@ -1123,6 +1318,8 @@ class ConceptualMesh:
                     'quad_buffer_thickness',
                     'z_order',
                     'growth_factor',
+                    'label',
+                    'color',
                 ],
                 crs=self.crs,
             )
@@ -1143,6 +1340,7 @@ class ConceptualMesh:
                     'simplify_tolerance',
                     'growth_factor',
                     'hex_ring',
+                    'label',
                     'ring_seeds',
                 ],
                 crs=self.crs,
@@ -1197,6 +1395,7 @@ class ConceptualMesh:
                     'quad_buffer',
                     'quad_buffer_thickness',
                     'growth_factor',
+                    'label',
                 ]
                 self.clean_polygons = self.clean_polygons.reindex(columns=polygon_columns)
                 field_only_gdf = field_only_gdf.reindex(columns=polygon_columns)
@@ -1293,22 +1492,8 @@ class ConceptualMesh:
 
         # Densify lines based on their target resolution ('lc').
         if not self.clean_lines.empty:
-            # Helper to determine the target resolution for a line row
-            def get_line_resolution(row):
-                d = row.get('densify')
-                
-                # 1. Explicitly disabled (densify=False)
-                if d is False:
-                    return None
-                
-                # 2. Explicit custom resolution (e.g., densify=5.0)
-                if isinstance(d, (int, float)) and not isinstance(d, bool) and d > 0:
-                    return d
-                
-                # 3. Default behavior (True or None): use the mesh resolution (lc)
-                return row.get('lc')
             def _line_densify(row):
-                res = get_line_resolution(row)
+                res = _line_densify_spacing(row)
                 return self._densify_geometry(row['geometry'], res) if res is not None else row['geometry']
 
             self.clean_lines['geometry'] = self.clean_lines.apply(_line_densify, axis=1)

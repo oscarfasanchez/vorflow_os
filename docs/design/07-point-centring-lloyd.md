@@ -1,7 +1,7 @@
 # Milestone 7 — Centred point cells and Lloyd relaxation (opt-in)
 
 **Status:** done · **Risk:** medium · **Behavior change:** none by default
-**Back to** [ROADMAP.md](../../ROADMAP.md)
+**Back to** [design notes](README.md)
 
 ## Outcome
 
@@ -56,6 +56,13 @@ or symmetric around the point) and
   `lloyd_damping`. The tessellator reads `node_is_free`, `node_sizes` and
   `buffer_footprints` when it is constructed, so the mesh generator must
   have run first.
+- Follow-up (after 0.2.0): Gmsh's `node_sizes` jitter by 7-12% between
+  neighbouring nodes, and Lloyd converged to that noise. The density now
+  uses sizes smoothed in log space over `MeshGenerator.node_edges`
+  (`lloyd_size_smoothing`, default 5 passes, fixed nodes held). The
+  measurements below predate this change; see the
+  [#31](https://github.com/rhugman/vorflow/issues/31) experiment and
+  `examples/point_centring_demo.ipynb` for current numbers.
 
 Unweighted Lloyd was tried first. On a 2 km square with points at
 `resolution` 5 and 10, 20 passes halved the interior p95 `drift_ratio`

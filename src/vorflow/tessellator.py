@@ -15,6 +15,8 @@ from shapely.validation import make_valid
 
 from . import _lloyd
 from ._features import polygon_parts
+from ._plot import get_ax
+from .utils import grid_to_disv
 
 logger = logging.getLogger(__name__)
 
@@ -477,10 +479,118 @@ def _owner_polygons(nodes, free, pieces):
 
 
 class VoronoiTessellator:
+    """
+    Builds the Voronoi grid from a triangular mesh.
+
+    This class takes a triangular mesh (typically from `MeshGenerator`) and
+    computes its dual: a Voronoi diagram. The resulting grid of polygonal
+    cells is suitable for use in cell-centered finite volume models.
+
+    Args:
+        mesh_generator (MeshGenerator): An instance of the mesh generator that
+            contains the generated triangular mesh nodes.
+        conceptual_mesh (ConceptualMesh, optional): The conceptual model, used
+            for CRS, domain boundaries, and feature information. Defaults to
+            the ``conceptual_mesh`` of ``mesh_generator``.
+        clip_to_boundary (bool): If True, the final Voronoi grid will be
+            clipped to the domain boundary defined in the conceptual model.
+        boundary_centering (str): ``"clip"`` keeps the historical behavior.
+            ``"inset_mirror"`` shifts boundary generators inward and adds
+            mirrored outside ghosts so boundary-cell centers move off the
+            clipped face. On Gmsh meshes this lowers the median
+            centroid-to-centroid orthogonality error of boundary
+            connections from about 6 to under 2 degrees. Nodes at sharp
+            corners stay in place, so the worst connections next to
+            corners do not improve.
+        boundary_inset_fraction (float): Fraction of local boundary-node
+            spacing used for the inward shift in ``"inset_mirror"`` mode.
+            A boundary cell reaches about halfway to the first interior
+            row, so its generator sits near its centroid when the inset is
+            about a third of that row's depth. On Gmsh meshes the row lies
+            about 0.87 x spacing inside, so 0.2-0.3 works best. At 0.5
+            boundary nodes get closer to the interior row than to each
+            other and orthogonality ends up worse than ``"clip"``.
+        boundary_corner_angle (float): Boundary vertices with a local angle
+            below this value are treated as sharp corners and left unchanged.
+        boundary_tolerance (float, optional): Distance tolerance used to
+            classify generator nodes as boundary nodes.
+        lloyd_iterations (int): Number of Lloyd relaxation passes over the
+            generators before the Voronoi grid is built (0, the default,
+            turns it off). Each pass moves every free generator towards
+            the centroid of its Voronoi cell, so generators end up near
+            their cell centroids (lower ``drift_ratio`` in
+            ``vorflow.utils.calculate_mesh_quality``). The centroids are
+            weighted by the density h**-4, where h is the local mesh size
+            interpolated from ``MeshGenerator.node_sizes`` after
+            ``lloyd_size_smoothing``; this keeps the mesh grading (the
+            cell sizes around refined features) instead of evening out
+            the cell sizes. Only free nodes move: mesh
+            nodes inside the embedded polygon surfaces. Nodes on the domain
+            and zone boundaries, embedded points (and their hex-ring
+            seeds), embedded and barrier lines (including straddle pairs)
+            and the quad-buffer strips and bands stay fixed. A move is
+            rejected if it would leave the node's zone or cross an embedded
+            line. With Lloyd on, the cells are no longer the exact dual of
+            the triangle mesh (``MeshGenerator.get_element_grid()``) and
+            the grid gets a ``lloyd_shift`` column; ``lloyd_report`` holds
+            the run summary: passes run (``iterations``), the last pass's
+            largest relative residual (``max_rel_shift``, as for
+            ``lloyd_tolerance``), moves rejected (``rejected``) and the
+            number of free generators (``n_free``).
+
+            Lloyd is opt-in and mainly for models that use cell centroids
+            as cell centres, or for visually more regular cells. Head
+            accuracy is set mainly by ``growth_factor`` (how fine the
+            cells are relative to the curvature of the head), not by cell
+            shape. In a steady radial-flow (Thiem) test with generator
+            centres (rhugman/vorflow#31), 100 passes lowered the head
+            RMSE by at most about 5%. Each pass costs about one Voronoi
+            diagram of all nodes plus the weighted centroids of the free
+            cells; 100 passes took 5-10x the time of meshing and
+            tessellating once. Use 100 or more passes, together with
+            ``hex_ring=True`` on refined points. Lloyd leaves some very
+            short cell faces where four generators end up almost on one
+            circle (about 1% of faces after 30-100 passes, most around 20);
+            ``min_face_fraction=0.2`` removes them.
+            Requires a mesh generator that ran ``MeshGenerator.generate()``
+            before this tessellator was constructed.
+        lloyd_damping (float): Fraction of the way each free generator
+            moves towards its centroid per pass, in (0, 1]. Default 1.0.
+        lloyd_tolerance (float): Stop early after a pass in which the
+            largest distance from an accepted free generator to its
+            weighted centroid, relative to the local mesh size, is below
+            this (independent of ``lloyd_damping``). Default 1e-3.
+            Graded meshes usually run all ``lloyd_iterations`` passes.
+        lloyd_size_smoothing (int): Passes of smoothing applied to the
+            per-node sizes behind the Lloyd density (only used with
+            ``lloyd_iterations > 0``). Gmsh's node sizes jitter by about
+            10% between neighbouring nodes, i.e. +-30-45% in h**-4, and
+            Lloyd would otherwise converge to that noise. Each pass moves
+            the log size of every free node halfway to the mean over its
+            mesh-edge neighbours (``MeshGenerator.node_edges``); fixed
+            nodes keep their size and anchor the grading. Default 5;
+            from 10-20 passes on it starts to flatten steep grading. 0
+            uses ``node_sizes`` unchanged (the 0.2.0 behaviour).
+        min_face_fraction (float): Remove very short cell faces before the
+            grid is built (0, the default, turns it off). A face is short
+            when it is shorter than this fraction of the distance between
+            the two generators it separates; such faces come from four
+            generators lying almost on one circle, typically where a 5-
+            and a 7-sided cell meet, and are more common after Lloyd
+            relaxation. Each such group of four is opened by moving its
+            free generators slightly (the same free nodes and move checks
+            as Lloyd), repeated for up to 20 passes. Runs after Lloyd if
+            both are on. 0.2 removes the faces that are visibly short;
+            a regular hexagon's faces are 0.58. ``short_face_report``
+            holds the ``initial`` and ``final`` short-face counts,
+            ``passes`` and ``rejected`` moves, and the grid gets a
+            ``lloyd_shift`` column with the total move of each node.
+    """
+
     def __init__(
         self,
         mesh_generator,
-        conceptual_mesh,
+        conceptual_mesh=None,
         clip_to_boundary=True,
         boundary_centering="clip",
         boundary_inset_fraction=0.25,
@@ -489,75 +599,9 @@ class VoronoiTessellator:
         lloyd_iterations=0,
         lloyd_damping=1.0,
         lloyd_tolerance=1e-3,
+        lloyd_size_smoothing=5,
+        min_face_fraction=0.0,
     ):
-        """
-        Initializes the Voronoi tessellator.
-
-        This class takes a triangular mesh (typically from `MeshGenerator`) and
-        computes its dual: a Voronoi diagram. The resulting grid of polygonal
-        cells is suitable for use in cell-centered finite volume models.
-
-        Args:
-            mesh_generator (MeshGenerator): An instance of the mesh generator that
-                contains the generated triangular mesh nodes.
-            conceptual_mesh (ConceptualMesh): The conceptual model, used for CRS,
-                domain boundaries, and feature information.
-            clip_to_boundary (bool): If True, the final Voronoi grid will be
-                clipped to the domain boundary defined in the conceptual model.
-            boundary_centering (str): ``"clip"`` keeps the historical behavior.
-                ``"inset_mirror"`` shifts boundary generators inward and adds
-                mirrored outside ghosts so boundary-cell centers move off the
-                clipped face. On Gmsh meshes this lowers the median
-                centroid-to-centroid orthogonality error of boundary
-                connections from about 6 to under 2 degrees. Nodes at sharp
-                corners stay in place, so the worst connections next to
-                corners do not improve.
-            boundary_inset_fraction (float): Fraction of local boundary-node
-                spacing used for the inward shift in ``"inset_mirror"`` mode.
-                A boundary cell reaches about halfway to the first interior
-                row, so its generator sits near its centroid when the inset is
-                about a third of that row's depth. On Gmsh meshes the row lies
-                about 0.87 x spacing inside, so 0.2-0.3 works best. At 0.5
-                boundary nodes get closer to the interior row than to each
-                other and orthogonality ends up worse than ``"clip"``.
-            boundary_corner_angle (float): Boundary vertices with a local angle
-                below this value are treated as sharp corners and left unchanged.
-            boundary_tolerance (float, optional): Distance tolerance used to
-                classify generator nodes as boundary nodes.
-            lloyd_iterations (int): Number of Lloyd relaxation passes over the
-                generators before the Voronoi grid is built (0, the default,
-                turns it off). Each pass moves every free generator towards
-                the centroid of its Voronoi cell, so generators end up near
-                their cell centroids (lower ``drift_ratio`` in
-                ``vorflow.utils.calculate_mesh_quality``). The centroids are
-                weighted by the density h**-4, where h is the local mesh size
-                interpolated from ``MeshGenerator.node_sizes``; this keeps the
-                mesh grading (the cell sizes around refined features) instead
-                of evening out the cell sizes. Only free nodes move: mesh
-                nodes inside the embedded polygon surfaces. Nodes on the domain
-                and zone boundaries, embedded points (and their hex-ring
-                seeds), embedded and barrier lines (including straddle pairs)
-                and the quad-buffer strips and bands stay fixed. A move is
-                rejected if it would leave the node's zone or cross an embedded
-                line. With Lloyd on, the cells are no longer the exact dual of
-                the triangle mesh (``MeshGenerator.get_element_grid()``) and
-                the grid gets a ``lloyd_shift`` column; ``lloyd_report`` holds
-                the run summary: passes run (``iterations``), the last pass's
-                largest relative residual (``max_rel_shift``, as for
-                ``lloyd_tolerance``), moves rejected (``rejected``) and the
-                number of free generators (``n_free``). Each pass costs about one Voronoi diagram of
-                all nodes plus the weighted centroids of the free cells; 20
-                passes take about as long as meshing and tessellating once.
-                Requires a mesh generator that ran ``MeshGenerator.generate()``
-                before this tessellator was constructed.
-            lloyd_damping (float): Fraction of the way each free generator
-                moves towards its centroid per pass, in (0, 1]. Default 1.0.
-            lloyd_tolerance (float): Stop early after a pass in which the
-                largest distance from an accepted free generator to its
-                weighted centroid, relative to the local mesh size, is below
-                this (independent of ``lloyd_damping``). Default 1e-3.
-                Graded meshes usually run all ``lloyd_iterations`` passes.
-        """
         if boundary_centering not in {"clip", "inset_mirror"}:
             raise ValueError("boundary_centering must be either 'clip' or 'inset_mirror'.")
         if boundary_inset_fraction <= 0:
@@ -566,7 +610,18 @@ class VoronoiTessellator:
             raise ValueError("boundary_corner_angle must be between 0 and 180 degrees.")
         if boundary_tolerance is not None and boundary_tolerance < 0:
             raise ValueError("boundary_tolerance must be non-negative when provided.")
-        _lloyd.validate_settings(lloyd_iterations, lloyd_damping, lloyd_tolerance, prefix="lloyd_")
+        _lloyd.validate_settings(lloyd_iterations, lloyd_damping, lloyd_tolerance, prefix="lloyd_",
+                                 size_smoothing=lloyd_size_smoothing)
+        if not (0.0 <= float(min_face_fraction) < 1.0):
+            raise ValueError(f"min_face_fraction must be in [0, 1). Got {min_face_fraction!r}.")
+
+        if conceptual_mesh is None:
+            conceptual_mesh = getattr(mesh_generator, 'conceptual_mesh', None)
+        if conceptual_mesh is None:
+            raise ValueError(
+                "VoronoiTessellator needs a conceptual_mesh, passed here or to "
+                "MeshGenerator(conceptual_mesh=...)."
+            )
 
         self.mg = mesh_generator
         self.cm = conceptual_mesh
@@ -579,6 +634,7 @@ class VoronoiTessellator:
         # None on mesh generators that do not provide them.
         self.node_is_free = getattr(mesh_generator, 'node_is_free', None)
         self.node_sizes = getattr(mesh_generator, 'node_sizes', None)
+        self.node_edges = getattr(mesh_generator, 'node_edges', None)
         self.buffer_footprints = getattr(mesh_generator, 'buffer_footprints', None)
         self.zones_gdf = mesh_generator.zones_gdf
         self.clip_to_boundary = clip_to_boundary
@@ -589,17 +645,21 @@ class VoronoiTessellator:
         self.lloyd_iterations = int(lloyd_iterations)
         self.lloyd_damping = float(lloyd_damping)
         self.lloyd_tolerance = float(lloyd_tolerance)
+        self.lloyd_size_smoothing = int(lloyd_size_smoothing)
         # {"iterations", "max_rel_shift", "rejected", "n_free"} after a Lloyd
         # run; max_rel_shift is the largest residual |centroid - node| / local
         # size over the accepted moves of the last pass (see _lloyd.relax).
         self.lloyd_report = None
+        self.min_face_fraction = float(min_face_fraction)
+        # {"initial", "final", "passes", "rejected"} after a short-face cleanup.
+        self.short_face_report = None
 
     def _lloyd_mesh_inputs(self, n_nodes):
         """(node_is_free, node_sizes, buffer_footprints) captured from the mesh generator, checked against ``n_nodes``."""
         node_is_free, node_sizes = self.node_is_free, self.node_sizes
         if node_is_free is None or node_sizes is None:
             raise ValueError(
-                "lloyd_iterations > 0 needs MeshGenerator.node_is_free and node_sizes; "
+                "lloyd_iterations > 0 and min_face_fraction > 0 need MeshGenerator.node_is_free and node_sizes; "
                 "run MeshGenerator.generate() before tessellating."
             )
         node_is_free = np.asarray(node_is_free, dtype=bool)
@@ -611,6 +671,28 @@ class VoronoiTessellator:
                 "Re-run MeshGenerator.generate() before tessellating."
             )
         return node_is_free, node_sizes, self.buffer_footprints
+
+    def _lloyd_node_edges(self, n_nodes):
+        """Mesh edges (m, 2) captured from the mesh generator, checked against ``n_nodes``."""
+        if self.node_edges is None:
+            raise ValueError(
+                "lloyd_size_smoothing > 0 needs MeshGenerator.node_edges; run MeshGenerator.generate() "
+                "before tessellating, or set lloyd_size_smoothing=0."
+            )
+        edges = np.asarray(self.node_edges)
+        if edges.size and (edges.ndim != 2 or edges.shape[1] != 2 or edges.min() < 0 or edges.max() >= n_nodes):
+            raise ValueError(
+                f"MeshGenerator.node_edges must be (m, 2) positions into its nodes ({n_nodes}). "
+                "Re-run MeshGenerator.generate() before tessellating."
+            )
+        return edges.reshape(-1, 2)
+
+    def _lloyd_sizes(self, node_sizes, free, n_nodes):
+        """Per-node sizes for the Lloyd density: ``node_sizes`` after ``lloyd_size_smoothing`` passes over the free nodes."""
+        if self.lloyd_size_smoothing == 0:
+            return node_sizes
+        logger.info(f"  -> Lloyd density from node sizes smoothed with {self.lloyd_size_smoothing} passes")
+        return _lloyd.smooth_log_sizes(node_sizes, free, self._lloyd_node_edges(n_nodes), self.lloyd_size_smoothing)
 
     def _lloyd_constraint_lines(self):
         """Union of the embedded clean lines (barriers and straddle lines included), or None."""
@@ -624,18 +706,24 @@ class VoronoiTessellator:
         geoms = [geom for geom in lines.geometry if geom is not None and not geom.is_empty]
         return unary_union(geoms) if geoms else None
 
+    def _free_generators(self, nodes):
+        """(owners, free) for the movable mesh nodes: see ``_owner_polygons``."""
+        node_is_free, _, footprints = self._lloyd_mesh_inputs(len(nodes))
+        pieces = _zone_pieces(self._embedded_polygons().geometry, footprints)
+        return _owner_polygons(nodes, node_is_free, pieces)
+
     def _relax_generators(self, nodes):
         """Density-weighted Lloyd relaxation of the free mesh nodes (see ``lloyd_iterations``); returns the moved nodes."""
-        node_is_free, node_sizes, footprints = self._lloyd_mesh_inputs(len(nodes))
-        pieces = _zone_pieces(self._embedded_polygons().geometry, footprints)
-        owners, free = _owner_polygons(nodes, node_is_free, pieces)
+        _, node_sizes, _ = self._lloyd_mesh_inputs(len(nodes))
+        owners, free = self._free_generators(nodes)
         report = {"iterations": 0, "max_rel_shift": 0.0, "rejected": 0}
         if free.any():
             logger.info(f"Lloyd relaxation of {int(free.sum())} free generators...")
+            sizes = self._lloyd_sizes(node_sizes, free, len(nodes))
             nodes, report = _lloyd.relax(
                 nodes,
                 free,
-                _lloyd.size_interpolator(nodes, node_sizes),
+                _lloyd.size_interpolator(nodes, sizes),
                 self._domain_geometry(),
                 owners,
                 self._lloyd_constraint_lines(),
@@ -648,6 +736,19 @@ class VoronoiTessellator:
                 f"{report['max_rel_shift']:.2e} x local size, {report['rejected']} moves rejected"
             )
         self.lloyd_report = {**report, "n_free": int(free.sum())}
+        return nodes
+
+    def _open_short_faces(self, nodes):
+        """Move free generators until no face is shorter than ``min_face_fraction`` x connector; returns the moved nodes."""
+        owners, free = self._free_generators(nodes)
+        nodes, report = _lloyd.remove_short_faces(
+            nodes, free, owners, self._lloyd_constraint_lines(), self.min_face_fraction
+        )
+        logger.info(
+            f"Short-face cleanup: {report['initial']} -> {report['final']} faces below "
+            f"{self.min_face_fraction:g} x connector in {report['passes']} passes, {report['rejected']} moves rejected"
+        )
+        self.short_face_report = report
         return nodes
 
     def _embedded_polygons(self):
@@ -1066,11 +1167,19 @@ class VoronoiTessellator:
         current_grid['node_id'] = current_grid['node_id'].astype(node_id_dtype)
         return current_grid
 
+    @property
+    def grid(self):
+        """The Voronoi grid from the last ``generate()`` (a GeoDataFrame); same as ``final_grid``."""
+        if self.final_grid is None:
+            raise RuntimeError("Grid is not available. Call VoronoiTessellator.generate() first.")
+        return self.final_grid
+
     def generate(self):
         """
         Executes the full Voronoi tessellation workflow.
 
         This method orchestrates the process of:
+
         1. With ``lloyd_iterations > 0``, moving the free generators towards
            their density-weighted cell centroids (Lloyd relaxation).
         2. With ``boundary_centering="inset_mirror"``, shifting boundary
@@ -1107,9 +1216,14 @@ class VoronoiTessellator:
             raise ValueError("MeshGenerator nodes and node_tags must have the same length.")
 
         self.lloyd_report = None
+        self.short_face_report = None
         lloyd_shift = None
-        if self.lloyd_iterations > 0:
-            relaxed = self._relax_generators(nodes)
+        if self.lloyd_iterations > 0 or self.min_face_fraction > 0:
+            relaxed = nodes
+            if self.lloyd_iterations > 0:
+                relaxed = self._relax_generators(relaxed)
+            if self.min_face_fraction > 0:
+                relaxed = self._open_short_faces(relaxed)
             lloyd_shift = pd.Series(np.hypot(*(relaxed - nodes).T), index=tags)
             nodes = relaxed
 
@@ -1238,9 +1352,128 @@ class VoronoiTessellator:
         logger.info(f"Final Voronoi Grid Generated: {len(self.final_grid)} cells.")
         return self.final_grid
 
+    def to_file(self, filepath, **kwargs):
+        """
+        Writes the grid from the last ``generate()`` to a file.
+
+        A thin wrapper around ``GeoDataFrame.to_file``, which picks the format
+        from the file extension (e.g. ``.shp``, ``.gpkg``) and needs an I/O
+        engine such as Pyogrio or Fiona.
+
+        Args:
+            filepath (str or Path): Output path.
+            **kwargs: Passed to ``GeoDataFrame.to_file`` (e.g. ``driver``, ``layer``).
+
+        Raises:
+            RuntimeError: If ``generate()`` has not run.
+        """
+        self.grid.to_file(filepath, **kwargs)
+        logger.info(f"Saved to {filepath}")
+
     def export_to_shapefile(self, filepath):
+        """
+        Writes the grid from the last ``generate()`` to a file.
+
+        Deprecated: use ``to_file()``. Unlike ``to_file()``, this logs a
+        message and writes nothing when ``generate()`` has not produced a grid.
+
+        Args:
+            filepath (str or Path): Output path.
+        """
+        warnings.warn(
+            "export_to_shapefile() is deprecated; use to_file().",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if self.final_grid is not None and not self.final_grid.empty:
-            self.final_grid.to_file(filepath)
-            logger.info(f"Saved to {filepath}")
+            self.to_file(filepath)
         else:
             logger.info("No grid to export.")
+
+    def to_disv(self):
+        """
+        MODFLOW 6 DISV grid arrays for the grid from the last ``generate()``.
+
+        See ``vorflow.utils.grid_to_disv``: returns ``ncpl``, ``nvert``,
+        ``vertices`` and ``cell2d`` in the zero-based form flopy takes, with
+        the generator points as cell centres, plus ``node_id`` per
+        ``icell2d`` (grid row order) to map results back to the grid.
+
+        Returns:
+            dict: ``ncpl``, ``nvert``, ``vertices``, ``cell2d`` and ``node_id``.
+
+        Raises:
+            RuntimeError: If ``generate()`` has not run.
+        """
+        return grid_to_disv(self.grid)
+
+    def to_modflowgwfdisv(self, gwf, top, botm, nlay=1, **kwargs):
+        """
+        Builds a flopy ``ModflowGwfdisv`` package from the grid.
+
+        Needs flopy, which vorflow does not depend on. ``icell2d`` follows the
+        grid's row order; ``to_disv()["node_id"]`` maps it back to cells.
+
+        Args:
+            gwf (flopy.mf6.ModflowGwf): The groundwater flow model to add the
+                package to.
+            top: Top elevation, a scalar or one value per cell.
+            botm: Bottom elevations, a scalar, one value per layer, or an
+                ``(nlay, ncpl)`` array.
+            nlay (int): Number of layers. Default 1.
+            **kwargs: Passed to ``flopy.mf6.ModflowGwfdisv`` (e.g.
+                ``length_units``, ``idomain``, ``xorigin``).
+
+        Returns:
+            flopy.mf6.ModflowGwfdisv: The DISV package.
+
+        Raises:
+            ImportError: If flopy is not installed.
+            RuntimeError: If ``generate()`` has not run.
+        """
+        try:
+            import flopy
+        except ImportError as err:
+            raise ImportError(
+                "to_modflowgwfdisv() needs flopy; install it with `pip install flopy`, "
+                "or use to_disv() for the plain arrays."
+            ) from err
+        disv = self.to_disv()
+        return flopy.mf6.ModflowGwfdisv(
+            gwf,
+            nlay=nlay,
+            ncpl=disv["ncpl"],
+            nvert=disv["nvert"],
+            vertices=disv["vertices"],
+            cell2d=disv["cell2d"],
+            top=top,
+            botm=botm,
+            **kwargs,
+        )
+
+    def plot(self, ax=None, column="zone_id", show_generators=False, **kwargs):
+        """
+        Plots the Voronoi grid from the last ``generate()``.
+
+        Needs Matplotlib (``pip install vorflow[plot]``).
+
+        Args:
+            ax (matplotlib.axes.Axes, optional): Axes to draw on; a new figure
+                is created when None.
+            column (str, optional): Grid column to colour the cells by.
+                Default ``"zone_id"``; None draws outlines only.
+            show_generators (bool): Also draw the generator points (``x``/``y``).
+            **kwargs: Passed to ``GeoDataFrame.plot`` for the cells.
+
+        Returns:
+            matplotlib.axes.Axes: The axes drawn on.
+        """
+        ax = get_ax(ax)
+        grid = self.grid
+        cell_kwargs = {"edgecolor": "black", "linewidth": 0.3, **kwargs}
+        if column is None:
+            cell_kwargs.setdefault("facecolor", "none")
+        grid.plot(ax=ax, column=column, **cell_kwargs)
+        if show_generators:
+            ax.scatter(grid["x"], grid["y"], s=2, color="black", zorder=3)
+        return ax

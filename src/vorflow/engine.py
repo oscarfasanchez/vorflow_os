@@ -46,6 +46,7 @@ from .fields import (
     _BorderGradingField,
 )
 from ._log import current_verbosity, verbosity_scope
+from ._plot import get_ax
 from . import buffer
 from ._straddle import (
     _straddle_distances,
@@ -292,22 +293,49 @@ def _free_node_tags(gmsh_map, polygons_gdf):
     return free
 
 
-def _node_sizes_from_elements(element_data, node_tags, fallback):
-    """Mean length of the unique element edges at each of ``node_tags``; ``fallback`` where a node has none.
+def _element_edges(element_data):
+    """Unique element edges as sorted (m, 2) node-tag pairs; (0, 2) without elements.
 
     ``element_data`` is the dict from ``MeshGenerator._capture_element_data``
     (primary-node connectivity per element block, all node tags and xy).
     """
-    node_tags = np.asarray(node_tags, dtype=np.int64)
-    sizes = np.full(len(node_tags), float(fallback))
     blocks = [np.asarray(block["connectivity"], dtype=np.int64) for block in element_data["blocks"]]
-    if not blocks or len(node_tags) == 0:
-        return sizes
+    if not blocks:
+        return np.empty((0, 2), dtype=np.int64)
     # Each element's edges join consecutive corners (closing back to the first).
     edges = np.concatenate([
         np.stack([conn, np.roll(conn, -1, axis=1)], axis=-1).reshape(-1, 2) for conn in blocks
     ])
-    edges = np.unique(np.sort(edges, axis=1), axis=0)
+    return np.unique(np.sort(edges, axis=1), axis=0)
+
+
+def _node_edges_from_elements(element_data, node_tags):
+    """Unique element edges between two of ``node_tags``, as (m, 2) positions into ``node_tags``.
+
+    Edges with an end outside ``node_tags`` are dropped. ``element_data`` is
+    as for ``_element_edges``.
+    """
+    node_tags = np.asarray(node_tags, dtype=np.int64)
+    edges = _element_edges(element_data)
+    if len(edges) == 0 or len(node_tags) == 0:
+        return np.empty((0, 2), dtype=np.int64)
+    order = np.argsort(node_tags, kind="stable")
+    sorted_tags = node_tags[order]
+    at = np.minimum(np.searchsorted(sorted_tags, edges), len(sorted_tags) - 1)
+    known = (sorted_tags[at] == edges).all(axis=1)
+    return order[at[known]].astype(np.int64)
+
+
+def _node_sizes_from_elements(element_data, node_tags, fallback):
+    """Mean length of the unique element edges at each of ``node_tags``; ``fallback`` where a node has none.
+
+    ``element_data`` is as for ``_element_edges``.
+    """
+    node_tags = np.asarray(node_tags, dtype=np.int64)
+    sizes = np.full(len(node_tags), float(fallback))
+    edges = _element_edges(element_data)
+    if len(edges) == 0 or len(node_tags) == 0:
+        return sizes
 
     known_tags, first = np.unique(np.asarray(element_data["node_tags"], dtype=np.int64), return_index=True)
     known_xy = np.asarray(element_data["node_xy"], dtype=float)[first]
@@ -773,55 +801,62 @@ def _entities_to_embed(gmsh_map, points_gdf, lines_gdf):
 
 
 class MeshGenerator:
+    """
+    Gmsh-based triangular mesh generator.
+
+    This class is responsible for taking clean geometric inputs and using Gmsh
+    to produce a high-quality triangular mesh.
+
+    Args:
+        background_lc (float, optional): The default target mesh size for areas
+            not controlled by a specific refinement field.
+        verbosity (int, optional): Output level while ``generate()`` runs
+            (0=warnings only, 1=progress, 2=debug diagnostics). It applies to
+            both vorflow's logger and Gmsh, and only for the duration of
+            ``generate()``. None (default) follows the package-wide level set
+            with ``vorflow.set_verbosity()``.
+        mesh_algorithm (int): The 2D mesh algorithm to use. Common choices are
+            5 (Delaunay) for speed or 6 (Frontal-Delaunay) for quality.
+        smoothing_steps (int): Gmsh ``Mesh.Smoothing``: the number of Laplacian
+            smoothing passes over the triangle-mesh nodes during mesh generation.
+        optimization_cycles (int): Number of extra gmsh ``Relocate2D`` +
+            ``Laplace2D`` passes over the triangles after the initial mesh is
+            generated. Both options improve triangle shape; neither centres the
+            Voronoi generators within their cells. For Lloyd (centroidal
+            Voronoi) relaxation of the generators, use
+            ``VoronoiTessellator(lloyd_iterations=...)``.
+        tolerance_initial_delaunay (float): Tolerance for the initial Delaunay
+            point insertion. Increase this (e.g. 1e-4, 1e-2) to handle
+            "Could not insert point" errors caused by near-degenerate geometry
+            after fragmentation. This is a meshing-phase tolerance — it does NOT
+            alter the CAD topology, so no surfaces or lines are lost.
+            Default is 1e-8 (Gmsh default).
+        heal_shapes (bool): If True, run OCC topology healing after
+            fragmentation. This can fix degenerate geometry that causes
+            meshing failures, but may also merge or delete small entities.
+            Use with caution on complex models — keep heal_tolerance small.
+            Default is False.
+        heal_tolerance (float): Size threshold for healShapes. Entities
+            smaller than this may be removed or merged. Default 1e-8. only works if heal_shapes=True.
+        heal_fix_degenerated (bool): Fix degenerated edges/faces. Default True. Only works if heal_shapes=True.
+        heal_fix_small_edges (bool): Remove edges smaller than tolerance. Default True. Only works if heal_shapes=True.
+        heal_fix_small_faces (bool): Remove faces smaller than tolerance. Default True. Only works if heal_shapes=True.
+        diagnose (bool): If True, retain structured diagnostic details from
+            geometry transfer, embedding, and meshing steps.
+        conceptual_mesh (ConceptualMesh, optional): The conceptual model to
+            mesh. When given, ``generate()`` can be called without arguments:
+            it runs ``conceptual_mesh.generate()`` itself, and
+            ``VoronoiTessellator(mesher)`` picks the model up from here.
+    """
+
     def __init__(self, background_lc=None, verbosity=None, mesh_algorithm=6,
                  smoothing_steps=10, optimization_cycles=2,
                  tolerance_initial_delaunay=1e-8,
                  heal_shapes=False, heal_tolerance=1e-8,
                  heal_fix_degenerated=True, heal_fix_small_edges=True,
-                 heal_fix_small_faces=True, diagnose=False):
-        """
-        Initializes the Gmsh-based mesh generator.
-
-        This class is responsible for taking clean geometric inputs and using Gmsh
-        to produce a high-quality triangular mesh.
-
-        Args:
-            background_lc (float, optional): The default target mesh size for areas
-                not controlled by a specific refinement field.
-            verbosity (int, optional): Output level while ``generate()`` runs
-                (0=warnings only, 1=progress, 2=debug diagnostics). It applies to
-                both vorflow's logger and Gmsh, and only for the duration of
-                ``generate()``. None (default) follows the package-wide level set
-                with ``vorflow.set_verbosity()``.
-            mesh_algorithm (int): The 2D mesh algorithm to use. Common choices are
-                5 (Delaunay) for speed or 6 (Frontal-Delaunay) for quality.
-            smoothing_steps (int): Gmsh ``Mesh.Smoothing``: the number of Laplacian
-                smoothing passes over the triangle-mesh nodes during mesh generation.
-            optimization_cycles (int): Number of extra gmsh ``Relocate2D`` +
-                ``Laplace2D`` passes over the triangles after the initial mesh is
-                generated. Both options improve triangle shape; neither centres the
-                Voronoi generators within their cells. For Lloyd (centroidal
-                Voronoi) relaxation of the generators, use
-                ``VoronoiTessellator(lloyd_iterations=...)``.
-            tolerance_initial_delaunay (float): Tolerance for the initial Delaunay
-                point insertion. Increase this (e.g. 1e-4, 1e-2) to handle
-                "Could not insert point" errors caused by near-degenerate geometry
-                after fragmentation. This is a meshing-phase tolerance — it does NOT
-                alter the CAD topology, so no surfaces or lines are lost.
-                Default is 1e-8 (Gmsh default).
-            heal_shapes (bool): If True, run OCC topology healing after
-                fragmentation. This can fix degenerate geometry that causes
-                meshing failures, but may also merge or delete small entities.
-                Use with caution on complex models — keep heal_tolerance small.
-                Default is False.
-            heal_tolerance (float): Size threshold for healShapes. Entities
-                smaller than this may be removed or merged. Default 1e-8. only works if heal_shapes=True.
-            heal_fix_degenerated (bool): Fix degenerated edges/faces. Default True. Only works if heal_shapes=True.
-            heal_fix_small_edges (bool): Remove edges smaller than tolerance. Default True. Only works if heal_shapes=True.
-            heal_fix_small_faces (bool): Remove faces smaller than tolerance. Default True. Only works if heal_shapes=True.
-            diagnose (bool): If True, retain structured diagnostic details from
-                geometry transfer, embedding, and meshing steps.
-        """
+                 heal_fix_small_faces=True, diagnose=False,
+                 conceptual_mesh=None):
+        self.conceptual_mesh = conceptual_mesh
         self.background_lc = background_lc
         self.verbosity = verbosity
         # Resolved level used by internal gates; refreshed at each generate().
@@ -847,10 +882,13 @@ class MeshGenerator:
         # Inputs to VoronoiTessellator(lloyd_iterations=...), set by generate():
         # node_is_free / node_sizes are aligned with self.nodes (True for
         # nodes inside embedded polygon surfaces, off every curve and point;
-        # mean incident mesh-edge length), buffer_footprints is the union of
-        # the quad-buffer strip and band footprints (None without any).
+        # mean incident mesh-edge length), node_edges holds the unique mesh
+        # edges between two of self.nodes as (m, 2) positions into it (the
+        # graph the Lloyd density is smoothed over), buffer_footprints is the
+        # union of the quad-buffer strip and band footprints (None without any).
         self.node_is_free = None
         self.node_sizes = None
+        self.node_edges = None
         self.buffer_footprints = None
         self.diagnostics = {}
 
@@ -1190,6 +1228,33 @@ class MeshGenerator:
         elif element_filter == "quads":
             grid = grid[grid["is_quad"]]
         return grid.copy()
+
+    def plot(self, ax=None, column=None, element_filter="all", **kwargs):
+        """
+        Plots the triangular (or mixed tri/quad) mesh from the last ``generate()``.
+
+        Draws the element polygons of ``get_element_grid()``. Needs Matplotlib
+        (``pip install vorflow[plot]``).
+
+        Args:
+            ax (matplotlib.axes.Axes, optional): Axes to draw on; a new figure
+                is created when None.
+            column (str, optional): Element-grid column to colour the elements
+                by, e.g. ``"zone_id"``. None (default) draws outlines only.
+            element_filter (str): ``"all"``, ``"triangles"`` or ``"quads"``,
+                as in ``get_element_grid()``.
+            **kwargs: Passed to ``GeoDataFrame.plot`` for the elements.
+
+        Returns:
+            matplotlib.axes.Axes: The axes drawn on.
+        """
+        ax = get_ax(ax)
+        elements = self.get_element_grid(element_filter)
+        element_kwargs = {"edgecolor": "black", "linewidth": 0.3, **kwargs}
+        if column is None:
+            element_kwargs.setdefault("facecolor", "none")
+        elements.plot(ax=ax, column=column, **element_kwargs)
+        return ax
 
     def _dedup_and_remap_fragment_map(self, out_map, object_tags, input_tag_info):
         """Run removeAllDuplicates and remap the fragment map by entity location, in place.
@@ -2708,40 +2773,71 @@ class MeshGenerator:
                          f"(first 10): {stats.multi_tags[:10]}")
 
 
-    def generate(self, clean_polys, clean_lines, clean_points, output_file=None, launch_gmsh_gui=False):
+    def generate(self, clean_polys=None, clean_lines=None, clean_points=None,
+                 output_file=None, launch_gmsh_gui=False):
         """
         Executes the full mesh generation workflow.
 
         This method orchestrates the entire process:
+
+        0. Without clean frames, runs ``conceptual_mesh.generate()`` on the
+           conceptual mesh passed to the constructor.
         1. Initializes Gmsh.
         2. Transfers geometries into the Gmsh model.
         3. Sets up mesh size fields.
         4. Generates the 2D triangular mesh.
         5. Performs optional post-generation optimization.
         6. Extracts the resulting nodes and their tags, plus the per-node
-           ``node_is_free`` and ``node_sizes`` and the ``buffer_footprints``
-           that ``VoronoiTessellator(lloyd_iterations=...)`` relies on.
+           ``node_is_free`` and ``node_sizes``, the mesh ``node_edges`` and
+           the ``buffer_footprints`` that ``VoronoiTessellator(lloyd_iterations=...)`` relies on.
+
+        The three clean frames are passed together or not at all. Pass them
+        to inspect or edit the output of ``ConceptualMesh.generate()`` before
+        meshing; do not reindex or reorder them, as their index is the
+        feature ID that links refinement fields back to features.
 
         Args:
-            clean_polys (GeoDataFrame): Non-overlapping polygons.
-            clean_lines (GeoDataFrame): Snapped and cleaned lines.
-            clean_points (GeoDataFrame): Snapped and cleaned points.
+            clean_polys (GeoDataFrame, optional): Non-overlapping polygons.
+            clean_lines (GeoDataFrame, optional): Snapped and cleaned lines.
+            clean_points (GeoDataFrame, optional): Snapped and cleaned points.
             output_file (str, optional): If provided, saves the mesh to this path.
             launch_gmsh_gui (Boolean, optional): This allow to see triangular mesh results
                 using the GMSH GUI, and allow to review visually the fields and the triangular
                 mesh quality
 
         Returns:
-            bool: True if generation was successful.
-        
+            MeshGenerator: This mesh generator, with the results stored on it.
+
         Raises:
+            ValueError: If only some of the clean frames are given, or none
+                are given and no ``conceptual_mesh`` was passed to the constructor.
             Exception: If any step in the Gmsh process fails.
         """
+        clean_polys, clean_lines, clean_points = self._resolve_clean_frames(
+            clean_polys, clean_lines, clean_points
+        )
         self._validate_background_lc()
         with verbosity_scope(self.verbosity):
             self._verbosity = self._resolve_verbosity()
             return self._generate(clean_polys, clean_lines, clean_points,
                                   output_file=output_file, launch_gmsh_gui=launch_gmsh_gui)
+
+    def _resolve_clean_frames(self, clean_polys, clean_lines, clean_points):
+        """The clean frames passed to ``generate()``, or those of ``self.conceptual_mesh`` when none were."""
+        frames = (clean_polys, clean_lines, clean_points)
+        n_given = sum(frame is not None for frame in frames)
+        if n_given == 3:
+            return frames
+        if n_given > 0:
+            raise ValueError(
+                "Pass clean_polys, clean_lines and clean_points together, or none of them."
+            )
+        if self.conceptual_mesh is None:
+            raise ValueError(
+                "MeshGenerator.generate() needs the clean frames from ConceptualMesh.generate(), "
+                "or a MeshGenerator(conceptual_mesh=...)."
+            )
+        return self.conceptual_mesh.generate()
 
     def _generate(self, clean_polys, clean_lines, clean_points, output_file=None, launch_gmsh_gui=False):
         """Run the Gmsh workflow behind ``generate()``."""
@@ -2750,6 +2846,7 @@ class MeshGenerator:
         self._element_data = None
         self.node_is_free = None
         self.node_sizes = None
+        self.node_edges = None
         self.buffer_footprints = None
         self._initialize_gmsh()
         try:
@@ -2784,11 +2881,12 @@ class MeshGenerator:
             self.node_sizes = _node_sizes_from_elements(
                 self._element_data, self.node_tags, self.background_lc
             )
+            self.node_edges = _node_edges_from_elements(self._element_data, self.node_tags)
             self.zones_gdf = clean_polys
             if launch_gmsh_gui:
                 gmsh.fltk.run()
             self._finalize_gmsh()
-            return True
+            return self
 
         except Exception as e:
             # Broad on purpose: gmsh is process-global state and must be
