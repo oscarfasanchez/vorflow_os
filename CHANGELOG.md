@@ -16,8 +16,10 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - MODFLOW-USG-specific `to_mfusg_disu()` / `grid_to_mfusg_disu()` arrays and
   mapping/orthogonality diagnostics, plus optional `to_mfusgdisu()` FloPy
   package creation. These use USG DISU conventions, not MF6 DISU. Stacked
-  layers share one horizontal mesh; invalid geometry, unsupported shared
-  faces and nonpositive thickness are rejected.
+  layers share one horizontal mesh; invalid geometry and nonpositive
+  thickness are rejected. Bent or disconnected shared faces, such as a
+  barrier kink inside a cell, are exported as one connection with an
+  effective centre distance and flagged in `connectivity["face_type"]`.
 - Original 3D GSF geometry export with `to_gsf()` / `grid_to_gsf()`, using
   the same centres, elevations and node numbering as USG DISU. FloPy and
   MFUSG executables remain optional.

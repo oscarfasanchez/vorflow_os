@@ -77,8 +77,32 @@ def _line_parts(geometry):
     return []
 
 
-def _straight_face(shared, centres, pair, tolerance):
-    """Combine contiguous collinear pieces, rejecting bent/disconnected faces."""
+FACE_COLUMNS = [
+    "cell_id_1", "cell_id_2", "shared_length", "distance_1", "distance_2",
+    "ortho_error", "face_type", "n_segments",
+]
+
+
+def _face_record(pair, length, centres, normal, point, face_type, n_segments):
+    signed = (centres - point) @ normal
+    if signed[0] * signed[1] >= 0 or not np.isfinite(signed).all():
+        raise ValueError(f"Centres must lie on opposite sides of the shared face for cells {pair}.")
+    delta = centres[1] - centres[0]
+    angle = np.degrees(np.arccos(np.clip(abs(delta @ normal) / np.linalg.norm(delta), 0, 1)))
+    return {
+        "cell_id_1": pair[0], "cell_id_2": pair[1], "shared_length": length,
+        "distance_1": abs(signed[0]), "distance_2": abs(signed[1]),
+        "ortho_error": float(angle), "face_type": face_type, "n_segments": n_segments,
+    }
+
+
+def _shared_face(shared, cell, centres, pair, tolerance, strict=True):
+    """Describe the face between ``cell`` and a neighbour as one connection.
+
+    Contiguous collinear pieces form a straight face. ``strict`` rejects bent
+    or disconnected faces; otherwise they are approximated by
+    :func:`_effective_face`.
+    """
     parts = _line_parts(shared)
     if not parts:
         return None  # Corner-only contact.
@@ -91,30 +115,83 @@ def _straight_face(shared, centres, pair, tolerance):
         raise ValueError(f"Unsupported shared face between cells {pair}.")
     direction /= norm
     normal = np.array([-direction[1], direction[0]])
-    intervals = []
-    for part in parts:
-        offsets = np.asarray(part.coords)[:, :2] - origin
-        if np.max(np.abs(offsets @ normal)) > tolerance:
-            raise ValueError(f"Noncollinear shared face between cells {pair}.")
-        projected = offsets @ direction
-        intervals.append((projected.min(), projected.max()))
-    intervals.sort()
-    end = intervals[0][1]
-    for start, stop in intervals[1:]:
-        if start > end + tolerance:
-            raise ValueError(f"Disconnected shared face between cells {pair}.")
-        end = max(end, stop)
-    signed = (centres - origin) @ normal
-    if signed[0] * signed[1] >= 0 or not np.isfinite(signed).all():
+    offsets = [np.asarray(part.coords)[:, :2] - origin for part in parts]
+    collinear = all(np.max(np.abs(offset @ normal)) <= tolerance for offset in offsets)
+    connected = collinear
+    if collinear:
+        intervals = sorted(((offset @ direction).min(), (offset @ direction).max())
+                           for offset in offsets)
+        end = intervals[0][1]
+        for start, stop in intervals[1:]:
+            if start > end + tolerance:
+                connected = False
+            end = max(end, stop)
+    length = sum(part.length for part in parts)
+    if connected:
+        return _face_record(pair, length, centres, normal, origin, "straight", 1)
+    if strict:
+        kind = "Disconnected" if collinear else "Noncollinear"
+        raise ValueError(f"{kind} shared face between cells {pair}.")
+    return _effective_face(parts, length, cell, centres, pair, tolerance)
+
+
+def _effective_face(parts, length, cell, centres, pair, tolerance):
+    """Approximate a bent or disconnected face by one straight connection.
+
+    The face keeps its total length. Its normal is the length-weighted mean
+    of the segment normals, each oriented out of ``cell``; centre distances
+    are measured along that normal from the length-weighted face midpoint.
+    """
+    merged = shapely.line_merge(shapely.multilinestrings(parts))
+    # Simplifying at the roundoff tolerance drops collinear vertices only.
+    pieces = [shapely.simplify(piece, tolerance) for piece in _line_parts(merged)]
+    segments = np.concatenate([
+        np.stack([xy[:-1], xy[1:]], axis=1)
+        for xy in (np.asarray(piece.coords)[:, :2] for piece in pieces)
+    ])
+    tangent = segments[:, 1] - segments[:, 0]
+    lengths = np.linalg.norm(tangent, axis=1)
+    keep = lengths > 0
+    segments, tangent, lengths = segments[keep], tangent[keep], lengths[keep]
+    normals = np.column_stack([-tangent[:, 1], tangent[:, 0]]) / lengths[:, None]
+    middles = segments.mean(axis=1)
+    # Probe both sides of each segment; a probe inside ``cell`` means the
+    # normal points inwards. Fall back to the centre connector if ambiguous.
+    probe = np.maximum(1e-3 * lengths, 100 * tolerance)[:, None] * normals
+    ahead = shapely.contains_xy(cell, *(middles + probe).T)
+    behind = shapely.contains_xy(cell, *(middles - probe).T)
+    inwards = np.where(ahead != behind, ahead, normals @ (centres[1] - centres[0]) < 0)
+    normals[inwards] *= -1
+    resultant = lengths @ normals
+    norm = np.linalg.norm(resultant)
+    if norm <= tolerance:
+        raise ValueError(
+            f"Shared face between cells {pair} folds back on itself; "
+            "it has no net direction for a single connection."
+        )
+    normal = resultant / norm
+    point = lengths @ middles / lengths.sum()
+    signed = (centres - point) @ normal
+    if not signed[0] < 0 < signed[1]:
         raise ValueError(f"Centres must lie on opposite sides of the shared face for cells {pair}.")
-    delta = centres[1] - centres[0]
-    angle = np.degrees(np.arccos(np.clip(abs(delta @ normal) / np.linalg.norm(delta), 0, 1)))
-    return {
-        "cell_id_1": pair[0], "cell_id_2": pair[1],
-        "shared_length": sum(part.length for part in parts),
-        "distance_1": abs(signed[0]), "distance_2": abs(signed[1]),
-        "ortho_error": float(angle),
-    }
+    face_type = "disconnected" if _count_groups(pieces, tolerance) > 1 else "bent"
+    return _face_record(pair, length, centres, normal, point, face_type, len(segments))
+
+
+def _count_groups(pieces, tolerance):
+    """Count groups of pieces linked by gaps no wider than ``tolerance``."""
+    group = list(range(len(pieces)))
+
+    def root(i):
+        while group[i] != i:
+            i = group[i]
+        return i
+
+    for i in range(len(pieces)):
+        for j in range(i + 1, len(pieces)):
+            if shapely.dwithin(pieces[i], pieces[j], tolerance):
+                group[root(j)] = root(i)
+    return len({root(i) for i in range(len(pieces))})
 
 
 def _prepare_grid(gdf, top, botm, nlay):
@@ -167,15 +244,24 @@ def _prepare_grid(gdf, top, botm, nlay):
                 raise ValueError(f"Cannot resolve roundoff overlap between cells {i} and {j}.")
         else:
             shared = geoms[i].boundary.intersection(geoms[j].boundary)
-        record = _straight_face(shared, centres[[i, j]], (int(i), int(j)), tolerance)
+        record = _shared_face(
+            shared, geoms[i], centres[[i, j]], (int(i), int(j)), tolerance, strict=False,
+        )
         if record is not None:
             records.append(record)
-    faces = pd.DataFrame(records, columns=[
-        "cell_id_1", "cell_id_2", "shared_length", "distance_1", "distance_2", "ortho_error",
-    ])
+    faces = pd.DataFrame(records, columns=FACE_COLUMNS)
     if len(faces):
         logger.info("MFUSG export: %s horizontal faces; maximum orthogonality error %.6g degrees",
                     len(faces), faces["ortho_error"].max())
+        approximated = faces["face_type"] != "straight"
+        if approximated.any():
+            counts = faces.loc[approximated, "face_type"].value_counts()
+            logger.warning(
+                "MFUSG export: approximated %s non-straight faces as single connections (%s); "
+                "see connectivity['face_type'].",
+                int(approximated.sum()),
+                ", ".join(f"{count} {kind}" for kind, count in counts.items()),
+            )
     ncpl = len(gdf)
     mapping = pd.DataFrame({
         "model_node": np.arange(nlay * ncpl),

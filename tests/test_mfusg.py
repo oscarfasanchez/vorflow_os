@@ -1,5 +1,6 @@
 """USG-specific export geometry, serialization and optional FloPy integration."""
 
+import logging
 import os
 import shutil
 import sys
@@ -7,9 +8,11 @@ import sys
 import geopandas as gpd
 import numpy as np
 import pytest
-from shapely.geometry import Point, Polygon, box
+from shapely.geometry import LineString, MultiLineString, Point, Polygon, box
 
+import vorflow
 from vorflow import ConceptualMesh, MeshGenerator, ThresholdField, VoronoiTessellator
+from vorflow._mfusg import _shared_face
 from vorflow.utils import grid_to_gsf, grid_to_mfusg_disu
 
 from test_pipeline import FakeMeshGenerator
@@ -210,14 +213,78 @@ def test_missing_columns_empty_and_no_node_id():
     assert disu["node_id"].tolist() == [0, 1]
 
 
-def test_bent_and_disconnected_shared_faces_are_rejected():
+def _l_shaped_pair():
     lower_left = Polygon([(0, 0), (2, 0), (2, 1), (1, 1), (1, 2), (0, 2)])
-    upper_right = box(0, 0, 2, 2).difference(lower_left)
-    with pytest.raises(ValueError, match="Noncollinear"):
-        grid_to_mfusg_disu(_grid([lower_left, upper_right], [(.5, .5), (1.5, 1.5)]), 10, 0)
+    return [lower_left, box(0, 0, 2, 2).difference(lower_left)]
+
+
+def test_bent_face_is_one_connection_along_mean_normal(caplog):
+    vorflow.set_verbosity(1, console=False)
+    try:
+        with caplog.at_level(logging.WARNING, logger="vorflow"):
+            disu = grid_to_mfusg_disu(_grid(_l_shaped_pair(), [(.5, .5), (1.5, 1.5)]), 10, 0)
+    finally:
+        vorflow.set_verbosity(1)
+    face = disu["connectivity"].iloc[0]
+    assert face["face_type"] == "bent" and face["n_segments"] == 2
+    assert face["shared_length"] == pytest.approx(2)
+    # Mean normal (1, 1)/sqrt(2) through the length-weighted midpoint (1.25, 1.25).
+    np.testing.assert_allclose(disu["cl12"], [0, .75 * np.sqrt(2), 0, .25 * np.sqrt(2)])
+    np.testing.assert_allclose(disu["fahl"], [0, 20, 0, 20])
+    assert face["ortho_error"] == pytest.approx(0, abs=1e-6)
+    assert "1 bent" in caplog.text
+
+
+def test_disconnected_collinear_face_is_one_connection():
     notched = Polygon([(0, 0), (1, 0), (1, 1), (.5, 1), (.5, 2), (1, 2), (1, 3), (0, 3)])
+    disu = grid_to_mfusg_disu(_grid([notched, box(1, 0, 2, 3)], [(.25, 1.5), (1.5, 1.5)]), 10, 0)
+    face = disu["connectivity"].iloc[0]
+    assert face["face_type"] == "disconnected" and face["n_segments"] == 2
+    assert face["shared_length"] == pytest.approx(2)
+    np.testing.assert_allclose(disu["cl12"], [0, .75, 0, .5])
+    np.testing.assert_allclose(disu["fahl"], [0, 20, 0, 20])
+
+
+def test_straight_faces_are_flagged_straight():
+    faces = grid_to_mfusg_disu(_grid(), 10, 0)["connectivity"]
+    assert faces["face_type"].tolist() == ["straight"] and faces["n_segments"].tolist() == [1]
+
+
+def test_bent_face_rejects_centres_on_the_wrong_sides():
+    with pytest.raises(ValueError, match="opposite sides"):
+        grid_to_mfusg_disu(_grid(_l_shaped_pair(), [(1.9, .9), (1.5, 1.5)]), 10, 0)
+
+
+def test_strict_shared_face_rejects_bent_and_disconnected_faces():
+    lower_left, upper_right = _l_shaped_pair()
+    shared = lower_left.boundary.intersection(upper_right.boundary)
+    centres = np.array([(.5, .5), (1.5, 1.5)])
+    with pytest.raises(ValueError, match="Noncollinear"):
+        _shared_face(shared, lower_left, centres, (0, 1), 1e-12)
+    pieces = MultiLineString([[(1, 0), (1, 1)], [(1, 2), (1, 3)]])
     with pytest.raises(ValueError, match="Disconnected"):
-        grid_to_mfusg_disu(_grid([notched, box(1, 0, 2, 3)], [(.25, 1.5), (1.5, 1.5)]), 10, 0)
+        _shared_face(pieces, box(0, 0, 1, 3), np.array([(.5, 1.5), (1.5, 1.5)]), (0, 1), 1e-12)
+
+
+@pytest.mark.slow
+def test_barrier_kink_inside_a_cell_exports(tmp_path):
+    cm = ConceptualMesh()
+    cm.add_polygon(box(0, 0, 300, 300), zone_id=1, resolution=20)
+    cm.add_line(LineString([(30, 40), (140, 170), (160, 150), (270, 260)]), "f",
+                resolution=8, is_barrier=True)
+    mg = MeshGenerator(background_lc=20, conceptual_mesh=cm)
+    mg.generate()
+    vt = VoronoiTessellator(mg, cm)
+    grid = vt.generate()
+    disu = vt.to_mfusg_disu(10, 0)
+    faces = disu["connectivity"]
+    assert (faces["face_type"] == "bent").any()
+    off_diagonal = np.ones(disu["njag"], dtype=bool)
+    off_diagonal[np.cumsum(disu["iac"]) - disu["iac"]] = False
+    assert np.isfinite(disu["cl12"]).all() and (disu["cl12"][off_diagonal] > 0).all()
+    assert (disu["fahl"][off_diagonal] > 0).all()
+    _, cells = _read_gsf(vt.to_gsf(tmp_path / "barrier.gsf", 10, 0))
+    assert len(cells) == len(grid)
 
 
 def _read_gsf(path):

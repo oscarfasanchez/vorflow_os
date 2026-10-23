@@ -1448,8 +1448,9 @@ class VoronoiTessellator:
         See :func:`vorflow.utils.grid_to_mfusg_disu` for shapes, validation,
         node mapping and face diagnostics. FloPy is not required. The arrays
         use USG ``IVSD``/``FAHL`` conventions, **not MF6 DISU** conventions.
-        Bent or disconnected shared faces are unsupported; a barrier kink
-        inside a cell can create such a face and prevent export.
+        Bent or disconnected shared faces, such as a barrier kink inside a
+        cell, are approximated as one connection and flagged in
+        ``connectivity["face_type"]``.
 
         Args:
             top: Scalar or one value per horizontal cell.
@@ -1518,8 +1519,7 @@ class VoronoiTessellator:
 
         See :func:`vorflow.utils.grid_to_gsf`. FloPy is not required. Use
         identical top/bottom inputs for DISU and GSF to keep the pair aligned.
-        Shared validation rejects bent faces, including barrier kinks inside
-        cells, and disconnected shared faces.
+        Bent faces, such as barrier kinks inside cells, are written as-is.
 
         Args:
             filepath (str or Path): Destination file.

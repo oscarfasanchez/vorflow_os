@@ -844,8 +844,13 @@ def grid_to_mfusg_disu(gdf: gpd.GeoDataFrame, top, botm, nlay: int = 1) -> dict:
     Centre containment and overlap checks allow coordinate roundoff (32
     machine epsilons times the coordinate scale), preserving input centres
     and polygons. Roundoff-sized overlap faces are resolved at that precision.
-    Shared faces must be contiguous and straight; a kinked barrier can create
-    a bent face that is rejected. Disconnected shared faces are also rejected.
+    A shared face that is bent (for example where a barrier changes direction
+    inside a cell) or split into separate pieces is exported as one
+    connection. ``FAHL`` uses its total length. ``CL12`` uses the centre
+    distances along the length-weighted mean of the face's normals, measured
+    from its length-weighted midpoint. This is an approximation; such faces
+    are flagged in ``connectivity`` and logged as a warning. A face that
+    folds back on itself, with no net direction, is rejected.
 
     Returns:
         dict: Inputs for ``flopy.mfusg.MfUsgDisU``: ``nodes``, ``nlay``,
@@ -859,7 +864,9 @@ def grid_to_mfusg_disu(gdf: gpd.GeoDataFrame, top, botm, nlay: int = 1) -> dict:
         ``cell_map`` (a DataFrame with zero-based ``model_node``, ``layer``,
         ``cell_id``, ``orig_index``, ``node_id`` and optional ``zone_id``),
         and ``connectivity`` (horizontal face lengths, perpendicular centre
-        distances and ``ortho_error`` in degrees).
+        distances, ``ortho_error`` in degrees, ``face_type`` as
+        ``"straight"``, ``"bent"`` or ``"disconnected"``, and
+        ``n_segments``, the number of straight segments in the face).
 
         MFUSG ``FAHL`` is interface area, including thickness for horizontal
         connections; MF6 ``HWVA`` uses horizontal width instead. MFUSG and
@@ -889,8 +896,8 @@ def grid_to_gsf(gdf: gpd.GeoDataFrame, filepath, top, botm, nlay: int = 1):
     lists clockwise top and bottom rings, without repeated closing vertices.
     Node/vertex/layer numbers in the file are one-based. Flat cell surfaces
     reproduce the supplied cell elevations; no vertex interpolation is done.
-    The shared validation rejects bent/disconnected faces, including faces
-    created where a barrier changes direction inside a cell.
+    Bent and disconnected shared faces need no special handling here: each
+    cell ring keeps all of its vertices.
 
     GSF is a geometry companion, not a DISU package or a particle-tracking
     GSF variant. It does not store hydraulic properties, CRS metadata or

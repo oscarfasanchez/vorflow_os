@@ -261,10 +261,10 @@ supported. Grid arrays cannot be overridden through the FloPy wrapper;
 time settings and units can be passed as extra keywords. Barrier geometry
 does not assign hydraulic resistance automatically.
 
-DISU and GSF currently require contiguous, straight shared faces. A barrier
-that changes direction inside a cell can create a bent face and prevent both
-exports; disconnected shared faces are also rejected. Effective connection
-distances for bent faces are not yet implemented. Centre and overlap checks
+A barrier that changes direction inside a cell can leave two cells sharing a
+bent face. DISU exports a bent or disconnected face as one connection, using
+its total length and the centre distances along its mean normal, and flags it
+in `connectivity["face_type"]`. Centre and overlap checks
 allow coordinate roundoff while preserving the supplied centres and polygons.
 
 For an existing GeoDataFrame, use `vorflow.utils.grid_to_mfusg_disu()` and
