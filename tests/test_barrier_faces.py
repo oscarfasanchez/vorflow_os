@@ -155,9 +155,9 @@ def _assert_exact(mg: MeshGenerator, vt: VoronoiTessellator, grid) -> None:
     assert not on.duplicated(["cell_id_1", "cell_id_2"]).any()
     assert on.geometry.length.sum() == pytest.approx(_barriers(mg).length, rel=1e-6)
     # ... which are the cleaned input lines less what the report says was left without faces
-    # (merged wedges and parallel stretches move the lines a little and share faces; their own tests check them).
+    # (merged wedges, parallel stretches and relieved bends move the lines a little; their own tests check them).
     report = mg.barrier_report
-    if report["collapsed"] or report["merged"]:
+    if report["collapsed"] or report["merged"] or report["relieved"]:
         return
     uncovered = sum(entry["length"] for entry in report["tips"] + report["stubs"])
     assert on.geometry.length.sum() == pytest.approx(_cleaned_barrier_length(vt.cm) - uncovered, rel=1e-6)
@@ -218,7 +218,7 @@ def test_utm_offset_does_not_change_the_barrier_sites():
 # ---------------------------------------------------------------------------
 def test_sharp_spike_tip_is_left_inside_cells_and_reported():
     coords = _spike(12.0)
-    mg, vt, grid = _mesh(_model([(coords, B)]))
+    mg, vt, grid = _mesh(_model([(coords, B)]), barrier_tips=None)
     _assert_exact(mg, vt, grid)
     tips = mg.barrier_report["tips"]
     assert len(tips) == 1 and tips[0]["line_id"] == "line0"
@@ -235,9 +235,58 @@ def test_spike_tip_is_kept_above_sharp_angle():
     assert mg.barrier_report["tips"] == []
     assert _barriers(mg).length == pytest.approx(LineString(coords).length)
 
-    mg, vt, grid = _mesh(_model([(coords, B)]), sharp_angle=30.0)
+    mg, vt, grid = _mesh(_model([(coords, B)]), sharp_angle=30.0, barrier_tips=None)
     _assert_exact(mg, vt, grid)
     assert len(mg.barrier_report["tips"]) == 1
+
+
+def _zigzag(angle_deg: float, leg: float = 4 * LC, n: int = 6, centre: tuple = CENTRE) -> list:
+    """A regular zigzag of ``n`` legs whose inner corners are all ``angle_deg``."""
+    half = math.radians(angle_deg) / 2.0
+    dx, dy = leg * math.sin(half), leg * math.cos(half)
+    x0 = centre[0] - n * dx / 2.0
+    return [(x0 + i * dx, centre[1] + (dy / 2.0 if i % 2 else -dy / 2.0)) for i in range(n + 1)]
+
+
+def test_sharp_spike_stays_exact_by_default():
+    # The construction makes a single 12 degree spike exact on its own; nothing is cut.
+    coords = _spike(12.0)
+    mg, vt, grid = _mesh(_model([(coords, B)]))
+    _assert_exact(mg, vt, grid)
+    assert mg.barrier_report["tips"] == [] and mg.barrier_report["relieved"] == []
+    assert _barriers(mg).length == pytest.approx(LineString(coords).length)
+
+
+def test_zigzag_bends_are_relieved_with_a_line_to_each_tip():
+    coords = _zigzag(25.0)
+    with pytest.raises(vorflow.BarrierMeshError):
+        _mesh(_model([(coords, B)]), barrier_tips=None)
+    with pytest.warns(UserWarning, match="relieved"):
+        mg, vt, grid = _mesh(_model([(coords, B)]))
+    _assert_exact(mg, vt, grid)
+    relieved = mg.barrier_report["relieved"]
+    assert relieved and all(e["tip"] == "line" and e["line_id"] == "line0" for e in relieved)
+    assert max(e["deviation"] for e in relieved) <= 0.5 * LC
+    faces = _barriers(mg)
+    for e in relieved:  # the barrier still reaches every relieved tip
+        assert faces.distance(Point(e["location"])) < 1e-6
+
+
+def test_zigzag_bends_can_be_cut_instead():
+    coords = _zigzag(25.0)
+    with pytest.warns(UserWarning, match="relieved"):
+        mg, vt, grid = _mesh(_model([(coords, B)]), barrier_tips="cut")
+    _assert_exact(mg, vt, grid)
+    relieved = mg.barrier_report["relieved"]
+    assert relieved and all(e["tip"] == "cut" for e in relieved)
+    faces = _barriers(mg)
+    for e in relieved:  # the tip is left inside cells
+        assert faces.distance(Point(e["location"])) > 0.1 * LC
+
+
+def test_barrier_tips_must_be_a_known_mode():
+    with pytest.raises(ValueError, match="barrier_tips"):
+        MeshGenerator(background_lc=BACKGROUND_LC, barrier_tips="bend")
 
 
 def test_short_stub_past_a_junction_is_dropped_and_reported():
@@ -362,7 +411,7 @@ def test_hex_ring_next_to_a_barrier_is_dropped_unless_kept():
 
 def test_barrier_report_lists_every_entry():
     mg, _, _ = _mesh(_model(EXACT_CASES["t_junction"]))
-    assert set(mg.barrier_report) == {"corridors", "merged", "collapsed", "tips", "stubs", "snaps", "noise",
+    assert set(mg.barrier_report) == {"corridors", "merged", "collapsed", "relieved", "tips", "stubs", "snaps", "noise",
                                       "on_boundary", "rings", "fixed_nodes", "repair_rounds", "sites",
                                       "removed_nodes", "polish"}
     assert mg.barrier_report["sites"] > 0
@@ -632,7 +681,7 @@ def test_warnings_point_at_the_caller_through_mesh_generator():
     cm = _model([(_spike(12.0), B), ([(40, 30), CENTRE, _ray(CENTRE, 60, 0.05 * LC), (260, 60)], B)])
     with warnings.catch_warnings(record=True) as record:
         warnings.simplefilter("always")
-        MeshGenerator(background_lc=BACKGROUND_LC, verbosity=0, conceptual_mesh=cm).generate()
+        MeshGenerator(background_lc=BACKGROUND_LC, verbosity=0, conceptual_mesh=cm, barrier_tips=None).generate()
     messages = {str(w.message).split(":")[0]: w.filename for w in record if w.category is UserWarning}
     assert any("digitising noise" in str(w.message) for w in record)
     assert any("spike tip" in str(w.message) for w in record)

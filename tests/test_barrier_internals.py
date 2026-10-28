@@ -13,7 +13,7 @@ import shapely
 from scipy.sparse.csgraph import dijkstra
 from shapely.geometry import LineString, box
 
-from vorflow._barrier import corridor, lines, network, pipeline, rung, sizing, validate
+from vorflow._barrier import corridor, lines, network, pipeline, rung, sizing, tips, validate
 
 DOMAIN = box(0, 0, 300, 300)
 LC = 8.0
@@ -460,3 +460,56 @@ def test_parallel_merge_moves_both_lines_onto_their_midline():
 def test_parallel_merge_leaves_what_it_must_not_move(coords):
     net = _network(coords)
     assert net.merged == []
+
+
+# ---------------------------------------------------------------------------
+# ladders and relieved bends
+# ---------------------------------------------------------------------------
+def _corner(angle_deg: float, apex=(150.0, 200.0), leg: float = 100.0) -> list:
+    half = math.radians(angle_deg) / 2.0
+    return [(apex[0] - leg * math.sin(half), apex[1] - leg * math.cos(half)), apex,
+            (apex[0] + leg * math.sin(half), apex[1] - leg * math.cos(half))]
+
+
+def test_ladders_only_below_rung_angle():
+    below = math.degrees(network.RUNG_ANGLE) - 2.0
+    assert len(_network([_corner(below)]).rungs) == 1
+    assert _network([_corner(45.0)]).rungs == []  # from about 45 degrees the corner rule centres connections better
+
+
+def test_relieve_keeps_a_line_to_the_tip_or_cuts_it():
+    xy = np.array(_corner(30.0))
+    apex = tuple(xy[1])
+    out, records = tips.relieve([_line(xy)], {apex: 1}, "line")
+    main, spur = out
+    assert apex not in map(tuple, main.xy)
+    assert tuple(spur.xy[-1]) == apex and tuple(spur.xy[0]) in map(tuple, main.xy)
+    # the legs end where they are RELIEF_WIDTH x lc apart
+    a, c = main.xy[1], main.xy[-2]
+    assert np.hypot(*(c - a)) == pytest.approx(tips.RELIEF_WIDTH * LC)
+    assert records[0]["tip"] == "line" and records[0]["deviation"] < tips.RELIEF_WIDTH * LC
+
+    out, records = tips.relieve([_line(xy)], {apex: 1}, "cut")
+    assert len(out) == 1 and records[0]["tip"] == "cut" and len(out[0].xy) == 4
+
+
+def test_relieved_bends_on_a_short_shared_leg_share_one_chord():
+    # two narrow bends 30 apart: cut 0.45 x the leg each, they would leave less than MIN_LEFT x lc between them
+    xy = np.array([(40.0, 100.0), (150.0, 160.0), (153.0, 130.0), (260.0, 160.0)])
+    named = {tuple(xy[1]): 6, tuple(xy[2]): 6}
+    out, records = tips.relieve([_line(xy)], named, "cut")
+    assert len(out[0].xy) == 4 and all(r["merged"] for r in records)
+
+
+def test_plan_relieves_only_when_asked_and_only_where_needed():
+    half = math.radians(12.5)
+    dx, dy = 4 * LC * math.sin(half), 4 * LC * math.cos(half)
+    zigzag = [(150 - 3 * dx + i * dx, 150 + (dy / 2 if i % 2 else -dy / 2)) for i in range(7)]
+    with pytest.raises(pipeline.BarrierMeshError):
+        _plan([zigzag])
+    items = [(0, np.asarray(zigzag, dtype=float), LC)]
+    barriers = pipeline.barrier_lines(items, [], DOMAIN)
+    plan = pipeline.plan(barriers, [], DOMAIN, np.empty((0, 2)), sizing.size_function([], 20.0), ORIGIN,
+                         tip_mode="line")
+    assert 0 < len(plan.net.relieved) < 5  # not every bend of the zigzag
+    assert _plan(STRAIGHT).net.relieved == []

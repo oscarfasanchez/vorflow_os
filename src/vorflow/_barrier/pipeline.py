@@ -47,6 +47,7 @@ from scipy.spatial import cKDTree
 from shapely.geometry import LineString, MultiLineString
 
 from . import corridor as corridors
+from . import tips
 from .._features import HEX_RING_CLEARANCE
 from .lines import BarrierLine, must_keep
 from .network import SHARP_ANGLE, Network, build_network, replan_chord_nodes
@@ -198,6 +199,32 @@ def check_floor(net: Network, field: SizeField, origin: np.ndarray) -> None:
               f"{advice(floor_cause(net, field, k, lc[k]), field.h[k])}", field.xy[tiny], origin)
 
 
+RELIEVABLE = ("junction", "repair")  # floor causes a relieved bend can help (``sizing.CAUSES``)
+
+
+def _floor_spots(net: Network, field: SizeField, narrow_only: bool = False) -> np.ndarray:
+    """Samples whose target face length is below the floor; with ``narrow_only``, only those set by legs that
+    meet or fold back too narrowly, directly or through the repair rounds (causes "junction" and "repair"):
+    the ones a relieved bend can help."""
+    lc = net.piece_lc[field.piece]
+    tiny = np.flatnonzero(field.h < MIN_H_FRACTION * lc)
+    if narrow_only:
+        tiny = np.array([k for k in tiny if floor_cause(net, field, k, lc[k]) in RELIEVABLE], dtype=int)
+    return field.xy[tiny] if len(tiny) else np.empty((0, 2))
+
+
+def _name_bends(lines: list, points: np.ndarray, named: dict, tip_mode: str | None) -> bool:
+    """Name the bends of ``lines`` nearest to ``points`` once more (``tips``); True when one was added."""
+    if tip_mode is None or len(points) == 0:
+        return False
+    added = False
+    for apex in tips.nearest_bends(lines, points):
+        if named.get(apex, 0) < tips.RELIEF_TRIES:
+            named[apex] = named.get(apex, 0) + 1
+            added = True
+    return added
+
+
 def repair_bounds(field: SizeField, layout: Layout, bad: list, refine: np.ndarray | None) -> np.ndarray:
     """Per-sample upper bounds of h: REPAIR_FACTOR x the local face length at every defect."""
     out = np.full(len(field.h), np.inf) if refine is None else refine.copy()
@@ -214,10 +241,12 @@ def repair_bounds(field: SizeField, layout: Layout, bad: list, refine: np.ndarra
 
 
 def network_with_corridors(lines: list, standard: list, domain, features: np.ndarray, size_fn,
-                           sharp_angle: float, skip: set) -> Network:
-    """The barrier network with its corridors (except those in ``skip``) and their chord nodes re-planned."""
+                           sharp_angle: float, skip: set, tip_mode: str | None = None,
+                           named: dict | None = None) -> Network:
+    """The barrier network with its corridors (except those in ``skip``) and their chord nodes re-planned;
+    with ``tip_mode``, the bends in ``named`` relieved (``tips``)."""
     tol = touch_tolerance(domain)
-    net = build_network(lines, standard, domain, tol, sharp_angle)
+    net = build_network(lines, standard, domain, tol, sharp_angle, tip_mode, named)
     net.corridors = corridors.find_corridors(net, size_fn, domain, standard, features, skip)
     replan_chord_nodes(net, set().union(*[corridors.chord_nodes(c) for c in net.corridors]), domain, standard, tol)
     return net
@@ -234,33 +263,47 @@ def _troubled(net: Network, field: SizeField, bad: list) -> set:
 
 
 def plan(lines: list, standard: list, domain, features: np.ndarray, size_fn, origin: np.ndarray,
-         gradation: float = GRADATION, sharp_angle: float = SHARP_ANGLE, obstacles: list = ()) -> BarrierPlan:
+         gradation: float = GRADATION, sharp_angle: float = SHARP_ANGLE, obstacles: list = (),
+         tip_mode: str | None = None) -> BarrierPlan:
     """A barrier construction that passes the validity gate (module docstring), or BarrierMeshError.
 
     ``obstacles`` are the fixed lines (``sizing.Obstacle``) whose nodes the circles must not reach.
-    A geometric failure inside the construction is raised as BarrierMeshError too.
+    With ``tip_mode`` ("line" or "cut"), the bends the construction cannot make exact are relieved
+    (``tips``) and planned again before anything fails. A geometric failure inside the construction is
+    raised as BarrierMeshError too.
     """
     try:
-        return _repair_loop(lines, standard, domain, features, size_fn, origin, gradation, sharp_angle, obstacles)
+        return _repair_loop(lines, standard, domain, features, size_fn, origin, gradation, sharp_angle, obstacles,
+                            tip_mode)
     except GEOMETRY_ERRORS as err:
         raise internal_failure("construction", err) from err
 
 
 def _repair_loop(lines: list, standard: list, domain, features: np.ndarray, size_fn, origin: np.ndarray,
-                 gradation: float, sharp_angle: float, obstacles: list) -> BarrierPlan:
-    """``plan``'s steps 1-4 with corridor drops and local repair rounds (module docstring)."""
-    skip = set()
+                 gradation: float, sharp_angle: float, obstacles: list, tip_mode: str | None) -> BarrierPlan:
+    """``plan``'s steps 1-4 with corridor drops, relieved bends and local repair rounds (module docstring)."""
+    skip, named = set(), {}
     tol = touch_tolerance(domain)
-    net = network_with_corridors(lines, standard, domain, features, size_fn, sharp_angle, skip)
+
+    def network():
+        return network_with_corridors(lines, standard, domain, features, size_fn, sharp_angle, skip, tip_mode, named)
+
+    net = network()
     refine, first, rounds = None, None, 0
     while True:
         field = capped_field(net, size_fn, domain, features, obstacles, refine, tol)
+        if _name_bends(lines, _floor_spots(net, field, narrow_only=True), named, tip_mode):
+            net, refine, first, rounds = network(), None, None, 0
+            continue
         check_floor(net, field, origin)
         field = grade_field(net, field, gradation)
         if field.failed:
             skip |= set(field.failed)
-            net = network_with_corridors(lines, standard, domain, features, size_fn, sharp_angle, skip)
+            net = network()
             refine = None
+            continue
+        if _name_bends(lines, _floor_spots(net, field, narrow_only=True), named, tip_mode):
+            net, refine, first, rounds = network(), None, None, 0
             continue
         check_floor(net, field, origin)
         layout = construct(net, field)
@@ -272,11 +315,14 @@ def _repair_loop(lines: list, standard: list, domain, features: np.ndarray, size
         troubled = _troubled(net, field, bad)
         if troubled:
             skip |= troubled
-            net = network_with_corridors(lines, standard, domain, features, size_fn, sharp_angle, skip)
+            net = network()
             refine = None
             continue
         first = first or len(layout.sites)
         if rounds == REPAIR_ROUNDS or len(layout.sites) > SITE_GROWTH_CAP * first:
+            if _name_bends(lines, np.array([p for _, p in bad]), named, tip_mode):
+                net, refine, first, rounds = network(), None, None, 0
+                continue
             kinds = sorted({k for k, _ in bad})
             _fail(f"{len(bad)} defects ({', '.join(kinds)}) are left after {rounds} local refinements, because "
                   f"{advice('repair', 0.0)}", np.array([p for _, p in bad]), origin)

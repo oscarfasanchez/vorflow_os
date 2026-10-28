@@ -48,7 +48,7 @@ from .._features import feature_lc, is_embedded, is_face_line, line_parts, row_b
 from .._log import warn_user
 from ..buffer import protection_epsilon
 from . import pipeline as planning
-from . import parallel, polish, wedge
+from . import parallel, polish, tips, wedge
 from .sizing import FEATURE_CAP, Obstacle, near_crossing, size_function
 
 logger = logging.getLogger(__name__)
@@ -216,7 +216,7 @@ def obstacles(polys, lines, domain, items: list, origin: np.ndarray, background_
 
 
 def prepare(polys, lines, points, background_lc: float, feature_fields, gradation: float,
-            sharp_angle_deg: float) -> tuple:
+            sharp_angle_deg: float, tip_mode: str | None = "line") -> tuple:
     """(plan, context) of the barriers in the clean frames, or (None, None) without any.
 
     Raises BarrierMeshError when the construction cannot be made valid.
@@ -259,7 +259,7 @@ def prepare(polys, lines, points, background_lc: float, feature_fields, gradatio
         obstacles=obstacles(polys, lines, domain, items, origin, background_lc, planning.touch_tolerance(domain)),
     )
     plan = planning.plan(barrier_lines, standard, domain, features, size_fn, origin, gradation,
-                         math.radians(sharp_angle_deg), context.obstacles)
+                         math.radians(sharp_angle_deg), context.obstacles, tip_mode)
     return plan, context
 
 
@@ -470,6 +470,14 @@ def _collapse_entry(e: dict, context) -> dict:
             'deviation': float(e['deviation'])}
 
 
+def _relief_entry(e: dict, context) -> dict:
+    """A relieved bend for ``barrier_report`` (see ``tips``)."""
+    xy = e['location'] + context.origin
+    return {'line_id': context.face_rows[e['line_id']][0], 'location': (float(xy[0]), float(xy[1])),
+            'angle': float(e['angle']), 'width': float(e['width']), 'tip': e['tip'], 'merged': bool(e['merged']),
+            'deviation': float(e['deviation'])}
+
+
 def _clean_event(e: dict) -> dict:
     """A cleaning event for ``barrier_report``."""
     return {'line_id': e.get('line_id'), 'kind': e['kind'], 'distance': float(e['distance']),
@@ -502,6 +510,7 @@ def report(plan, context, fitted: dict) -> dict:
                                                                                   plan.field.corridors)],
         'merged': [_merge_entry(e, context) for e in plan.net.merged],
         'collapsed': [_collapse_entry(e, context) for e in plan.net.collapsed],
+        'relieved': [_relief_entry(e, context) for e in plan.net.relieved],
         'tips': tips,
         'stubs': stubs,
         'snaps': cleaning['snaps'],
@@ -521,7 +530,7 @@ def dropped_report(lines) -> dict | None:
     events = list(lines.attrs.get('dropped_barrier_events', [])) if lines is not None else []
     if not events:
         return None
-    return {'corridors': [], 'merged': [], 'collapsed': [], 'tips': [], **_cleaning_entries(events), 'rings': [], 'fixed_nodes': [],
+    return {'corridors': [], 'merged': [], 'collapsed': [], 'relieved': [], 'tips': [], **_cleaning_entries(events), 'rings': [], 'fixed_nodes': [],
             'repair_rounds': 0, 'sites': 0, 'removed_nodes': 0, 'polish': {}}
 
 
@@ -556,6 +565,14 @@ def report_warnings(report: dict, sharp_angle: float) -> list:
                    f"{math.degrees(wedge.FAN_ANGLE):g} degrees) were merged over a short reach, so the barriers "
                    f"there share one line of faces for a short stretch (moved at most {moved:.3g}, within "
                    f"{wedge.DEVIATION:g} x resolution); see MeshGenerator.barrier_report['collapsed'].")
+    if report['relieved']:
+        relieved = report['relieved']
+        lines = sum(e['tip'] == "line" for e in relieved)
+        out.append(f"{len(relieved)} barrier bend(s) too sharp for exact faces among their neighbours were relieved: "
+                   f"the legs end where they are {tips.RELIEF_WIDTH:g} x resolution apart or more, joined by a chord"
+                   + (f", and {lines} keep one line to the tip along the bisector" if lines else "")
+                   + f" (moved at most {max(e['deviation'] for e in relieved):.3g}). A finer barrier resolution "
+                   "there keeps them exact; see MeshGenerator.barrier_report['relieved'].")
     if report['tips']:
         out.append(f"{len(report['tips'])} barrier spike tip(s) sharper than sharp_angle={sharp_angle:g} degrees "
                    f"are left without cell faces ({sum(t['length'] for t in report['tips']):.3g} of barrier "

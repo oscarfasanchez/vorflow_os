@@ -58,6 +58,7 @@ from shapely.geometry import LineString, Point
 
 from .lines import BarrierLine
 from .parallel import merge_parallel
+from .tips import relieve
 from .wedge import collapse_wedges
 
 COLLINEAR_SIN = 1e-9
@@ -71,7 +72,7 @@ SHARE_MAX = math.radians(150.0)
 SIDE_SHARE_MAX = math.radians(70.0)  # a leg-ray sector narrower than this may put the leg's site on the ray
 RAY_MIN = math.radians(25.0)         # a standard-line ray closer than this to a barrier leg is ignored
 FILL_ANGLE = math.radians(100.0)
-RUNG_ANGLE = math.radians(60.0)
+RUNG_ANGLE = math.radians(42.0)  # ladders below this; from about 45 degrees the corner rule centres connections better
 SHARP_ANGLE = math.radians(18.0)
 TIP_FRACTION = 0.45   # x lc: length of each leg of a sharp spike left without barrier faces
 TIP_LEG_FRACTION = 0.3  # ... at most this x the leg
@@ -135,6 +136,7 @@ class Network:
     corridors: list = dataclasses.field(default_factory=list)  # see ``corridor``
     collapsed: list = dataclasses.field(default_factory=list)  # acute wedges merged (``wedge``)
     merged: list = dataclasses.field(default_factory=list)     # close parallel stretches merged (``parallel``)
+    relieved: list = dataclasses.field(default_factory=list)   # bends relieved (``tips``)
 
 
 # ---------------------------------------------------------------------------
@@ -529,10 +531,14 @@ def replan_chord_nodes(net: Network, nodes: set, domain, standard: list, tol: fl
         net.plans[v] = node_plan(v, net.hard_xy, net.pieces, domain, standard, tol, True, set(), [])
 
 
-def build_network(lines: list, standard: list, domain, tol: float, sharp_angle: float = SHARP_ANGLE) -> Network:
+def build_network(lines: list, standard: list, domain, tol: float, sharp_angle: float = SHARP_ANGLE,
+                  tips: str | None = None, named: dict | None = None) -> Network:
     """Network of the cleaned barrier ``lines`` (stubs dropped, sharp spikes truncated) with node plans.
 
-    ``sharp_angle`` is in radians.
+    ``sharp_angle`` is in radians. With ``tips`` ("line" or "cut"), spikes are
+    not truncated up front; the bends in ``named`` ({apex: times named}) are
+    relieved instead (``tips`` module). With ``tips=None``, spikes sharper than
+    ``sharp_angle`` are truncated and nothing is relieved.
     """
     uncovered = []
     lines = drop_stubs([dataclasses.replace(b, xy=b.xy.copy(), keep=b.keep.copy()) for b in lines],
@@ -541,7 +547,12 @@ def build_network(lines: list, standard: list, domain, tol: float, sharp_angle: 
     on_boundary = functools.partial(_on_boundary, domain, tol=tol)
     lines, merged = merge_parallel(lines, domain, tol, sharp_angle, on_boundary)
     lines, collapsed = collapse_wedges(lines, domain, tol, sharp_angle, on_boundary)
-    lines, spikes = truncate_spikes(lines, standard, domain, tol, uncovered, sharp_angle)
+    if tips is None:
+        lines, spikes = truncate_spikes(lines, standard, domain, tol, uncovered, sharp_angle)
+        relieved = []
+    else:
+        lines, relieved = relieve(lines, named or {}, tips)
+        spikes = []
     hard, pieces, lc = nodes_and_pieces(lines)
     rungs, rung_ends = [], set()
     for apex, ua, ub, theta, t0, a, b in spikes:
@@ -553,4 +564,5 @@ def build_network(lines: list, standard: list, domain, tol: float, sharp_angle: 
     used = {p for r in rungs for p in r.pieces}
     plans = [node_plan(v, hard, pieces, domain, standard, tol, v in rung_ends, used, rungs)
              for v in range(len(hard))]
-    return Network(hard, pieces, lc, plans, rungs, lines, uncovered, collapsed=collapsed, merged=merged)
+    return Network(hard, pieces, lc, plans, rungs, lines, uncovered, collapsed=collapsed, merged=merged,
+                   relieved=relieved)

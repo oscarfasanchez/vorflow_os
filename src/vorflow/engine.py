@@ -60,6 +60,7 @@ from ._barrier import frames as _barrier_frames
 from ._barrier import network as _barrier_network
 from ._barrier import polish as _barrier_polish
 from ._barrier import sizing as _barrier_sizing
+from ._barrier import tips as _barrier_tips
 from ._features import (
     feature_lc,
     is_embedded,
@@ -854,18 +855,27 @@ class MeshGenerator:
             30% of the distance longer than one a unit away). The faces are
             graded over the whole network at once, across junctions, so this
             is a mesh-wide option rather than an ``add_line`` one.
-        sharp_angle (float): Spikes (a barrier folding back on itself)
-            sharper than this angle, in degrees, leave the last 0.45 x
-            resolution of each leg without cell faces: the tip lies inside
-            cells, so the cells there stay regular instead of becoming
-            slivers. The uncovered length and place are in
-            ``barrier_report``. Default 18 (an 18 degree apex cell has a
-            compactness of 0.36). Where two barrier legs of a junction (or a
+        sharp_angle (float): Where two barrier legs of a junction (or a
             barrier and the domain boundary) meet at less than this angle,
-            they share a short stem instead, moving them at most 0.1 x
+            in degrees, they share a short stem, moving them at most 0.1 x
             resolution (``barrier_report['collapsed']``). It acts wherever
             two barrier legs meet, also between different lines, so it is a
-            mesh-wide option.
+            mesh-wide option. Default 18. With ``barrier_tips=None``,
+            spikes (a barrier folding back on itself) sharper than this
+            also leave the last 0.45 x resolution of each leg without cell
+            faces (``barrier_report['tips']``).
+        barrier_tips (str or None): What happens at a bend of a barrier
+            line that the construction cannot make exact (a run of sharp
+            corners, a very narrow spike): the legs end where they are 0.5
+            x resolution apart, joined by a chord, and with ``"line"`` (the
+            default) one barrier line runs on from the chord to the tip
+            along the bisector, so the barrier keeps its reach; with
+            ``"cut"`` the tip lies inside cells. Only the bends the
+            construction names are changed, before Gmsh runs, each by as
+            little as makes the plan valid (``barrier_report['relieved']``,
+            one UserWarning). ``None`` keeps every bend as drawn: spikes
+            sharper than ``sharp_angle`` lose their tips and any other bend
+            that cannot be made exact raises ``BarrierMeshError``.
         barrier_polish_iterations (int): Lloyd steps that move the free mesh
             nodes within 3 x their local size of a barrier circle towards
             their cell centroids around the fixed barrier sites, kept out of
@@ -902,12 +912,16 @@ class MeshGenerator:
             at less than ``sharp_angle``, or fans of legs closer than 29
             degrees, merged over a short reach: ``kind`` "junction" or
             "boundary", ``line_ids``, ``angle``, ``reach``, ``deviation``,
-            the largest move of a line, at most 0.1 x its resolution), plus
+            the largest move of a line, at most 0.1 x its resolution),
+            ``relieved`` (bends changed by ``barrier_tips``: ``line_id``,
+            ``location``, ``angle``, ``width`` where the legs end, ``tip``
+            "line" or "cut", ``merged`` when one chord spans two bends, and
+            ``deviation``, the largest move of the line), plus
             ``repair_rounds``, ``sites``, ``removed_nodes`` (Gmsh nodes
             removed for the sites, not counting Gmsh's copies of the sites)
             and ``polish`` (``iterations``, ``residual``, ``rejected``,
             short faces before and after, and ``moved``, the nodes it
-            moved). Merged stretches, merged wedges, tips, stubs, snapped
+            moved). Merged stretches, merged wedges, relieved bends, tips, stubs, snapped
             ends and fixed-line nodes each raise one UserWarning with their
             count. When the cleaning dropped every barrier, the report holds
             only what it dropped.
@@ -929,7 +943,7 @@ class MeshGenerator:
                  heal_fix_degenerated=True, heal_fix_small_edges=True,
                  heal_fix_small_faces=True, diagnose=False,
                  conceptual_mesh=None, barrier_gradation=_barrier_sizing.GRADATION,
-                 sharp_angle=math.degrees(_barrier_network.SHARP_ANGLE),
+                 sharp_angle=math.degrees(_barrier_network.SHARP_ANGLE), barrier_tips="line",
                  barrier_polish_iterations=_barrier_polish.ITERATIONS):
         self.conceptual_mesh = conceptual_mesh
         self.background_lc = background_lc
@@ -948,8 +962,13 @@ class MeshGenerator:
         self.diagnose = bool(diagnose)
         self.barrier_gradation = _positive_option(barrier_gradation, "barrier_gradation")
         self.sharp_angle = _positive_option(sharp_angle, "sharp_angle")
-        if not self.sharp_angle < 60.0:
-            raise ValueError(f"sharp_angle must be below 60 degrees (a ladder takes over there). Got {sharp_angle!r}.")
+        rung_angle = math.degrees(_barrier_network.RUNG_ANGLE)
+        if not self.sharp_angle < rung_angle:
+            raise ValueError(f"sharp_angle must be below {rung_angle:g} degrees (a ladder takes over there). "
+                             f"Got {sharp_angle!r}.")
+        if barrier_tips is not None and barrier_tips not in _barrier_tips.TIP_MODES:
+            raise ValueError(f"barrier_tips must be one of {_barrier_tips.TIP_MODES} or None. Got {barrier_tips!r}.")
+        self.barrier_tips = barrier_tips
         _lloyd.validate_settings(barrier_polish_iterations, 1.0, 0.0, prefix="barrier_polish_")
         self.barrier_polish_iterations = int(barrier_polish_iterations)
 
@@ -2940,7 +2959,7 @@ class MeshGenerator:
         """(plan, context) of the barrier sites, or (None, None) without barriers; see ``vorflow._barrier``."""
         plan, context = _barrier_frames.prepare(
             clean_polys, clean_lines, clean_points, float(self.background_lc), _feature_fields,
-            self.barrier_gradation, self.sharp_angle,
+            self.barrier_gradation, self.sharp_angle, self.barrier_tips,
         )
         if plan is not None:
             logger.info(f"Barrier construction: {len(plan.layout.sites)} sites on {len(plan.layout.segments)} "
