@@ -224,8 +224,11 @@ Before meshing, `ConceptualMesh.generate()` cleans the barrier lines:
 It also lists what the construction changed or gave up while placing the
 faces. Each kind raises one `UserWarning` with its count:
 
-- the tip of a spike sharper than `sharp_angle` (18 degrees by default) is
-  left inside a few cells without faces (`tips`);
+- a bend of a spike or zigzag that cannot be made exact is changed, and only
+  that bend: the legs end where they are 0.5 x `resolution` apart, joined by
+  a chord, and one line runs on to the tip along the bisector
+  (`barrier_tips="line"`, the default) or the tip lies inside cells
+  (`"cut"`) (`relieved`). A single corner is exact down to about 10 degrees;
 - barrier legs that meet at a junction, or leave the domain boundary or a
   hole, at less than `sharp_angle` share a short stem instead of bounding a
   sliver, and so do fans of legs closer than 29 degrees (`collapsed`). No
@@ -252,9 +255,9 @@ nodes over. If a node of one is removed anyway, `generate()` warns and
 
 ```python
 mesher = MeshGenerator(background_lc=100, conceptual_mesh=blueprint,
-                       sharp_angle=18, barrier_gradation=0.3)
+                       sharp_angle=18, barrier_tips="line", barrier_gradation=0.3)
 mesher.generate()
-print(mesher.barrier_report["snaps"], mesher.barrier_report["tips"])
+print(mesher.barrier_report["snaps"], mesher.barrier_report["relieved"])
 ```
 
 When the faces would have to be far shorter than `resolution`, `generate()`
@@ -266,9 +269,12 @@ boundary is dropped there by the same tolerance; next to the boundary, a
 point or a fixed line, the message gives the barrier `resolution` at which
 the faces would fit. Where barrier legs meet or fold back at angles too
 narrow for cells between them (a narrow spike or zigzag, or many legs at one
-point), `simplify_tolerance` of about `resolution / 8` removes digitising
-noise, and otherwise `quad_buffer=True` on the barrier meshes it with a
-structured strip of cells instead, whose faces are not exact.
+point) and `barrier_tips=None`, or where a bend has legs shorter than
+0.5 x `resolution`, the message asks to resample digitising noise at the
+line's resolution (`vorflow.utils.resample_geometry(line, resolution)`) or to
+set `simplify_tolerance`, and otherwise suggests `quad_buffer=True`, which
+meshes the barrier with a structured strip of cells whose faces are not
+exact.
 
 **Breaking:** a point feature, such as a well, on a barrier or at its end
 (closer than about 0.05 x `resolution`) now raises `BarrierMeshError`,
