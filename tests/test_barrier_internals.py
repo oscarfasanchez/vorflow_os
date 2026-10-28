@@ -513,3 +513,12 @@ def test_plan_relieves_only_when_asked_and_only_where_needed():
                          tip_mode="line")
     assert 0 < len(plan.net.relieved) < 5  # not every bend of the zigzag
     assert _plan(STRAIGHT).net.relieved == []
+
+
+def test_short_leg_bends_are_noise_not_corners():
+    # a wiggle with legs under MIN_LEG x lc is left to the error message (resample the line), not relieved
+    wiggle = [(40.0, 100.0), (100.0, 100.0), (101.0, 102.0), (102.0, 100.0), (200.0, 100.0)]
+    found = tips.bends([_line(wiggle)])
+    assert (101.0, 102.0) not in found and (100.0, 100.0) not in found
+    corner = _corner(30.0)
+    assert tuple(np.asarray(corner[1], dtype=float)) in tips.bends([_line(corner)])

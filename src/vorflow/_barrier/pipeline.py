@@ -119,13 +119,17 @@ def advice(cause: str, h: float) -> str:
                    f"from the barrier, or use {finer}",
         "fixed line": "an embedded line, a zone edge or a quad-buffer strip runs that close to the barrier "
                       f"without crossing it. Move it away from the barrier, or use {finer}",
-        "short piece": "the barrier has vertices that close together (a densely digitised line or a short "
-                       "zigzag). Set simplify_tolerance on the barrier, at least that distance, to remove them",
+        "short piece": "the barrier has vertices that close together (a densely digitised or noisy line, or a "
+                       "short zigzag). Resample the line at its resolution before adding it "
+                       "(vorflow.utils.resample_geometry(line, resolution): every vertex stays on the line, so it "
+                       "moves by about the noise), or set simplify_tolerance on the barrier, at least that distance",
         "size field": "the size field is that fine there (a finer zone, line or point next to the barrier). Use a "
                       "barrier resolution closer to it",
     }.get(cause, "barrier legs meet or fold back there at angles too narrow for cells between them (a narrow "
-                 "spike or zigzag, or many legs at one point). If that is digitising noise, simplify_tolerance of "
-                 f"about resolution / 8 removes it; otherwise {QUAD_BUFFER_ADVICE}")
+                 "spike or zigzag, or many legs at one point). If that is digitising noise, resample the line at "
+                 "its resolution before adding it (vorflow.utils.resample_geometry(line, resolution): every vertex "
+                 "stays on the line, so it moves by about the noise) or set simplify_tolerance of about resolution / 8; "
+                 f"otherwise {QUAD_BUFFER_ADVICE}")
 
 
 def _fail(reason: str, points: np.ndarray, origin: np.ndarray) -> None:

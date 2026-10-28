@@ -19,7 +19,9 @@ A corner named again gets RELIEF_GROWTH x its width. A line tip named more
 than LINE_TRIES times keeps only its chord. Two relieved corners that would
 leave less than MIN_LEFT x lc of their shared leg get one chord across both
 (each line tip then runs from its nearest point on that chord). Every corner
-is recorded with its place, angle, width, mode and largest move.
+is recorded with its place, angle, width, mode and largest move. A bend with
+a leg shorter than MIN_LEG x lc is not relieved: that is digitising noise or
+dense digitising, for which the error asks to resample the line instead.
 """
 from __future__ import annotations
 
@@ -39,12 +41,14 @@ MIN_LEFT = 0.5              # x lc: two reliefs that would leave less of their s
 LINE_TRIES = 3              # a line tip named more often than this keeps only its chord
 RELIEF_TRIES = 8            # a corner named more often than this is not relieved again
 REACH = 3.0                 # x lc: a failing spot is put down to the nearest bend this close
+MIN_LEG = 0.5               # x lc: a bend with a shorter leg is digitising detail, not a corner to relieve
 TIP_MODES = ("line", "cut")
 
 
 def bends(lines: list) -> dict:
-    """{apex: (line, vertex, inside angle)} of every interior vertex of a line that no other line touches
-    and that is not must-keep (a crossing, a boundary or standard-line touch, a stem end)."""
+    """{apex: (line, vertex, inside angle)} of every interior vertex of a line that no other line touches,
+    that is not must-keep (a crossing, a boundary or standard-line touch, a stem end) and whose legs are both
+    at least MIN_LEG x lc (shorter ones are noise or dense digitising, which the error message is for)."""
     counts = {}
     for b in lines:
         for p in map(tuple, b.xy):
@@ -54,9 +58,9 @@ def bends(lines: list) -> dict:
         keep = _keep(b)
         for i in range(1, len(b.xy) - 1):
             p = tuple(b.xy[i])
-            if counts[p] != 1 or keep[i]:
-                continue
             u, w = b.xy[i - 1] - b.xy[i], b.xy[i + 1] - b.xy[i]
+            if counts[p] != 1 or keep[i] or min(np.hypot(*u), np.hypot(*w)) < MIN_LEG * b.lc:
+                continue
             theta = math.acos(float(np.clip(u @ w / (np.hypot(*u) * np.hypot(*w)), -1.0, 1.0)))
             out[p] = (k, i, theta)
     return out

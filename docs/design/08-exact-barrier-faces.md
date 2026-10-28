@@ -56,11 +56,24 @@ closed form, and the rule is checked before meshing (`validate.py`).
 crossing, boundary end or standard-line crossing, the first site of each leg
 sits on the node's circle at an angle from the leg. Neighbouring legs then
 either share one site or keep a gap between their sites. In a wedge narrower
-than 60 degrees, a row of cells is laid across the wedge, with sites on its
-bisector. A spike sharper than `sharp_angle` (18 degrees by default) loses the
-last 0.45 x `resolution` of each leg, or 0.3 of the leg if that is shorter. The
-tip then lies inside regular cells instead of between long thin ones, and it
-is reported.
+than 42 degrees, a row of cells is laid across the wedge, with sites on its
+bisector. A site on the bisector reaches each leg at sigma cos(theta / 2) from
+the apex while its face there is centred near sigma / cos(theta / 2), so in
+wider wedges the connections cross their faces near an end or off them; from
+about 45 degrees the corner rule does better.
+
+**Relieved bends** (`tips.py`). A single corner is exact down to about 10
+degrees, but a run of sharp corners with short legs can need faces below the
+floor. The repair loop then names the bends it cannot make (floor causes
+"junction" and "repair") and relieves only those, and plans again; nothing is
+meshed until the plan is valid. The legs end where they are 0.5 x
+`resolution` apart (never more than 0.45 of a leg), joined by a chord; with
+`barrier_tips="line"` one line runs on from the chord to the tip along the
+bisector, so the barrier keeps its reach, and with `"cut"` the tip lies inside
+cells. A bend named again gets 1.5 x the width; two bends that would leave
+less than 0.5 x `resolution` of a shared leg get one chord. With
+`barrier_tips=None`, a spike sharper than `sharp_angle` (18 degrees) loses the
+last 0.45 x `resolution` of each leg instead, and other bends raise.
 
 **Merges** (`parallel.py`, `wedge.py`). Two inputs leave slivers that no
 choice of face lengths can fill with regular cells, so the lines are moved a
@@ -171,7 +184,7 @@ and 0.35 s.
 
 ## Public API
 
-- `MeshGenerator(barrier_gradation=0.3, sharp_angle=18, barrier_polish_iterations=20)`.
+- `MeshGenerator(barrier_gradation=0.3, sharp_angle=18, barrier_tips="line", barrier_polish_iterations=20)`.
   These are mesh-wide options because faces are graded, and spikes found,
   across lines.
 - `ConceptualMesh(keep_close_rings=False)`: keep a `hex_ring` next to a
@@ -221,14 +234,18 @@ barrier.
   0.1 x `resolution`, and the faces there carry both barriers. Both are
   reported, but a model where two close barriers must stay separate needs a
   finer `resolution` there (the merge gap scales with it).
+- **Relieved bends move the lines.** A relieved bend moves its line by up to
+  half the relief width (0.25 x `resolution` the first time), and with
+  `barrier_tips="cut"` its tip is left inside cells. Both are reported; a
+  finer `resolution` there keeps the bend exact.
 - **Inputs that still raise.** Two barriers that end together at a few
   degrees (a narrow V of two lines, which the spike rule leaves alone), a
   line folding back on itself over a fraction of `resolution`, 16 legs at
   one point at a fine `resolution`, and dense digitising noise at
   `simplify_tolerance=0` still raise `BarrierMeshError`. The message names
-  the fold and gives `simplify_tolerance` of about `resolution / 8` for
-  noise and `quad_buffer=True` otherwise, which meshes such a barrier with a
-  structured strip (not exact faces).
+  the fold and gives `quad_buffer=True` for it; for noise it asks to
+  resample the line at its resolution (`vorflow.utils.resample_geometry`)
+  or to set `simplify_tolerance`.
 - **Near-miss ends at tolerance 0.** An end that stops just short of another
   barrier, but further away than the snap distance, meshes exactly but with a
   cluster of small faces, or raises; the error then gives the

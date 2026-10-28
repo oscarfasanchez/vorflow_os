@@ -44,11 +44,21 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sites. `MeshGenerator.barrier_lines` holds the lines
   the faces follow, `barrier_circles` the empty circles and `node_is_site`
   marks the nodes placed on them.
-- `MeshGenerator(barrier_gradation=0.3, sharp_angle=18,
+- `MeshGenerator(barrier_gradation=0.3, sharp_angle=18, barrier_tips="line",
   barrier_polish_iterations=20)`. `barrier_gradation` limits how fast the
   barrier face length changes along the barrier network. `sharp_angle` is
-  the angle, in degrees, below which a spike's tip is left without faces
-  and two legs of a junction share a short stem. `barrier_polish_iterations`
+  the angle, in degrees, below which two legs of a junction share a short
+  stem. `barrier_tips` sets what happens at a bend of a barrier line that
+  the construction cannot make exact (a run of sharp corners, a very narrow
+  spike): only those bends are changed, before Gmsh runs. The legs end where
+  they are 0.5 x `resolution` apart, joined by a chord; with `"line"` one
+  barrier line runs on to the tip along the bisector, so the barrier keeps
+  its reach, and with `"cut"` the tip lies inside cells. Two such bends on
+  a short shared leg get one chord. They are listed in
+  `barrier_report["relieved"]`. `barrier_tips=None` keeps every bend as
+  drawn: spikes sharper than `sharp_angle` lose their tips and any other
+  bend that cannot be made exact raises `BarrierMeshError`.
+  `barrier_polish_iterations`
   sets the Lloyd steps that move the free mesh nodes within 3 x their local
   size of the barrier circles; nodes further away keep their Gmsh
   positions.
@@ -127,11 +137,16 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   joined, keeping junctions, crossings and ends, and uses the fewest
   straight pieces within the tolerance. Before, a per-line Douglas-Peucker
   pass ran first and could pull a splay off the fault it starts on.
-- A spike sharper than `sharp_angle` (18 degrees) leaves the last
-  0.45 x `resolution` of each leg without faces, so the cells at the tip
-  stay regular. The tip is listed in `barrier_report["tips"]`.
-  `MeshGenerator.generate()` raises one `UserWarning` with the count of
-  spike tips, one for dropped stubs, one for snapped or trimmed ends, one
+- A single sharp corner is made exact down to about 10 degrees, with no
+  part of the barrier left out. Its smallest cells are 2-3 times larger
+  than when the tip was cut off at a fixed 0.45 x `resolution` (still the
+  rule with `barrier_tips=None`, listed in `barrier_report["tips"]`).
+- Ladders (a row of cells across a narrow wedge) are used below 42 degrees
+  instead of 60. From about 45 degrees the corner rule puts the connections
+  near the middle of their faces: a regular 45-degree zigzag had 36
+  connections in the outer sixth of their face or off it, and now has 8.
+- `MeshGenerator.generate()` raises one `UserWarning` with the count of
+  relieved bends, one for spike tips, one for dropped stubs, one for snapped or trimmed ends, one
   for removed nodes of fixed lines, one for merged stretches, one for merged
   junctions and one for dense corridors; the details are in
   `barrier_report`.
