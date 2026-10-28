@@ -16,9 +16,11 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   polygons and narrow gaps. Each is measured against the local mesh size `h`
   as `ratio = distance / h` and graded `"error"` or `"warning"`; one defect
   site gives one row of a GeoDataFrame. Only embedded features are checked,
-  on the cleaned features before densification. The registered features and
-  earlier `generate()` results are left unchanged. See "Checking inputs
-  before meshing" in the user guide.
+  on the cleaned features before densification. A barrier end that runs
+  alongside another barrier or the domain outline is reported as a narrow
+  gap, not a near miss, since the barrier construction gives that gap one
+  row of cells. The registered features and earlier `generate()` results are
+  left unchanged. See "Checking inputs before meshing" in the user guide.
 - The release workflow creates the GitHub Release for each final tag once it
   is on PyPI, with notes from the tag's changelog section and the wheel and
   sdist attached (`scripts/release_notes.py`). A tag without a changelog
@@ -31,10 +33,13 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   point, a fixed line, closely spaced vertices, or legs meeting at too
   narrow an angle) and what helps for that cause: a `simplify_tolerance`
   that snaps the end or drops the part, the barrier `resolution` at which
-  the faces fit next to the boundary, a point or a fixed line, or
-  `quad_buffer=True` where nothing else does. A geometric
-  failure inside the construction is raised as `BarrierMeshError` too,
-  asking for a report. A point feature (or a kept hex-ring seed) on a
+  the faces fit next to the boundary, a point or a fixed line (rounded down,
+  with a 10% margin, so the value given meshes), the `simplify_tolerance`
+  that removes a short fold, measured from the fold itself, or
+  `quad_buffer=True` where nothing else does. Where the construction made
+  the pieces short (a merged junction), the message says the input is not
+  at fault and asks for a report. A geometric failure inside the
+  construction is raised as `BarrierMeshError` too, asking for a report. A point feature (or a kept hex-ring seed) on a
   barrier raises it as well (see Changed).
 - `MeshGenerator.barrier_report`: a dict that lists, each with its place,
   what the barrier construction changed or gave up. The entries are ends
@@ -45,9 +50,9 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   domain boundary (`on_boundary`), hex rings dropped because a barrier is
   too close (`rings`), nodes of standard lines, zone edges or quad-buffer
   strips that had to be removed (`fixed_nodes`), narrow gaps given one
-  shared row of cells (`corridors`, with the cells of the row), stretches of
-  close parallel barriers merged onto their midline (`merged`) and narrow
-  junctions and boundary exits merged over a short reach (`collapsed`).
+  shared row of cells (`corridors`, with the gap, how each end closes and
+  the cells of the row) and narrow junctions and boundary exits merged over
+  a short reach (`collapsed`).
   `polish` reports the Lloyd polish, with the nodes it `moved`.
   `removed_nodes` counts the Gmsh nodes
   removed for the barrier sites, not counting Gmsh's own copies of the
@@ -84,9 +89,43 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The notebook `examples/barrier_meshing.ipynb` shows how barrier faces are
   placed, what `barrier_report` lists and the remaining limits. The README
   has a new "Barriers" section.
+- `GapField(cells_across=3, growth_factor=None, min_size=None)`, passed as
+  `MeshGenerator(gap_field=...)`, refines narrow gaps between embedded
+  features to about `cells_across` cells. The gap is read off an approximate
+  medial axis of the feature linework (shapely + SciPy, `vorflow._gap`), with
+  separation measured along the noded linework so junctions are not gaps, and
+  a polygon's own narrow neck counts. The size is gap / `cells_across`,
+  graded at `growth_factor`, and combined with the model's own fields under
+  the usual `Min`. Where no gap is narrower than `cells_across` times the
+  local size, no field is created and the mesh is unchanged. `min_size` (in
+  model units, default 0.1 x `background_lc`) floors the size, with a warning
+  that names each place where it leaves fewer than `cells_across` cells.
+  `MeshGenerator.diagnostics["gap_field"]` summarises the estimate. With
+  barriers, the barrier faces follow the `GapField` sizes (read from the same
+  estimate as the Gmsh field), and a gap where it asks for more than one cell
+  across, between two barriers or a barrier and the boundary, gets no shared
+  row of cells: each barrier gets its own faces with `cells_across` cells
+  between them. The points vorflow places along a barrier are not gap
+  walls. Faces too short to build raise `BarrierMeshError` with a `min_size`
+  that works.
+- `gap_wall=` on `ConceptualMesh.add_polygon`, `add_line` and `add_point`
+  (default True): with `gap_wall=False` the feature is never a side of a gap
+  for `GapField`, e.g. a boundary-condition line just inside the domain edge.
 
 ### Changed
 
+- **Behaviour change, also for models without barriers:** a cell whose
+  generator lies on the edge between zones now takes the one of those zones
+  holding most of its area, when it holds at least 0.1 more of the cell than
+  the zone of highest `z_order`. Before, `z_order` alone decided, so a cell
+  at a zone corner, or a lopsided cell next to a barrier close to a zone
+  edge, could take a zone holding as little as 5% of it. Cells about a
+  straight zone edge split about evenly and keep the `z_order` zone. Nodes
+  are unchanged; only the `zone_id` of cells on zone edges can change. In a
+  300 m model with one inner zone and no barriers, 6-13 cells at the zone
+  corners change zone, and the smallest share of a cell in its own zone
+  rises from 0.18 to 0.45. A cell still never takes a zone its generator is
+  not in.
 - Barriers (`add_line(..., is_barrier=True)`) are now meshed so that every
   barrier segment is exactly one Voronoi cell face. vorflow cuts each
   barrier into segments and draws a circle around each segment end. It
@@ -102,31 +141,46 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   of several edges from 529 to 0. The mean worst compactness of the cells
   next to a barrier rose from 0.59 to 0.76, with about 20% fewer cells near
   the barriers. Meshes of models with barriers change: the node positions
-  and counts near every barrier differ from 0.3.0.
+  and counts near every barrier differ from 0.3.0. Meshing a model with
+  barriers takes about 1.7 x as long as in 0.3.0 (12.7 s against 7.4 s over
+  23 benchmark cases, 1.5-2.3 x per case).
 - **Breaking:** a point feature (or a kept hex-ring seed) on a barrier or
   at its end, closer than about 0.05 x the barrier's `resolution`, now
   raises `BarrierMeshError` naming the point and the barrier. In 0.3.0 it
   meshed, with mirrored generators and cut cells around it. Move the point
   off the line, or, where it marks the barrier's end, end the barrier that
   far short of it.
-- Two barriers closer than 0.25 x their resolution over a stretch are moved
-  onto their midline there, which carries the faces of both (each line
-  moves at most half the gap). `barrier_lines` lists those faces under both
-  `line_id`s; give the HFB there the combined properties of both barriers.
-  One `UserWarning` gives the count. Two nearly parallel barriers further
-  apart, up to about 1.2 x their resolution, share one row of cells, with
-  generators on the midline between them. A barrier closer than about
-  0.6 x its resolution to the domain boundary gets the same treatment, with
-  the generators on the boundary. Before, such gaps were filled with thin
-  cells or cut cells. A row of cells shorter than 0.5 x resolution raises a
-  `UserWarning` with the cell count.
+- Two nearly parallel barriers closer than about 1.2 x their resolution
+  share one row of cells (a corridor), with generators on the midline
+  between them; no barrier is moved. Along the gap, the cells are at most
+  the resolution and at most 3 x the gap long, so the spacing shrinks
+  smoothly as the gap narrows, with no jump at any gap width, and flow
+  along the gap stays connected. The 3:1 limit keeps the cells of the row
+  at a compactness of about 0.59 (a 3:1 rectangle), and the cells around it
+  above 0.6. The same applies to the legs of one barrier that run close
+  together: a U-turn, a thin loop, the two strands of a lens. A corridor
+  follows a wavy gap, turns round the bend of a U-turn and continues past
+  a fork. A well, point or fixed line in the gap keeps the corridor out;
+  the faces there are then made short enough for cells on each side. A barrier
+  closer than about 0.6 x its resolution to the domain boundary gets the
+  same treatment, with the generators on the boundary. Before, such gaps
+  were filled with thin cells or cut cells. Rows of cells shorter than
+  0.5 x resolution raise one `UserWarning` with their cell count and the
+  count the resolution alone would give; the cells of each row are in
+  `barrier_report["corridors"]`. A narrow gap costs cells: about
+  `length / (3 x gap)` in the row, and about ten times that in all once the
+  mesh around it is graded down.
 - Barrier legs that meet at a junction (a splay, a T-branch, a crossing),
   or leave the domain boundary or a hole edge, at less than `sharp_angle`
   share a short stem along the bisector and then part at 1.5 x
   `sharp_angle`, so no sliver is left between them; fans and stars whose
   neighbouring legs are closer than 29 degrees are merged the same way. No
   point of a line moves more than 0.1 x its resolution. One `UserWarning`
-  gives the count; the details are in `barrier_report["collapsed"]`.
+  gives the count; the details are in `barrier_report["collapsed"]`. This
+  also changes meshes that worked before, with 10-30% more cells near the
+  merged legs (a crossing at 10 degrees went from 568 to 733 cells), and a
+  barrier leaving the boundary at 3 degrees now starts up to 1.9 x its
+  resolution further along the boundary.
 - `ConceptualMesh.generate()` cleans barrier lines before meshing. An end
   within `max(connectivity_tolerance, simplify_tolerance)` of another
   barrier, a barrier vertex or the domain boundary is snapped onto it, and
@@ -134,7 +188,9 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   crossings become shared vertices. A vertex closer than 0.1 x
   `resolution` to its neighbour is dropped as digitising noise, with a
   `UserWarning` giving the largest move, even when `simplify_tolerance` is
-  0. A branch that snapping collapses onto the barrier it starts on is
+  0. A vertex is kept where dropping it would leave a fold sharper than
+  18 degrees, so the corner of a narrow U-turn stays. A branch that
+  snapping collapses onto the barrier it starts on is
   dropped as a stub. An end is not snapped onto a barrier it runs
   alongside. A barrier part lying on the domain boundary is dropped with a
   `UserWarning`, since a barrier there separates nothing, and the end left
@@ -156,8 +212,8 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   near the middle of their faces: a regular 45-degree zigzag had 36
   connections in the outer sixth of their face or off it, and now has 8.
 - `MeshGenerator.generate()` raises one `UserWarning` with the count of
-  relieved bends, one for spike tips, one for dropped stubs, one for snapped or trimmed ends, one
-  for removed nodes of fixed lines, one for merged stretches, one for merged
+  relieved bends, one for spike tips, one for dropped stubs, one for snapped
+  or trimmed ends, one for removed nodes of fixed lines, one for merged
   junctions and one for dense corridors; the details are in
   `barrier_report`.
 - Next to a barrier, the barrier faces are made shorter so that the nodes of
@@ -172,6 +228,15 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sites are fitted. Quad buffers on barriers
   (`quad_buffer=True`) still use the mirror generators and the cut, so they
   can still leave cut cells and faces of several edges.
+- Embedding points (point features, hex-ring seeds, barrier straddle pairs)
+  now scales linearly with their number. Each point's owning surface was
+  found with one `gmsh.model.isInside` call, whose cost grows with the points
+  already in the surface, so the step was quadratic: 2.1 s of a 4.8 s
+  `generate()` at 10⁴ points. The owner now comes from the fragmented
+  topology (the surface holding the point as an interior vertex), with
+  `isInside` kept for points on a boundary or in no surface, and points are
+  embedded with one `embed` call per surface. Meshes are unchanged: nodes and
+  `node_tags` are identical on all benchmark cases.
 
 ### Deprecated
 
@@ -195,23 +260,9 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   mesh node of its own, so its connections were not at right angles to its
   faces. A face of several edges is a bent face shared by two cells.
   MODFLOW 6 DISV takes the connection width from its first edge only, so on
-  two benchmark cases the flow through an HFB on these faces was 40-60%
-  lower than on a finer reference grid.
-
-### Changed
-
-- Embedding points (point features, hex-ring seeds, barrier straddle pairs)
-  now scales linearly with their number. Each point's owning surface was
-  found with one `gmsh.model.isInside` call, whose cost grows with the points
-  already in the surface, so the step was quadratic: 2.1 s of a 4.8 s
-  `generate()` at 10⁴ points. The owner now comes from the fragmented
-  topology (the surface holding the point as an interior vertex), with
-  `isInside` kept for points on a boundary or in no surface, and points are
-  embedded with one `embed` call per surface. Meshes are unchanged: nodes and
-  `node_tags` are identical on all benchmark cases.
-
-### Fixed
-
+  two benchmark cases the flow through an HFB on these faces was 42-56%
+  lower than on a 4 x finer grid. With exact faces it is within 1% of the
+  finer grid (24.84 against 24.97 on `real_faults`).
 - `boundary_centering="inset_mirror"` no longer leaves uncovered strips (and
   MODFLOW 6 disconnected faces) along irregular boundaries
   ([#71](https://github.com/rhugman/vorflow/issues/71)). At a reflex boundary

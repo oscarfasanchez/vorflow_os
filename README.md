@@ -200,7 +200,11 @@ empty-circle rule of the UPR method
 `MeshGenerator.generate()` places these generators and checks the rule
 before Gmsh runs. As a result, each barrier segment is one straight face with
 an orthogonality error of 0. No cell has to be cut, also at corners,
-junctions, crossings and on finely drawn curves.
+junctions, crossings and on finely drawn curves. This does not hold for two
+kinds of barrier, which still go through the tessellator's mirror generators
+and cut, so their faces are not always exact: a barrier with
+`quad_buffer=True`, and a barrier added with `embed=False`, which only sets
+the mesh size.
 
 Before meshing, `ConceptualMesh.generate()` cleans the barrier lines:
 
@@ -218,7 +222,9 @@ Before meshing, `ConceptualMesh.generate()` cleans the barrier lines:
 - with `simplify_tolerance` above 0, the line is simplified after the
   junctions are joined, so a splay stays on the fault it starts on;
 - a vertex closer than 0.1 x `resolution` to its neighbour is dropped as
-  digitising noise, with a warning, even when `simplify_tolerance` is 0.
+  digitising noise, with a warning, even when `simplify_tolerance` is 0. A
+  vertex is kept where dropping it would leave a fold sharper than
+  18 degrees, so the corner of a narrow U-turn stays.
 
 `MeshGenerator.barrier_report` lists each of these changes with its place.
 It also lists what the construction changed or gave up while placing the
@@ -233,17 +239,18 @@ faces. Each kind raises one `UserWarning` with its count:
   hole, at less than `sharp_angle` share a short stem instead of bounding a
   sliver, and so do fans of legs closer than 29 degrees (`collapsed`). No
   point of a line moves more than 0.1 x `resolution`;
-- two barriers closer than 0.25 x `resolution` over a stretch are moved onto
-  their midline there (`merged`), which moves each by at most half the gap.
-  One line of faces then carries both barriers, and `barrier_lines` lists
-  it under both `line_id`s. Give the HFB on those faces the combined
-  properties of both barriers;
-- two nearly parallel barriers further apart, up to about
-  1.2 x `resolution`, share one row of cells between them, and so does a
-  barrier within about 0.6 x `resolution` of the domain boundary
-  (`corridors`). The cells of the row are at most 1.5 x the gap long, so a
-  narrow gap adds cells; a row of cells shorter than 0.5 x `resolution`
-  raises a warning with the cell count.
+- two nearly parallel barriers closer than about 1.2 x `resolution` share
+  one row of cells between them, and so do the close legs of one barrier (a
+  U-turn, a thin loop, a lens) and a barrier within about 0.6 x `resolution`
+  of the domain boundary (`corridors`). No barrier is moved, and flow along
+  the gap stays connected. The cells of the row are at most `resolution`
+  and at most 3 x the gap long, so a narrow gap adds cells: about
+  `length / (3 x gap)` in the row, and the mesh around it is graded down to
+  match. Rows of cells shorter than 0.5 x `resolution` raise one warning
+  with their cell count. With `MeshGenerator(gap_field=...)`, a gap where
+  `GapField` asks for more than one cell across gets no corridor: each
+  barrier gets its own faces, sized by `GapField`, with its rows of cells
+  between them (see Narrow gaps).
 
 Check the report before you build HFB input.
 
@@ -266,14 +273,16 @@ the faces that short there and what helps for that cause. For example: an
 end that nearly meets another barrier is snapped onto it by a
 `simplify_tolerance` of at least the gap; a barrier running close to the
 boundary is dropped there by the same tolerance; next to the boundary, a
-point or a fixed line, the message gives the barrier `resolution` at which
-the faces would fit. Where barrier legs meet or fold back at angles too
-narrow for cells between them (a narrow spike or zigzag, or many legs at one
-point) and `barrier_tips=None`, or where a bend has legs shorter than
-0.5 x `resolution`, the message asks to resample digitising noise at the
-line's resolution (`vorflow.utils.resample_geometry(line, resolution)`) or to
-set `simplify_tolerance`, and otherwise suggests `quad_buffer=True`, which
-meshes the barrier with a structured strip of cells whose faces are not
+point or a fixed line, the message gives a barrier `resolution` at which
+the faces fit. Where barrier legs meet or fold back at angles too narrow for
+cells between them (a narrow spike or zigzag, or many legs at one point),
+`barrier_tips` relieves only those bends (see above). With
+`barrier_tips=None`, or where a bend has legs shorter than 0.5 x
+`resolution`, the message gives the `simplify_tolerance` that removes a short
+fold there, or asks to resample the line at its resolution
+(`vorflow.utils.resample_geometry(line, resolution)`), if it is digitising
+noise, and otherwise `quad_buffer=True` on the barrier
+meshes it with a structured strip of cells instead, whose faces are not
 exact.
 
 **Breaking:** a point feature, such as a well, on a barrier or at its end
@@ -372,6 +381,74 @@ than 2 x `resolution`, or when a finer size field reaches the ring (below
 0.9 x `resolution`, e.g. inside a zone with a finer resolution than the
 point's). After meshing, `MeshGenerator.diagnostics["hex_rings"]` records
 whether each ring came out intact.
+
+### Narrow gaps
+
+Where two features run close together, the mesh between them is only as fine
+as their resolutions and the background make it, so a narrow gap can end up
+one or two cells across. `GapField` finds the gaps between embedded features
+and caps the size there at gap / `cells_across`. It is model-wide, so it goes
+on the mesh generator rather than on a feature:
+
+```python
+from vorflow import GapField
+
+mesher = MeshGenerator(
+    background_lc=40,
+    conceptual_mesh=blueprint,
+    gap_field=GapField(cells_across=3, min_size=2.0),
+)
+mesher.generate()
+print(mesher.diagnostics["gap_field"])  # field_created, min_gap, n_floor_bound, ...
+```
+
+- **What is a gap.** The local distance between embedded polygon
+  boundaries, lines and points, measured on an approximate medial axis of
+  their linework. Separation is measured along the linework, so a junction or
+  corner wider than about 30 degrees is not a gap, while a polygon's own
+  narrow neck is. Field-only (`embed=False`) features are never a side of a
+  gap. Barrier, straddle and quad-buffered lines count as plain lines (the
+  points vorflow places along a barrier do not).
+- **Barriers.** Where `GapField` asks for more than one cell across a gap
+  between two barriers, or between a barrier and the domain boundary, that
+  gap gets no shared row of cells (see Barriers): each barrier gets its own
+  faces, no longer than the `GapField` size there, with the rows of cells
+  between them. Elsewhere along a barrier the faces follow the `GapField`
+  size too, so the cells along it match Gmsh's. If the faces would have to
+  be far shorter than the barrier's `resolution`, `generate()` raises
+  `BarrierMeshError` and gives a `min_size` that works.
+- **Size.** Across a gap of width w the size is `w / cells_across`, graded
+  away from it at `growth_factor` (default 1.2), and Gmsh still takes the
+  smallest of this and the model's own fields. With `cells_across=3`, about
+  three cells lie wholly between the two walls, plus the cells centred on
+  them.
+- **No narrow gap, no change.** Only gaps narrower than `cells_across` times
+  the local size (the background, or a feature's default size field where it
+  is finer) are refined. When there are none, no Gmsh field is added and the
+  mesh is identical to one built without `gap_field`.
+- **`min_size`** (model units, default 0.1 x `background_lc`) is the floor on
+  the size. It is needed because wedges, such as a line meeting the boundary
+  at under about 30 degrees, narrow to zero at the tip. Wherever gap /
+  `cells_across` is below it, a warning names the place and the cells across
+  it gets. The linework is sampled every `min_size / 2`, so a smaller
+  `min_size` costs more.
+- **Opting features out.** The field cannot tell an oversight from a
+  deliberate coarse region. Add `gap_wall=False` to features whose gaps should
+  not be refined, such as a boundary-condition line digitised just inside the
+  domain edge or a sliver polygon:
+
+  ```python
+  blueprint.add_line(river_bc, line_id="river", resolution=40, gap_wall=False)
+  ```
+
+  A `gap_wall=False` feature is never a side of a gap; for a polygon, that
+  covers its whole boundary, including edges it shares with other polygons.
+
+Refining a gap costs cells. In a 1000 x 600 m domain at `background_lc=40`,
+two lines 15 m apart get about three cells across with `GapField(3)`, and the
+grid grows from about 550 to 2400 cells. Vertex jitter larger than
+`min_size / 4` can read as small notches, which the field refines down to
+`min_size`; simplify such input first (`simplify_tolerance`).
 
 ### Lloyd relaxation
 

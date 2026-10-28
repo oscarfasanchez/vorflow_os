@@ -16,11 +16,9 @@ must follow (both are reported as uncovered length):
   ladder (see ``sites.rung_geometry``) so the cells stay regular; the tip
   itself lies inside cells that straddle it.
 
-Between the two, two kinds of near-coincidence are merged, each moving the
-lines a bounded distance and each reported: stretches of two barriers
-closer than 0.25 x lc share their midline (``parallel``), and barrier legs
-meeting a junction or the boundary at less than SHARP_ANGLE share a short
-stem (``wedge``).
+Between the two, barrier legs meeting a junction or the boundary at less
+than SHARP_ANGLE are merged over a short reach (``wedge``), which moves the
+lines a bounded distance and is reported.
 
 Sector plan (per node). A barrier leg's first pair of sites sits at +-phi
 from the leg on the node's circle.
@@ -57,7 +55,6 @@ import shapely
 from shapely.geometry import LineString, Point
 
 from .lines import BarrierLine
-from .parallel import merge_parallel
 from .tips import relieve
 from .wedge import collapse_wedges
 
@@ -135,7 +132,6 @@ class Network:
     uncovered: list      # (kind, length, xy, line_id) of barrier parts left without faces
     corridors: list = dataclasses.field(default_factory=list)  # see ``corridor``
     collapsed: list = dataclasses.field(default_factory=list)  # acute wedges merged (``wedge``)
-    merged: list = dataclasses.field(default_factory=list)     # close parallel stretches merged (``parallel``)
     relieved: list = dataclasses.field(default_factory=list)   # bends relieved (``tips``)
 
 
@@ -545,7 +541,6 @@ def build_network(lines: list, standard: list, domain, tol: float, sharp_angle: 
                        domain, tol, uncovered)
     lines = [dataclasses.replace(b, **dict(zip(("xy", "keep"), drop_collinear(b.xy, b.keep)))) for b in lines]
     on_boundary = functools.partial(_on_boundary, domain, tol=tol)
-    lines, merged = merge_parallel(lines, domain, tol, sharp_angle, on_boundary)
     lines, collapsed = collapse_wedges(lines, domain, tol, sharp_angle, on_boundary)
     if tips is None:
         lines, spikes = truncate_spikes(lines, standard, domain, tol, uncovered, sharp_angle)
@@ -564,5 +559,4 @@ def build_network(lines: list, standard: list, domain, tol: float, sharp_angle: 
     used = {p for r in rungs for p in r.pieces}
     plans = [node_plan(v, hard, pieces, domain, standard, tol, v in rung_ends, used, rungs)
              for v in range(len(hard))]
-    return Network(hard, pieces, lc, plans, rungs, lines, uncovered, collapsed=collapsed, merged=merged,
-                   relieved=relieved)
+    return Network(hard, pieces, lc, plans, rungs, lines, uncovered, collapsed=collapsed, relieved=relieved)
