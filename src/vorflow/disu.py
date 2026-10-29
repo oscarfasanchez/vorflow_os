@@ -136,6 +136,29 @@ class DisuGrid:
         self.cellmap = None
         self.links = None
 
+    @classmethod
+    def from_disv(cls, vertices, cell2d, top, botm, idomain=None, **options):
+        """Build from MODFLOW 6 DISV arrays, e.g. an existing FloPy or LoopFlopy model.
+
+        ``vertices`` is ``[[iv, x, y], ...]`` and ``cell2d`` is
+        ``[[icell2d, xc, yc, ncvert, iv1, ...], ...]`` as for
+        ``flopy.mf6.ModflowGwfdisv``; ``xc``/``yc`` are kept as the cell centres.
+        The other arguments are those of :class:`DisuGrid`.
+        """
+        xy = {int(row[0]): (float(row[1]), float(row[2])) for row in vertices}
+        polygons, xc, yc, ids = [], [], [], []
+        for row in cell2d:
+            ncvert = int(row[3])
+            ring = [xy[int(iv)] for iv in row[4:4 + ncvert]]
+            if len(ring) > 1 and ring[0] == ring[-1]:
+                ring = ring[:-1]
+            polygons.append(shapely.Polygon(ring))
+            ids.append(int(row[0]))
+            xc.append(float(row[1]))
+            yc.append(float(row[2]))
+        grid = gpd.GeoDataFrame({"node_id": ids, "x": xc, "y": yc}, geometry=polygons)
+        return cls(grid, top, botm, idomain, **options)
+
     @property
     def nlay(self):
         return len(self._layer_grid)
@@ -211,14 +234,13 @@ class DisuGrid:
         self.cellmap = self._cellmap(top_l, bot_l)
         return self
 
-    def get_gridprops_disu6(self, idomain_tag=None):
+    def get_gridprops_disu6(self):
         """Keyword arguments for ``flopy.mf6.ModflowGwfdisu`` (gridgen key names).
 
-        Args:
-            idomain_tag: ``None`` (no IDOMAIN), ``"layer"`` (one-based layer
-                number) or integer tags >= 1 shaped like ``botm`` (see
-                :meth:`to_nodes`), written as the DISU IDOMAIN so every node
-                stays active and carries its tag.
+        The one-based layer number is written on the IHC diagonal, which
+        MODFLOW 6 does not read. IDOMAIN cannot carry tags: MODFLOW 6 DISU
+        accepts only 0 and 1 there, so use :attr:`cellmap` (or
+        :meth:`save_cellmap`) to map nodes to layers, cells and zones.
 
         Where layers use different grids and the cells above and below a
         change of grid overlap slightly in elevation, ``vertical_offset_tolerance``
@@ -228,7 +250,6 @@ class DisuGrid:
         props = mf6_gridprops(
             self.nodes, self._node_top, self._node_bot, self._area[self._node_cell],
             self._node_layer, self.links, self._planar, self._node_cell,
-            idomain=self._idomain_tags(idomain_tag),
         )
         if self.diagnostics["vertical_offset"] > 0:
             props["vertical_offset_tolerance"] = self.diagnostics["vertical_offset"] * (1 + 1e-9)
@@ -279,6 +300,53 @@ class DisuGrid:
         lattice = np.full(self._nodemap.shape, fill, dtype=np.result_type(values, np.asarray(fill)))
         lattice[self._nodemap >= 0] = values
         return self._public(lattice)
+
+    def column(self, x, y):
+        """Active DISU nodes at plan point ``(x, y)``, from the top down."""
+        self._require_build()
+        cols = self._columns_at(np.atleast_1d(float(x)), np.atleast_1d(float(y)))
+        nodes = [self._nodemap[k, cols[g][0]] for k, g in enumerate(self._layer_grid) if cols[g][0] >= 0]
+        return np.array([n for n in nodes if n >= 0], dtype=np.int64)
+
+    def locate(self, x, y, z):
+        """DISU node containing each point ``(x, y, z)``, or -1 outside every active cell.
+
+        Uses the cell elevations after pass-through gaps are closed, so a
+        point in a collapsed pass-through cell maps to the active cell that
+        took its interval. Accepts scalars or arrays.
+        """
+        self._require_build()
+        x, y, z = (np.atleast_1d(np.asarray(v, dtype=float)) for v in (x, y, z))
+        cols = self._columns_at(x, y)
+        found = np.full(len(x), -1, dtype=np.int64)
+        for k, g in enumerate(self._layer_grid):
+            col = cols[g]
+            node = np.where(col >= 0, self._nodemap[k, np.maximum(col, 0)], -1)
+            hit = (node >= 0) & (found < 0)
+            node_safe = np.maximum(node, 0)
+            hit &= (self._node_bot[node_safe] <= z) & (z <= self._node_top[node_safe])
+            found[hit] = node[hit]
+        return found if found.size > 1 else int(found[0])
+
+    def save_cellmap(self, path):
+        """Write :attr:`cellmap` to CSV, so results can be mapped back without vorflow."""
+        self._require_build()
+        self.cellmap.to_csv(path, index=False)
+        return path
+
+    def _columns_at(self, x, y):
+        """Per grid, the global column containing each plan point (-1 outside)."""
+        if not hasattr(self, "_trees"):
+            geoms = self._columns.geometry.to_numpy()
+            self._trees = [shapely.STRtree(geoms[cols]) for cols in self._col_of]
+        points = shapely.points(np.column_stack([x, y]))
+        out = []
+        for tree, cols in zip(self._trees, self._col_of):
+            found = np.full(len(points), -1, dtype=np.int64)
+            point, hit = tree.query(points, predicate="intersects")
+            found[point[::-1]] = cols[hit[::-1]]     # First hit wins on shared edges.
+            out.append(found)
+        return out
 
     def report(self):
         """Plain-text summary of the grid and its connections."""
@@ -474,18 +542,6 @@ class DisuGrid:
             cellmap["status"].to_numpy(), [STATUS_NAMES[code] for code in range(len(STATUS_NAMES))],
         )
         return cellmap
-
-    def _idomain_tags(self, tag):
-        if tag is None:
-            return None
-        if isinstance(tag, str):
-            if tag != "layer":
-                raise ValueError("idomain_tag must be None, 'layer' or an array.")
-            return self._node_layer + 1
-        tags = self.to_nodes(tag)
-        if not np.issubdtype(tags.dtype, np.integer) or (tags < 1).any():
-            raise ValueError("idomain_tag values must be integers >= 1 for active cells.")
-        return tags
 
     def _require_build(self):
         if self.nodemap is None:

@@ -41,7 +41,7 @@ def _csr(nodes, links, diagonal):
     return entries, iac
 
 
-def mf6_gridprops(nodes, top, bot, area, layer, links, planar, icpl, idomain=None):
+def mf6_gridprops(nodes, top, bot, area, layer, links, planar, icpl):
     """MODFLOW 6 DISU arrays.
 
     Args:
@@ -50,7 +50,6 @@ def mf6_gridprops(nodes, top, bot, area, layer, links, planar, icpl, idomain=Non
             node's plan cell in ``planar``).
         links: Link table from ``_connect3d``.
         planar: ``grid_to_disv`` output for the plan mesh.
-        idomain: Optional per-node IDOMAIN values to include.
 
     The layer number (one-based) is written on the IHC diagonal, which
     MODFLOW 6 does not read, so FloPy and post-processors can recover layers.
@@ -75,8 +74,6 @@ def mf6_gridprops(nodes, top, bot, area, layer, links, planar, icpl, idomain=Non
         "vertices": [list(vertex) for vertex in planar["vertices"]],
         "cell2d": cell2d,
     }
-    if idomain is not None:
-        props["idomain"] = np.asarray(idomain, dtype=np.int64).copy()
     return props
 
 

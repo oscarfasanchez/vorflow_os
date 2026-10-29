@@ -92,7 +92,7 @@ def test_pass_through_and_noflow_cells_are_removed_and_tracked():
     assert props["bot"][1] == 6 and props["top"][3] == 4
 
 
-def test_to_nodes_to_layers_round_trip_and_idomain_tags():
+def test_to_nodes_to_layers_round_trip():
     grid = _grid(nx=2, ny=1)
     d = disu.DisuGrid(grid, 10.0, [[6, 6], [4, 4], [0, 0]], [[1, 1], [-1, 1], [1, 1]],
                       connectivity="layered").build()
@@ -101,11 +101,8 @@ def test_to_nodes_to_layers_round_trip_and_idomain_tags():
     back = d.to_layers(d.to_nodes(k).astype(float))
     np.testing.assert_array_equal(np.isnan(back), [[0, 0], [1, 0], [0, 0]])
     np.testing.assert_array_equal(np.nan_to_num(back), np.where(np.isnan(back), 0, k))
-    np.testing.assert_array_equal(d.get_gridprops_disu6(idomain_tag="layer")["idomain"], [1, 1, 2, 3, 3])
-    np.testing.assert_array_equal(d.get_gridprops_disu6(idomain_tag=k)["idomain"], [1, 2, 4, 5, 6])
+    # MF6 DISU accepts IDOMAIN 0/1 only, so no tags are written there.
     assert "idomain" not in d.get_gridprops_disu6()
-    with pytest.raises(ValueError, match=">= 1"):
-        d.get_gridprops_disu6(idomain_tag=k - 1)
     assert "5 nodes" in d.report()
 
 
