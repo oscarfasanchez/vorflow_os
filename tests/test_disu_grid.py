@@ -117,14 +117,14 @@ def _mf6():
     return flopy, exe
 
 
-def _run(flopy, exe, ws, add_dis, chd, k):
+def _run(flopy, exe, ws, add_dis, chd, k, **npf):
     sim = flopy.mf6.MFSimulation(sim_ws=str(ws), exe_name=exe)
     flopy.mf6.ModflowTdis(sim)
     flopy.mf6.ModflowIms(sim, outer_maximum=50, inner_maximum=500, linear_acceleration="bicgstab",
                          outer_dvclose=1e-10, inner_dvclose=1e-11, rcloserecord=1e-8)
     gwf = flopy.mf6.ModflowGwf(sim, modelname="m")
     add_dis(gwf)
-    flopy.mf6.ModflowGwfnpf(gwf, k=k, k33=0.1)
+    flopy.mf6.ModflowGwfnpf(gwf, k=k, **(npf or {"k33": 0.1}))
     flopy.mf6.ModflowGwfic(gwf, strt=8.0)
     flopy.mf6.ModflowGwfchd(gwf, stress_period_data=chd)
     flopy.mf6.ModflowGwfoc(gwf, head_filerecord="m.hds", saverecord=[("HEAD", "ALL")])

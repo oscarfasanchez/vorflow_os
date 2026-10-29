@@ -33,7 +33,7 @@ import pandas as pd
 
 from . import _columns
 from ._columns import ACTIVE, NOFLOW, PASSTHROUGH, STATUS_NAMES, subdivide  # noqa: F401
-from ._connect3d import concat_links, layered_links, vertical_links
+from ._connect3d import concat_links, layered_links, staggered_links, vertical_links
 from ._disu_export import mf6_gridprops
 
 __all__ = ["DisuGrid", "DisuOptions", "subdivide"]
@@ -135,8 +135,6 @@ class DisuGrid:
         """Classify cells, close pass-through gaps and connect the active cells. Returns ``self``."""
         from ._mfusg import _planar_faces
 
-        if self.options.connectivity == "full":
-            raise NotImplementedError("connectivity='full' is not available yet; use 'layered'.")
         self._planar, self._area, self._faces, _ = _planar_faces(self.grid)
         status = _columns.classify(self.top_l, self.bot_l, self.idomain, self.options.min_thickness)
         top_l, bot_l = _columns.collapse(self.top_l, self.bot_l, status, self.options.collapse)
@@ -146,10 +144,19 @@ class DisuGrid:
         self.status, self.nodemap = status, nodemap
         self._node_top, self._node_bot = top_l[active], bot_l[active]
         self._node_layer, self._node_cell = np.nonzero(active)
-        self.links = concat_links(
-            vertical_links(status, nodemap, top_l, bot_l, self._area),
-            layered_links(status, nodemap, self._faces),
-        )
+        opts = self.options
+        self.diagnostics = {"slivers_merged": 0, "largest_sliver": 0.0}
+        if opts.connectivity == "full":
+            centres = self.grid[["x", "y"]].to_numpy(dtype=float)
+            horizontal, found = staggered_links(
+                status, nodemap, top_l, bot_l, self._faces, centres, sliver_tol=opts.sliver_tol,
+                sliver_abs=opts.sliver_abs, sliver_dip=opts.sliver_dip, cl12=opts.cl12,
+            )
+            self.diagnostics.update(found)
+        else:
+            horizontal = layered_links(status, nodemap, self._faces)
+        self.links = concat_links(vertical_links(status, nodemap, top_l, bot_l, self._area), horizontal)
+        self.diagnostics.update(_offset_ratio(status, top_l, bot_l, self._faces))
         self.cellmap = self._cellmap(top_l, bot_l)
         return self
 
@@ -203,6 +210,26 @@ class DisuGrid:
         ]
         if len(self._faces):
             lines.append(f"  max plan orthogonality error: {self._faces['ortho_error'].max():.3g} deg")
+        diag = self.diagnostics
+        if self.options.connectivity == "full":
+            lines.append(f"  slivers merged: {diag['slivers_merged']} (largest {diag['largest_sliver']:.3g})")
+        ratio = diag["max_offset_ratio"]
+        lines.append(f"  max offset ratio (offset / thinner cell, same layer): {ratio:.3g}")
+        if ratio >= 1:
+            joined = ("joined only through other layers" if self.options.connectivity == "full"
+                      else "still joined as same-layer neighbours")
+            lines.append(
+                f"  {diag['disconnected_faces']} same-layer neighbour pairs are offset by a whole cell "
+                f"or more and are {joined}; about {int(np.ceil(ratio)) + 1} sublayers would keep "
+                "each layer connected (Provost et al. 2025)."
+            )
+        if ratio > 0:
+            if self.options.connectivity == "layered":
+                lines.append("  layers are vertically offset: connectivity='full' is recommended.")
+            lines.append(
+                "  for offset layers use XT3D, and give NPF angle2 and angle3 (zeros are fine): "
+                "without them MODFLOW 6 XT3D ignores the vertical offsets."
+            )
         return "\n".join(lines)
 
     def _cellmap(self, top_l, bot_l):
@@ -238,6 +265,23 @@ class DisuGrid:
     def _require_build(self):
         if self.nodemap is None:
             raise RuntimeError("Call build() first.")
+
+
+def _offset_ratio(status, top_l, bot_l, faces):
+    """Largest vertical offset between same-layer neighbours, relative to the thinner cell.
+
+    Provost et al. (2025) show connectivity changes where this ratio reaches 1
+    (same-layer neighbours stop touching), 2 and 3.
+    """
+    i = faces["cell_id_1"].to_numpy(dtype=np.int64)
+    j = faces["cell_id_2"].to_numpy(dtype=np.int64)
+    both = (status[:, i] == ACTIVE) & (status[:, j] == ACTIVE)
+    if not both.any():
+        return {"max_offset_ratio": 0.0, "disconnected_faces": 0}
+    offset = np.maximum(np.abs(top_l[:, i] - top_l[:, j]), np.abs(bot_l[:, i] - bot_l[:, j]))
+    thinner = np.minimum(top_l[:, i] - bot_l[:, i], top_l[:, j] - bot_l[:, j])
+    ratio = np.where(both, offset / np.where(both, thinner, 1.0), 0.0)
+    return {"max_offset_ratio": float(ratio.max()), "disconnected_faces": int((ratio >= 1).sum())}
 
 
 def _single_grid(grids):
