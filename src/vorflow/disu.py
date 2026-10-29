@@ -233,9 +233,28 @@ class DisuGrid:
         self.links = concat_links(vertical, horizontal)
         self.diagnostics.update(_offset_ratio(status, top_l, bot_l, self._faces))
         self.diagnostics["vertical_offset"] = _vertical_offset(self.links, self._node_top, self._node_bot)
+        self.diagnostics["max_ortho_error"] = self._connected_ortho_error()
         self.nodemap = self._public(nodemap)
         self.cellmap = self._cellmap(top_l, bot_l)
         return self
+
+    def _connected_ortho_error(self):
+        """Largest plan orthogonality error over the faces that carry a horizontal connection.
+
+        Faces between columns of different grids that never share an
+        elevation (a coarse cell above a change of grid next to a fine cell
+        below it) carry no connection, so they are left out.
+        """
+        side = np.asarray(self.links["ihc"]) != 0
+        if not side.any() or not len(self._faces):
+            return 0.0
+        a = self._node_cell[np.asarray(self.links["n"])[side]]
+        b = self._node_cell[np.asarray(self.links["m"])[side]]
+        f1 = self._faces["cell_id_1"].to_numpy(dtype=np.int64)
+        f2 = self._faces["cell_id_2"].to_numpy(dtype=np.int64)
+        ncol = int(max(a.max(), b.max(), f1.max(), f2.max())) + 1
+        used = np.isin(np.minimum(f1, f2) * ncol + np.maximum(f1, f2), np.minimum(a, b) * ncol + np.maximum(a, b))
+        return float(self._faces["ortho_error"].to_numpy()[used].max()) if used.any() else 0.0
 
     def get_gridprops_disu6(self):
         """Keyword arguments for ``flopy.mf6.ModflowGwfdisu`` (gridgen key names).
@@ -481,7 +500,8 @@ class DisuGrid:
             f"{ihc[2]} staggered)",
         ]
         if len(self._faces):
-            lines.append(f"  max plan orthogonality error: {self._faces['ortho_error'].max():.3g} deg")
+            lines.append(f"  max plan orthogonality error: {self.diagnostics['max_ortho_error']:.3g} deg "
+                         "(faces that carry a connection)")
         diag = self.diagnostics
         merged = diag["slivers_merged"] + diag["plan_slivers_merged"]
         if merged:
@@ -790,7 +810,7 @@ def splice(base, fine, polygon):
     return gpd.GeoDataFrame(pd.concat([outside, inside], ignore_index=True), crs=base.crs)
 
 
-def refill(base, polygon, resolution, *, growth=1.2, border_divisions=1):
+def refill(base, polygon, resolution, *, growth_factor=None, fields=None, border_divisions=1):
     """Re-mesh the inside of ``polygon`` with finer Voronoi cells that share the outline's vertices.
 
     The outline must be made of cell faces in ``base``, which vorflow gives
@@ -805,9 +825,17 @@ def refill(base, polygon, resolution, *, growth=1.2, border_divisions=1):
         base: The vorflow grid to start from.
         polygon: The area to re-mesh: one polygon without holes.
         resolution: Target cell size inside.
-        growth: Cell-to-cell size ratio (> 1) from the outline spacing at
-            the outline to ``resolution`` further in; larger values reach the
-            fine size sooner.
+        growth_factor: Cell-to-cell growth ratio (> 1) of the default
+            :class:`~vorflow.fields.GeometricGrowthField`, as in
+            ``add_polygon``: cells grow from ``resolution`` in the core to
+            the outline spacing at the outline. Defaults to 1.2. Ignored when
+            ``fields`` is given.
+        fields: List of size fields (``MeshField`` objects), as in
+            ``add_polygon``, applied outwards from a core of ``resolution``
+            cells. The core is inset from the outline by the distance at
+            which the fields reach 99 % of the outline spacing (at most half
+            the polygon's inradius), so each field must give its size with
+            ``python_size`` (the built-in growth fields do).
         border_divisions: Split every outline face into this many faces on
             the inside, so the cells along the outline start finer (e.g. 2
             for half the outline spacing). The base vertices are still
@@ -819,11 +847,17 @@ def refill(base, polygon, resolution, *, growth=1.2, border_divisions=1):
     and the largest area ratio between neighbouring new cells.
     """
     from . import _refill
+    from .blueprint import _validate_growth_factor
+    from .fields import DEFAULT_GROWTH_FACTOR, GeometricGrowthField, MeshField
 
     if not np.isfinite(resolution) or resolution <= 0:
         raise ValueError(f"resolution must be a positive number, got {resolution!r}.")
-    if isinstance(growth, bool) or not growth > 1:
-        raise ValueError(f"growth must be greater than 1, got {growth!r}.")
+    growth_factor = _validate_growth_factor(growth_factor)
+    if fields is None:
+        fields = [GeometricGrowthField(growth_factor or DEFAULT_GROWTH_FACTOR)]
+    fields = list(fields)
+    if not fields or not all(isinstance(f, MeshField) for f in fields):
+        raise ValueError("fields must be a non-empty list of MeshField objects.")
     if isinstance(border_divisions, bool) or int(border_divisions) != border_divisions or border_divisions < 1:
         raise ValueError(f"border_divisions must be a positive integer, got {border_divisions!r}.")
     polygon = shapely.make_valid(polygon)
@@ -846,7 +880,7 @@ def refill(base, polygon, resolution, *, growth=1.2, border_divisions=1):
     sites_in, sites_out, centres, radii = _refill.mirrored_sites(nodes, polygon)
     segment = np.linalg.norm(np.roll(nodes, -1, axis=0) - nodes, axis=1)
     spacing = float(np.median(segment))
-    candidates = _refill_mesh_nodes(polygon, spacing, float(resolution), float(growth))
+    candidates = _refill_mesh_nodes(polygon, spacing, float(resolution), fields)
     fill = _refill.fill_nodes(candidates, centres, radii, np.vstack([sites_in, sites_out]),
                               min(float(resolution), spacing))
     generators = np.vstack([sites_in, fill, sites_out])
@@ -879,8 +913,26 @@ def _shared_points(a, b, tolerance):
     return int((distance <= tolerance).sum())
 
 
-def _refill_mesh_nodes(polygon, spacing, resolution, growth):
-    """Gmsh nodes filling ``polygon``: ``spacing`` at the outline, growing to ``resolution`` inside."""
+def _refill_inset(fields, spacing, resolution, cap):
+    """Smallest distance at which ``fields`` (their minimum) reach 99 % of ``spacing``, at most ``cap``."""
+    def size(d):
+        sizes = [f.python_size(np.asarray(d), spacing, resolution) for f in fields]
+        if any(s is None for s in sizes):
+            raise ValueError("refill needs fields that give their size with python_size().")
+        return float(np.min(sizes))
+
+    target = 0.99 * spacing
+    if size(cap) < target:
+        return cap
+    lo, hi = 0.0, cap
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        lo, hi = (mid, hi) if size(mid) < target else (lo, mid)
+    return hi
+
+
+def _refill_mesh_nodes(polygon, spacing, resolution, fields):
+    """Gmsh nodes filling ``polygon``: ``spacing`` at the outline, graded by ``fields`` to ``resolution`` inside."""
     from ._log import verbosity_scope
     from .blueprint import ConceptualMesh
     from .engine import MeshGenerator
@@ -890,10 +942,10 @@ def _refill_mesh_nodes(polygon, spacing, resolution, growth):
         cm.add_polygon(polygon, zone_id=1, resolution=max(spacing, resolution))
         if resolution < spacing:
             inradius = shapely.length(shapely.maximum_inscribed_circle(polygon))
-            inset = min((spacing - resolution) / (growth - 1), 0.5 * inradius)
+            inset = _refill_inset(fields, spacing, resolution, 0.5 * inradius)
             core = polygon.buffer(-inset, join_style="mitre")
             if not core.is_empty:
-                cm.add_polygon(core, zone_id=2, resolution=resolution, embed=False, growth_factor=growth)
+                cm.add_polygon(core, zone_id=2, resolution=resolution, embed=False, fields=fields)
         mg = MeshGenerator(background_lc=max(spacing, resolution), conceptual_mesh=cm, verbosity=0)
         mg.generate()
     return np.asarray(mg.nodes, dtype=float)[:, :2]

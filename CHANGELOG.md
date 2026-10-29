@@ -27,7 +27,8 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     them share one elevation (the area-weighted mean of the bottoms above).
   - `refill(base, polygon, resolution)` re-meshes the inside of a barrier
     outline with finer Voronoi cells that share the outline's vertices, so
-    every face stays orthogonal; `splice(base, fine, polygon)` joins grids
+    every face stays orthogonal; the inside is graded by `growth_factor` or
+    `fields`, as in `add_polygon`; `splice(base, fine, polygon)` joins grids
     made separately.
   - `subdivide()` makes sublayers in all or some columns.
   - `nodemap`, `cellmap`, `to_nodes`, `to_layers`, `locate`, `column` and

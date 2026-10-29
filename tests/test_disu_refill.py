@@ -8,6 +8,7 @@ from shapely.geometry import Polygon, box
 from vorflow import disu
 from vorflow._mfusg import _planar_faces
 from vorflow._refill import outline_nodes
+from vorflow.fields import ExponentialField, MeshField
 
 from test_disu_multigrid import PIT, VORONOI_PIT, _boxes, linear_field_error, voronoi_pit
 
@@ -46,8 +47,20 @@ def test_border_divisions_add_vertices_between_the_shared_ones():
 
 def test_refill_reports_the_size_jump_between_neighbours():
     base = _boxes(4, 1.0)
-    gentle = disu.refill(base, PIT, 0.25, growth=1.2).attrs["refill"]["max_neighbour_area_ratio"]
+    gentle = disu.refill(base, PIT, 0.25, growth_factor=1.2).attrs["refill"]["max_neighbour_area_ratio"]
     assert 1.0 <= gentle < 4.0
+
+
+def test_refill_takes_size_fields_like_add_polygon():
+    base = _boxes(4, 1.0)
+    grid = disu.refill(base, PIT, 0.25, fields=[ExponentialField(size_min=0.25, decay_length=0.3)])
+    assert _outline_vertices(grid, PIT, True) == _outline_vertices(base, PIT, False)
+    assert grid.attrs["refill"]["cells"] > 4 * 4
+
+
+class _NoSizeField(MeshField):
+    def create(self, gmsh_api, tags_dict, background_lc, feature_lc=None):
+        return None
 
 
 def test_refill_rejects_bad_input():
@@ -56,8 +69,12 @@ def test_refill_rejects_bad_input():
         disu.refill(base, box(0.5, 0.5, 3, 3), 0.25)
     with pytest.raises(ValueError, match="without holes"):
         disu.refill(base, Polygon(PIT.exterior.coords, [box(1.5, 1.5, 2.5, 2.5).exterior.coords]), 0.25)
-    with pytest.raises(ValueError, match="growth"):
-        disu.refill(base, PIT, 0.25, growth=1.0)
+    with pytest.raises(ValueError, match="growth_factor"):
+        disu.refill(base, PIT, 0.25, growth_factor=1.0)
+    with pytest.raises(ValueError, match="MeshField"):
+        disu.refill(base, PIT, 0.25, fields=[1.2])
+    with pytest.raises(ValueError, match="python_size"):
+        disu.refill(base, PIT, 0.25, fields=[_NoSizeField()])
     with pytest.raises(ValueError, match="border_divisions"):
         disu.refill(base, PIT, 0.25, border_divisions=0)
     with pytest.raises(ValueError, match="resolution"):
@@ -75,6 +92,11 @@ def test_refill_of_the_voronoi_pit_shares_all_outline_vertices():
     faces = _planar_faces(grid)[2]
     assert faces["ortho_error"].max() < 1e-4          # degrees; roundoff only
     assert faces["shared_length"].min() > 1e-3        # no roundoff-length faces on the outline
+    # Refined at depth: faces between a coarse cell above and a fine cell below
+    # are skewed but carry no connection, so the report's angle stays at roundoff.
+    d = disu.DisuGrid([base, base, grid, grid], 100.0, [80.0, 60.0, 50.0, 40.0]).build()
+    assert d._faces["ortho_error"].max() > 1
+    assert d.diagnostics["max_ortho_error"] < 1e-4
 
 
 @pytest.mark.slow

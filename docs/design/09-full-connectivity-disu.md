@@ -124,7 +124,7 @@ entry (see Validation).
   connections like hanging nodes, and the result is exact. Nesting the
   fine cells is not needed.
 
-**`refill(base, polygon, resolution, growth, border_divisions)`:**
+**`refill(base, polygon, resolution, growth_factor, fields, border_divisions)`:**
 - vorflow's exact barriers make every outline vertex a node on the barrier
   line, spaced by that mesh's size field. A separately made fine mesh
   spaces them differently (11.8 m against 28.6 m on the notebook pit, 4 of
@@ -136,7 +136,7 @@ entry (see Validation).
   generator inside a circle, the segment is exactly the face between the
   pair (Berge et al. 2019, as for the barriers). Gmsh nodes outside the
   circles fill the rest, graded from the outline spacing to `resolution`
-  by `growth`. The outside generator of each pair only shapes the face.
+  by `growth_factor` or by `fields`, as in `add_polygon`. The outside generator of each pair only shapes the face.
 - The result shares every base outline vertex and every face is orthogonal.
   `border_divisions=k` splits the outline faces on the inside: finer border
   cells, with the base vertices still shared and up to 20 degrees of
@@ -240,7 +240,7 @@ layers of low K; analytic head on the perimeter):
   fine cells can be made from the base grid.
 - `refill` takes one polygon without holes per call, whose outline is made
   of base cell faces. The cells along the outline keep the base spacing;
-  `growth` sets how fast the inside reaches `resolution` (largest area ratio
+  `growth_factor` (or `fields`) sets how fast the inside reaches `resolution` (largest area ratio
   between neighbours about 2.4 on the notebook pit, 1.9 with
   `border_divisions=2`).
 - FloPy's `PlotCrossSection` misdrew a DISU model whose layers have
