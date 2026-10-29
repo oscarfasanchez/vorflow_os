@@ -22,10 +22,13 @@ flopy.mf6.ModflowGwfdisu(gwf, **d.get_gridprops_disu6())
 - **Pinch-outs and pass-through.** Cells with idomain -1 or below
   `min_thickness` are removed without leaving gaps in the column.
 - **Different plan grids per layer.** For example, a pit refined only at
-  depth with `disu.splice`.
+  depth with `disu.refill`, which shares the outline's vertices with the
+  base grid, or `disu.splice` for grids made separately. Contacts where the
+  grid changes are gap-free.
 - **Sublayers**, everywhere or in some columns, with `disu.subdivide`.
 - **Node tracking:** `nodemap`, `cellmap`, `to_nodes`/`to_layers` and
-  `locate`/`column`.
+  `locate`/`column`; `idomain_layers`, `layer_view` and `vertex_grid` for 2D
+  maps with FloPy.
 - **Existing DISV models** go in through `DisuGrid.from_disv`.
 
 vorflow stays a mesher. It takes numbers in FloPy's conventions, returns the
@@ -86,15 +89,21 @@ entry (see Validation).
   overlap itself), CL = perpendicular plan distances.
 - With aligned layers this reduces exactly to DISV connectivity.
 
-**Slivers:**
-- An offset is noise, and is snapped, only when it is below `sliver_tol`
-  (5 %) of the thinner cell and also flatter than `sliver_dip` (1 degree)
-  between the two centres.
-- A run of slivers goes half to the piece above and half to the piece below.
-  Face area is kept, and HWVA is scaled because MF6 recomputes the overlap
-  from the cell elevations.
-- Both conditions matter. The thickness rule alone merged real 11-degree
-  offsets between 0.5 m cells and broke XT3D exactness.
+**Every piece is kept (cell-by-cell area balance):**
+- Each cell's faces must add up to its own geometry, because MODFLOW
+  balances flow cell by cell. Every wall piece and every plan overlap is
+  therefore kept, however small; MODFLOW handles tiny connections fine.
+- Merging is optional (`sliver_tol`, `sliver_abs`, off by default): a piece
+  below `max(sliver_abs, sliver_tol x size)` goes to its neighbours (size is
+  the thinner cell for wall pieces and the smaller cell's area for plan
+  overlaps, with `sliver_abs` squared). That moves face area between cell
+  pairs, so `report()` warns that the result is no longer exact.
+- Measured on the Voronoi models below: merging removed 3-14 % of the
+  connections with no measurable gain in build or MF6 run time, and gave
+  errors of 2e-4 to 6e-4 m on dipping single grids and 0.028 m at a change
+  of grid (uniform gradient, XT3D).
+- A consistent alternative, not built: snap near-equal layer elevations
+  before building, so the cells really are aligned.
 
 **Different grids per layer** (`DisuGrid(grids=[...])`):
 - Cells with the same generator and footprint in several grids form one
@@ -103,14 +112,42 @@ entry (see Validation).
 - Cells that end above a change of grid are joined to the cells that start
   below it by plan-overlap vertical links, which conserve area.
 - Cells of different grids that touch along an edge get faces too.
-- Tops of new cells come from the bottom of the cell above them. Any
-  remaining elevation overlap sets MF6 `vertical_offset_tolerance`.
+- **Gap-free contacts.** Cells that overlap across a change of grid form
+  groups (connected components of the overlaps). Each group shares one
+  elevation, the area-weighted mean of the bottoms above (exactly those
+  bottoms when they agree, e.g. nested refinement). The cells above absorb
+  the change in their thickness; given tops must meet the bottoms above.
+  `report()` lists the groups and the largest shift. Sampling each new top
+  from the cell above its centre instead left overlaps of up to 1.22 m on
+  dipping layers (0.005 m error).
+- Fine cells may straddle several coarse cells: XT3D treats the vertical
+  connections like hanging nodes, and the result is exact. Nesting the
+  fine cells is not needed.
+
+**`refill(base, polygon, resolution, growth, border_divisions)`:**
+- vorflow's exact barriers make every outline vertex a node on the barrier
+  line, spaced by that mesh's size field. A separately made fine mesh
+  spaces them differently (11.8 m against 28.6 m on the notebook pit, 4 of
+  68 shared), so `splice` leaves hanging vertices. They are harmless for
+  DISU, but break face orthogonality (up to 42.5 degrees).
+- `refill` keeps the base cells outside and re-meshes only the inside. Each
+  outline segment gets a generator pair mirrored across it, on circles at
+  its end nodes (radius 0.6 x the longer adjacent segment); with no other
+  generator inside a circle, the segment is exactly the face between the
+  pair (Berge et al. 2019, as for the barriers). Gmsh nodes outside the
+  circles fill the rest, graded from the outline spacing to `resolution`
+  by `growth`. The outside generator of each pair only shapes the face.
+- The result shares every base outline vertex and every face is orthogonal.
+  `border_divisions=k` splits the outline faces on the inside: finer border
+  cells, with the base vertices still shared and up to 20 degrees of
+  orthogonality error along the outline.
 
 **Diagnostics** (`report()`):
 - the offset ratio r = offset / thinner cell, which is the paper's quantity:
   same-layer neighbours stop touching at r = 1;
 - a sublayer suggestion where r >= 1;
-- sliver counts;
+- merged-piece counts, when merging is switched on, with a warning;
+- the contact groups at a change of grid and the largest shift;
 - the XT3D advice below.
 
 ## What MODFLOW does with the geometry
@@ -148,7 +185,7 @@ IHC=2.
 **Reference implementation:**
 - On random offset layers (up to 30×30×8 cells), ja, ihc, cl12, hwva,
   angldegx and iac equal the USGS `disv2disu.py` (`staggered=True`) entry for
-  entry, with slivers off.
+  entry (every piece kept, the default).
 - A test compares the connections with a brute-force overlap search,
   including pass-through and no-flow cells.
 
@@ -171,31 +208,52 @@ layers of low K; analytic head on the perimeter):
   below layer 3): a linear head field is reproduced to 1e-11 with XT3D, for
   both flat and dipping layers. This covers hanging-node faces on the ring,
   overlay links and cross-grid faces.
+- **Voronoi pit at depth** (the notebook model: 60 m cells, 12 m inside a
+  200 m pit below layer 3; six layers, flat and 3 % dip; horizontal,
+  vertical and combined gradients; MF6, XT3D): max head error < 1e-6 m
+  (about 4e-8 m) with an independent fine grid joined by `splice` and with
+  `refill` (`border_divisions` 1 and 2). Before the fixes in this note the
+  same model gave up to 0.029 m:
+
+  | setup | max error |
+  |---|---|
+  | merging on (old default), new tops sampled from above | 0.029 m |
+  | merging off, new tops sampled (contact overlaps up to 1.22 m) | 0.0048 m |
+  | merging off, gap-free contact (current) | 4e-8 m |
+  | fine cells cut to nest under the coarse ones, sampled tops | 0.0045 m |
+  | one grid in every layer, merging on (old default) | 6e-4 m |
+  | one grid in every layer, merging off (current) | 4e-8 m |
 
 ## Limitations
 
-- Where fine cells straddle the edges of the coarse cells above a change of
-  grid (any non-nested Voronoi refinement), the interface cannot be flat for
-  both grids. Each fine top comes from the coarse cell above its centre, and
-  the mismatch is reported (and accepted through MF6
-  `vertical_offset_tolerance`).
-  - On the notebook's Voronoi pit model (3 % dip), the mismatch is up to
-    1.2 m on 10-20 m layers.
-  - A linear head field is then reproduced to 0.005 m over a ~10 m range,
-    against 1e-11 for nested grids.
+- A gap-free contact moves the bottoms above a non-nested change of grid
+  to one elevation per group (on the notebook pit, by up to 2.6 m with a
+  3 % dip). Give a flat `botm` there to choose the level yourself; split
+  layers with `subdivide` where the dip inside the refined area matters.
 - Plan cells of different grids that overlap get only vertical connections.
   Where a dip is steep, give adjacent layers the same grid in that area.
 - Cells match across grids only when their generator and footprint are
   identical (as after `splice`). Independently generated grids are joined
   only by plan overlaps.
 - `splice` does not force nodes to match along the outline, so it leaves
-  hanging nodes. A node-matched refill built on the hybrid subregion code is
-  a possible follow-up, if the ring accuracy calls for it.
+  hanging nodes (exact for DISU, but not orthogonal); use `refill` when the
+  fine cells can be made from the base grid.
+- `refill` takes one polygon without holes per call, whose outline is made
+  of base cell faces. The cells along the outline keep the base spacing;
+  `growth` sets how fast the inside reaches `resolution` (largest area ratio
+  between neighbours about 2.4 on the notebook pit, 1.9 with
+  `border_divisions=2`).
+- FloPy's `PlotCrossSection` misdrew a DISU model whose layers have
+  different cell counts after `subdivide`. The review notebook draws its
+  section from `cellmap` instead.
 
 ## Files
 
 - New: `src/vorflow/disu.py`, `src/vorflow/_columns.py`,
-  `src/vorflow/_connect3d.py`, `src/vorflow/_disu_export.py`.
+  `src/vorflow/_connect3d.py`, `src/vorflow/_disu_export.py`,
+  `src/vorflow/_refill.py`.
+- Examples: `examples/full_connectivity_demo.ipynb`,
+  `examples/disu_refined_at_depth.ipynb`.
 - Tests: `tests/test_disu_*.py`.
 - Changed: `src/vorflow/_mfusg.py`. The plan faces are shared (`_planar_faces`
   now also returns the face normal), and the USG arrays and GSF come from the

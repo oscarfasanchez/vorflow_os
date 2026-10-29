@@ -16,17 +16,24 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     arguments for `flopy.mf6.ModflowGwfdisu` and `flopy.mfusg.MfUsgDisU`,
     with gridgen's key names.
   - Cells in different layers whose faces overlap vertically are connected
-    (IHC=2), found by merging the interface elevations of each face. Small
-    offsets that are flatter than `sliver_dip` and thinner than `sliver_tol`
-    of the cell are merged without losing face area.
+    (IHC=2), found by merging the interface elevations of each face. Every
+    piece is kept by default, so each cell's face areas match its geometry
+    and a uniform head gradient is reproduced exactly with XT3D. Merging
+    small pieces (`sliver_tol`, `sliver_abs`) is optional and inexact.
   - Pass-through cells (idomain -1 or thinner than `min_thickness`) are
     removed without leaving gaps (`collapse`); idomain 0 stays no-flow.
-  - Layers can use different plan grids: `splice(base, fine, polygon)`
-    refines an area, and cells that change grid are joined by their plan
-    overlaps.
+  - Layers can use different plan grids, joined by their plan overlaps.
+    Contacts where the grid changes are gap-free: cells that overlap across
+    them share one elevation (the area-weighted mean of the bottoms above).
+  - `refill(base, polygon, resolution)` re-meshes the inside of a barrier
+    outline with finer Voronoi cells that share the outline's vertices, so
+    every face stays orthogonal; `splice(base, fine, polygon)` joins grids
+    made separately.
   - `subdivide()` makes sublayers in all or some columns.
   - `nodemap`, `cellmap`, `to_nodes`, `to_layers`, `locate`, `column` and
-    `save_cellmap` track cells; `from_disv()` reads existing DISV models.
+    `save_cellmap` track cells; `idomain_layers`, `layer_view` and
+    `vertex_grid` give per-layer status maps and 2D views of split layers
+    for FloPy plots; `from_disv()` reads existing DISV models.
   - `report()` gives the offset ratio from the paper, a sublayer suggestion,
     and the reminder that MF6 XT3D needs NPF `angle2`/`angle3` to account
     for vertical offsets.

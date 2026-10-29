@@ -65,6 +65,7 @@ connectivity from vorflow grids and FloPy-style layer arrays; import it as
    :nosignatures:
 
    DisuGrid
+   refill
    splice
    subdivide
 

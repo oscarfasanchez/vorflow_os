@@ -413,16 +413,22 @@ heads = d.to_layers(gwf.output.head().get_data().ravel())  # back to (nlay, ncpl
   (zeros are fine). Without them MODFLOW 6 XT3D ignores the vertical
   offsets. MODFLOW-USG (`get_gridprops_disu5()`, `write_gsf()`) has no XT3D
   but still gains from the extra connections.
-- **Finer cells at depth:** `disu.splice(base, fine, polygon)` keeps the base
-  cells outside the polygon. Pass one grid per layer, e.g.
-  `DisuGrid([base, base, pit, pit], top, [b0, b1, b2, b3])`. The outline
-  must be cell faces in both grids (`add_line(outline, is_barrier=True)`).
+- **Finer cells at depth:** `disu.refill(base, polygon, resolution)` keeps the
+  base cells outside the polygon and fills the inside with finer Voronoi
+  cells that share the outline's vertices. The outline must be cell faces
+  (`add_line(outline, is_barrier=True)`). Pass one grid per layer, e.g.
+  `DisuGrid([base, base, pit, pit], top, [b0, b1, b2, b3])`; the contact
+  where the grid changes is made gap-free. `disu.splice(base, fine, polygon)`
+  joins a fine grid made separately.
 - **Sublayers:** `disu.subdivide(top, botm, idomain, nsub=..., where=mask)`
   splits layers everywhere or only in some columns.
 - **Tracking:** `nodemap`, `cellmap` (or `save_cellmap()`), `to_nodes`,
-  `to_layers`, `locate(x, y, z)` and `column(x, y)`. MF6 DISU accepts
-  IDOMAIN 0/1 only, so tags live in the cell map; the layer number is also
-  on the IHC diagonal.
+  `to_layers`, `locate(x, y, z)` and `column(x, y)`. FloPy reads the layer
+  number from the IHC diagonal, so `PlotMapView(modelgrid=gwf.modelgrid,
+  layer=k)` works directly. `idomain_layers` (1 active, -1 pass-through,
+  0 no-flow), `layer_view` (one 2D map for a layer split into sublayers)
+  and `vertex_grid` (a FloPy grid for those maps) cover the rest; MF6 DISU
+  accepts IDOMAIN 0/1 only.
 - **Existing DISV models** (FloPy, LoopFlopy) go in through
   `disu.DisuGrid.from_disv(vertices, cell2d, top, botm, idomain)`.
 
