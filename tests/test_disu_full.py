@@ -64,12 +64,13 @@ def test_sliver_is_merged_into_its_neighbours_and_face_area_is_kept():
     assert frozenset((a1, b2)) in _pairs(exact) and len(_pairs(exact)) == 3
 
 
-def test_sliver_dip_threshold_is_the_stricter_one():
+def test_a_small_offset_on_a_real_dip_is_not_a_sliver():
     top = np.array([20.0, 20.0])
-    # 0.02 m offset over a 1 m centre distance is 1.15 degrees; the 5 % rule alone would merge it.
-    merged = _two_columns(top, [10.0, 0], [10.02, 0])
-    kept = _two_columns(top, [10.0, 0], [10.02, 0], sliver_dip=1.0)
-    assert len(_pairs(merged)) == 2 and len(_pairs(kept)) == 3
+    # 0.02 m over a 1 m centre distance is a 1.15 degree dip: below 5 % of the cell, but real.
+    kept = _two_columns(top, [10.0, 0], [10.02, 0])
+    merged = _two_columns(top, [10.0, 0], [10.02, 0], sliver_dip=None)    # Thickness rule alone.
+    steeper_cap = _two_columns(top, [10.0, 0], [10.02, 0], sliver_dip=2.0)
+    assert len(_pairs(kept)) == 3 and len(_pairs(merged)) == 2 and len(_pairs(steeper_cap)) == 2
 
 
 def _brute_force(d):

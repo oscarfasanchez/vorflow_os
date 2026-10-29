@@ -7,12 +7,16 @@ the bottom of the layer above. No geometry and no flopy here.
 ``idomain`` follows MODFLOW 6: values above zero are active, zero is a
 no-flow cell that never passes flow, and -1 is a vertical pass-through cell.
 A cell thinner than ``min_thickness`` is treated as pass-through as well.
+
+When layers use different plan grids, the arrays cover every plan column of
+every grid; a column missing from a layer's grid is ``ABSENT`` there (NaN
+elevations). Like no-flow cells, absent cells end a column.
 """
 
 import numpy as np
 
-NOFLOW, ACTIVE, PASSTHROUGH = 0, 1, 2
-STATUS_NAMES = {NOFLOW: "noflow", ACTIVE: "active", PASSTHROUGH: "passthrough"}
+NOFLOW, ACTIVE, PASSTHROUGH, ABSENT = 0, 1, 2, 3
+STATUS_NAMES = {NOFLOW: "noflow", ACTIVE: "active", PASSTHROUGH: "passthrough", ABSENT: "absent"}
 COLLAPSE_MODES = ("split", "up", "down", None)
 
 
@@ -66,19 +70,22 @@ def layer_arrays(top, botm, idomain=None, ncpl=None):
 
 
 def classify(top_l, bot_l, idomain, min_thickness=0.0):
-    """Status per cell: ``NOFLOW`` (idomain 0), ``PASSTHROUGH`` (idomain < 0 or thin) or ``ACTIVE``."""
+    """Status per cell: ``NOFLOW`` (idomain 0), ``PASSTHROUGH`` (idomain < 0 or thin),
+    ``ABSENT`` (NaN elevations) or ``ACTIVE``."""
     thickness = top_l - bot_l
     status = np.full(idomain.shape, ACTIVE, dtype=np.int8)
-    thin = thickness <= min_thickness if min_thickness > 0 else thickness <= 0
+    with np.errstate(invalid="ignore"):
+        thin = thickness <= min_thickness if min_thickness > 0 else thickness <= 0
     status[(idomain < 0) | thin] = PASSTHROUGH
     status[idomain == 0] = NOFLOW
+    status[np.isnan(thickness)] = ABSENT
     return status
 
 
 def vertical_pairs(status):
     """``(upper_layer, lower_layer, cell)`` for each pair of active cells linked through pass-through cells.
 
-    A no-flow cell breaks the column: flow never passes through it.
+    A no-flow or absent cell breaks the column: flow never passes through it.
     """
     nlay, ncpl = status.shape
     above = np.full(ncpl, -1)
@@ -90,7 +97,7 @@ def vertical_pairs(status):
         lower.append(np.full(linked.sum(), layer))
         cells.append(np.flatnonzero(linked))
         above = np.where(active, layer, above)
-        above = np.where(status[layer] == NOFLOW, -1, above)
+        above = np.where((status[layer] == NOFLOW) | (status[layer] == ABSENT), -1, above)
     return (np.concatenate(upper).astype(np.int64), np.concatenate(lower).astype(np.int64),
             np.concatenate(cells).astype(np.int64))
 
@@ -114,6 +121,10 @@ def collapse(top_l, bot_l, status, mode="split"):
     nlay, ncpl = status.shape
     active = status == ACTIVE
     passthrough = status == PASSTHROUGH
+    absent = status == ABSENT
+    # Where a column ends at an absent cell, the run ends at the neighbouring cell's face.
+    stop_top = np.where(absent, np.vstack([bot_l[:1], bot_l[:-1]]), top_l)
+    stop_bot = np.where(absent, np.vstack([top_l[1:], top_l[-1:]]), bot_l)
     # Extend each active cell down over the pass-through cells below it.
     floor = bot_l[-1].copy()            # Bottom of the run below; column bottom at first.
     below_is_active = np.zeros(ncpl, dtype=bool)
@@ -124,7 +135,7 @@ def collapse(top_l, bot_l, status, mode="split"):
         lower_neighbour[layer] = active[layer] & below_is_active
         # Moving up: a non-pass-through cell starts a new run for the cells above it.
         stops = ~passthrough[layer]
-        floor = np.where(stops, top_l[layer], floor)
+        floor = np.where(stops, stop_top[layer], floor)
         below_is_active = np.where(stops, active[layer], below_is_active)
     ceiling = top_l[0].copy()
     above_is_active = np.zeros(ncpl, dtype=bool)
@@ -134,7 +145,7 @@ def collapse(top_l, bot_l, status, mode="split"):
         reach_up[layer] = np.where(active[layer], ceiling, reach_up[layer])
         upper_neighbour[layer] = active[layer] & above_is_active
         stops = ~passthrough[layer]
-        ceiling = np.where(stops, bot_l[layer], ceiling)
+        ceiling = np.where(stops, stop_bot[layer], ceiling)
         above_is_active = np.where(stops, active[layer], above_is_active)
     # An active cell takes its whole run when no active cell shares it.
     new_bot = np.where(active & ~lower_neighbour, reach_down, bot_l)
@@ -151,6 +162,25 @@ def collapse(top_l, bot_l, status, mode="split"):
     new_bot[upper, cells] = cut
     new_top[lower, cells] = cut
     return new_top, new_bot
+
+
+def nearest_active(status):
+    """``(up, down)``: per cell, the layer of the nearest active cell at or above (below) it.
+
+    Only pass-through cells may lie in between; -1 where there is none.
+    """
+    nlay, ncpl = status.shape
+    up = np.full((nlay, ncpl), -1, dtype=np.int64)
+    down = np.full((nlay, ncpl), -1, dtype=np.int64)
+    last = np.full(ncpl, -1, dtype=np.int64)
+    for layer in range(nlay):
+        last = np.where(status[layer] == ACTIVE, layer, np.where(status[layer] == PASSTHROUGH, last, -1))
+        up[layer] = last
+    last = np.full(ncpl, -1, dtype=np.int64)
+    for layer in range(nlay - 1, -1, -1):
+        last = np.where(status[layer] == ACTIVE, layer, np.where(status[layer] == PASSTHROUGH, last, -1))
+        down[layer] = last
+    return up, down
 
 
 def subdivide(top, botm, idomain=None, nsub=None, fractions=None, where=None):
