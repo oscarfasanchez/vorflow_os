@@ -8,6 +8,8 @@ exporters write both directions. Link arrays:
 * ``cl_n``, ``cl_m``: distance from each node's centre to the shared face.
 * ``hwva``: MODFLOW 6 meaning: face width for horizontal links, area for vertical.
 * ``height``: vertical extent of a horizontal face (0 for vertical links).
+* ``fahl``: MODFLOW-USG interface area (vertical: plan overlap area; horizontal:
+  face width times the flow height).
 * ``angle``: ANGLDEGX from ``n`` towards ``m``, degrees in [0, 360).
 """
 
@@ -15,7 +17,7 @@ import numpy as np
 
 from ._columns import ACTIVE, vertical_pairs
 
-LINK_KEYS = ("n", "m", "ihc", "cl_n", "cl_m", "hwva", "height", "angle")
+LINK_KEYS = ("n", "m", "ihc", "cl_n", "cl_m", "hwva", "height", "angle", "fahl")
 
 
 def empty_links():
@@ -48,11 +50,16 @@ def vertical_links(status, nodemap, top_l, bot_l, area):
         "hwva": area[cells].astype(float),
         "height": np.zeros(len(cells)),
         "angle": np.zeros(len(cells)),
+        "fahl": area[cells].astype(float),
     }
 
 
-def layered_links(status, nodemap, faces):
-    """IHC=1 links between active neighbours in the same layer (DISV connectivity)."""
+def layered_links(status, nodemap, faces, top_l, bot_l):
+    """IHC=1 links between active neighbours in the same layer (DISV connectivity).
+
+    The USG area uses the mean thickness of the two cells, as MODFLOW-USG
+    divides it by that mean to recover the face width.
+    """
     i = faces["cell_id_1"].to_numpy(dtype=np.int64)
     j = faces["cell_id_2"].to_numpy(dtype=np.int64)
     nlay = status.shape[0]
@@ -68,6 +75,8 @@ def layered_links(status, nodemap, faces):
         "hwva": tile("shared_length"),
         "height": np.zeros(count),
         "angle": np.tile(face_angles(faces).to_numpy(dtype=float), nlay)[keep],
+        "fahl": tile("shared_length") * (
+            (top_l - bot_l)[layer[keep], i[keep]] + (top_l - bot_l)[layer[keep], j[keep]]) / 2,
     }
 
 
@@ -182,6 +191,7 @@ def staggered_links(status, nodemap, top_l, bot_l, faces, centres, sliver_tol=0.
         "hwva": length * merged / geometric,
         "height": merged,
         "angle": face_angles(faces).to_numpy(dtype=float)[piece_face],
+        "fahl": length * merged,
     }
     diagnostics = {
         "slivers_merged": int(sliver.sum()),

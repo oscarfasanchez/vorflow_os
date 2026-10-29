@@ -34,7 +34,7 @@ import pandas as pd
 from . import _columns
 from ._columns import ACTIVE, NOFLOW, PASSTHROUGH, STATUS_NAMES, subdivide  # noqa: F401
 from ._connect3d import concat_links, layered_links, staggered_links, vertical_links
-from ._disu_export import mf6_gridprops
+from ._disu_export import mf6_gridprops, mfusg_gridprops, write_gsf
 
 __all__ = ["DisuGrid", "DisuOptions", "subdivide"]
 
@@ -154,7 +154,7 @@ class DisuGrid:
             )
             self.diagnostics.update(found)
         else:
-            horizontal = layered_links(status, nodemap, self._faces)
+            horizontal = layered_links(status, nodemap, self._faces, top_l, bot_l)
         self.links = concat_links(vertical_links(status, nodemap, top_l, bot_l, self._area), horizontal)
         self.diagnostics.update(_offset_ratio(status, top_l, bot_l, self._faces))
         self.cellmap = self._cellmap(top_l, bot_l)
@@ -174,6 +174,26 @@ class DisuGrid:
             self._node_layer, self.links, self._planar, self._node_cell,
             idomain=self._idomain_tags(idomain_tag),
         )
+
+    def get_gridprops_disu5(self):
+        """Keyword arguments for ``flopy.mfusg.MfUsgDisU`` (MODFLOW-USG; gridgen key names).
+
+        Uses ``ivsd=1`` with an explicit ``ivc`` so staggered connections stay
+        horizontal. ``fahl`` is the interface area: for a horizontal connection
+        the face width times its (merged) overlap height. MODFLOW-USG has no
+        XT3D; offset layers rely on the two-point formulation (or GNC).
+        """
+        self._require_build()
+        return mfusg_gridprops(
+            self.nodes, self.nlay, self._node_top, self._node_bot, self._area[self._node_cell],
+            self._node_layer, self.links,
+        )
+
+    def write_gsf(self, filepath):
+        """Write the grid specification file (GSF) used by MODFLOW-USG post-processors."""
+        self._require_build()
+        return write_gsf(filepath, self._planar, self._node_cell, self._node_top, self._node_bot,
+                         self._node_layer, self.nlay)
 
     def to_nodes(self, values):
         """Pick the ``(nlay, ncpl)`` values of the active cells, in DISU node order."""
