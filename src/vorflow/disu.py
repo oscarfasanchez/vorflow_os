@@ -206,6 +206,7 @@ class DisuGrid:
         self.top_l, self.bot_l = top_l, bot_l
         status = _columns.classify(top_l, bot_l, idomain, opts.min_thickness)
         top_l, bot_l = _columns.collapse(top_l, bot_l, status, opts.collapse)
+        self._top_c, self._bot_c = top_l, bot_l
         active = status == ACTIVE
         nodemap = np.full(status.shape, -1, dtype=np.int64)
         nodemap[active] = np.arange(int(active.sum()))
@@ -303,6 +304,117 @@ class DisuGrid:
         lattice = np.full(self._nodemap.shape, fill, dtype=np.result_type(values, np.asarray(fill)))
         lattice[self._nodemap >= 0] = values
         return self._public(lattice)
+
+    @property
+    def idomain_layers(self):
+        """Each layer's cells in MODFLOW 6 idomain codes: 1 active, -1 pass-through, 0 no-flow.
+
+        Shaped like ``nodemap`` (``(nlay, ncpl)`` for one grid, a list per
+        layer otherwise), so it plots like a DISV idomain. MODFLOW 6 DISU
+        itself only accepts 0 and 1; this map is for tracking and plotting.
+        """
+        self._require_build()
+        codes = np.zeros(len(STATUS_NAMES), dtype=np.int64)
+        codes[ACTIVE], codes[PASSTHROUGH] = 1, -1
+        return self._public(codes[self.status])
+
+    def layer_view(self, values, layer, parent=None, pick="top", fill="nan"):
+        """One value per plan cell for an original layer, for 2D maps.
+
+        Args:
+            values: One value per DISU node (e.g. ``heads.ravel()``).
+            layer: The original layer, as numbered by ``parent``.
+            parent: The original layer of each layer, as returned by
+                :func:`subdivide`; ``None`` when no layer was split.
+            pick: Which sublayer gives the value in each column: ``"top"``
+                or ``"bottom"`` (the highest or lowest active one),
+                ``"middle"`` (the active cell at the original layer's
+                mid-elevation) or ``"mean"`` (thickness-weighted).
+            fill: For columns where the layer has no active cell: ``"nan"``,
+                or ``"cover"`` for the active cell that took over its interval
+                (see ``collapse``); no-flow cells always stay NaN.
+
+        Returns a ``(ncpl,)`` array on that layer's plan grid
+        (``grids_per_layer``); :meth:`vertex_grid` gives a FloPy grid for it.
+        """
+        self._require_build()
+        if pick not in ("top", "bottom", "middle", "mean"):
+            raise ValueError(f"pick must be 'top', 'bottom', 'middle' or 'mean', got {pick!r}.")
+        if fill not in ("nan", "cover"):
+            raise ValueError(f"fill must be 'nan' or 'cover', got {fill!r}.")
+        values = np.asarray(values, dtype=float).ravel()
+        if values.shape != (self.nodes,):
+            raise ValueError(f"values must have {self.nodes} entries, one per node.")
+        parent = np.arange(self.nlay) if parent is None else np.asarray(parent)
+        if parent.shape != (self.nlay,):
+            raise ValueError(f"parent needs one entry per layer ({self.nlay}).")
+        sub = np.flatnonzero(parent == layer)
+        if not len(sub):
+            raise ValueError(f"No layer has parent {layer!r}.")
+        grids = {self._layer_grid[k] for k in sub}
+        if len(grids) > 1:
+            raise ValueError(f"The sublayers of layer {layer} use different plan grids.")
+        cols = self._col_of[self._layer_grid[sub[0]]]
+        node = self._nodemap[np.ix_(sub, cols)]
+        active = node >= 0
+        value = np.where(active, values[np.maximum(node, 0)], np.nan)
+        top, bot = self._top_c[np.ix_(sub, cols)], self._bot_c[np.ix_(sub, cols)]
+        middle = (self.top_l[sub[0], cols] + self.bot_l[sub[-1], cols]) / 2
+        any_active = active.any(axis=0)
+        first = np.argmax(active, axis=0)
+        last = len(sub) - 1 - np.argmax(active[::-1], axis=0)
+        ncpl = np.arange(len(cols))
+        if pick == "top":
+            view = value[first, ncpl]
+        elif pick == "bottom":
+            view = value[last, ncpl]
+        elif pick == "mean":
+            thick = np.where(active, top - bot, 0.0)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                view = np.nansum(value * thick, axis=0) / thick.sum(axis=0)
+        else:
+            hit = active & (bot <= middle) & (middle <= top)
+            view = np.where(hit.any(axis=0), value[np.argmax(hit, axis=0), ncpl], np.nan)
+        view = np.where(any_active, view, np.nan)
+        if fill == "cover":
+            noflow = (self.status[np.ix_(sub, cols)] == NOFLOW).all(axis=0)
+            empty = ~any_active & ~noflow
+            if empty.any():
+                view[empty] = self._covering_value(values, cols[empty], middle[empty])
+        return view
+
+    def _covering_value(self, values, cols, z):
+        """Value of the active cell in each column whose collapsed interval contains ``z``."""
+        out = np.full(len(cols), np.nan)
+        for k in range(self.nlay):
+            node = self._nodemap[k, cols]
+            hit = (node >= 0) & (self._bot_c[k, cols] <= z) & (z <= self._top_c[k, cols]) & np.isnan(out)
+            out[hit] = values[node[hit]]
+        return out
+
+    def vertex_grid(self, layer):
+        """A ``flopy.discretization.VertexGrid`` of one layer's plan grid, for 2D plots.
+
+        Plot :meth:`layer_view`, :meth:`to_layers` or :attr:`idomain_layers`
+        results on it with ``flopy.plot.PlotMapView``. Cell centres are the
+        generators, as in the DISU grid.
+        """
+        self._require_build()
+        try:
+            import flopy
+        except ImportError as err:
+            raise ImportError("vertex_grid() needs flopy; install it with `pip install flopy`.") from err
+        from .utils import grid_to_disv
+
+        grid = self.grids_per_layer[layer]
+        planar = grid_to_disv(grid)
+        cols = self._col_of[self._layer_grid[layer]]
+        idomain = self.idomain_layers[layer]
+        return flopy.discretization.VertexGrid(
+            vertices=planar["vertices"], cell2d=planar["cell2d"], ncpl=planar["ncpl"], nlay=1,
+            top=self.top_l[layer, cols], botm=self.bot_l[layer, cols][None, :],
+            idomain=np.where(idomain == 0, 0, 1)[None, :], crs=grid.crs,
+        )
 
     def column(self, x, y):
         """Active DISU nodes at plan point ``(x, y)``, from the top down."""
