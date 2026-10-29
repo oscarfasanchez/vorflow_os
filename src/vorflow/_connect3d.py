@@ -150,8 +150,8 @@ def _containing(point_face, z, cell_face, cell_top, cell_bot):
     return found
 
 
-def staggered_links(status, nodemap, top_l, bot_l, faces, centres, sliver_tol=0.05, sliver_abs=1e-3,
-                    sliver_dip=None, cl12="plan"):
+def staggered_links(status, nodemap, top_l, bot_l, faces, centres, sliver_tol=0.0, sliver_abs=0.0,
+                    cl12="plan"):
     """Full connectivity: IHC=2 links between active cells whose shared faces overlap vertically.
 
     Across each plan face the interface elevations of the two columns are
@@ -160,12 +160,13 @@ def staggered_links(status, nodemap, top_l, bot_l, faces, centres, sliver_tol=0.
     the connectivity of Langevin's ``disv2disu.py`` (Provost et al. 2025),
     found in one sorted pass for all faces instead of layer by layer.
 
-    Pieces thinner than ``max(sliver_abs, sliver_tol * thinner cell)`` (or
-    than ``tan(sliver_dip) * centre distance`` when that is smaller) are
-    slivers: noise from sampling one surface at two centres. Each run of
-    slivers goes half to the piece above and half to the piece below, so the
-    face area is kept; ``hwva`` is scaled because MODFLOW 6 recomputes the
-    overlap from the cell elevations.
+    With the defaults every piece is kept, which keeps each cell's face areas
+    equal to its geometry. Optionally, pieces thinner than
+    ``max(sliver_abs, sliver_tol * thinner cell)`` are merged: each run goes
+    half to the piece above and half to the piece below, which keeps the face
+    area but moves it between cell pairs, so the result is no longer exact.
+    ``hwva`` is scaled because MODFLOW 6 recomputes the overlap from the cell
+    elevations.
 
     Returns ``(links, diagnostics)``.
     """
@@ -214,10 +215,7 @@ def staggered_links(status, nodemap, top_l, bot_l, faces, centres, sliver_tol=0.
     d1 = faces["distance_1"].to_numpy(dtype=float)[piece_face]
     d2 = faces["distance_2"].to_numpy(dtype=float)[piece_face]
     thinner = np.minimum(cc_top[cell_a] - cc_bot[cell_a], cc_top[cell_b] - cc_bot[cell_b])
-    tolerance = sliver_tol * thinner
-    if sliver_dip is not None:
-        tolerance = np.minimum(tolerance, np.tan(np.radians(sliver_dip)) * (d1 + d2))
-    tolerance = np.maximum(tolerance, sliver_abs)
+    tolerance = np.maximum(sliver_tol * thinner, sliver_abs)
     merged, sliver = _merge_slivers(piece_face, z_hi, z_lo, height, tolerance)
     keep = ~sliver
     piece_face, cell_a, cell_b = piece_face[keep], cell_a[keep], cell_b[keep]

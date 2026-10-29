@@ -111,6 +111,11 @@ def test_plan_slivers_join_the_largest_overlap_of_the_smaller_cell():
     # A sliver that is a cell's only overlap stays.
     alone = pd.DataFrame({"col_a": [0], "col_b": [1], "area": [0.01]})
     assert _merge_plan_slivers(alone, area, 0.05)[1] == 0
+    # The absolute criterion compares areas with sliver_abs squared; the defaults merge nothing.
+    pair = pd.DataFrame({"col_a": [0, 2], "col_b": [1, 1], "area": [0.1, 3.9]})
+    assert _merge_plan_slivers(pair, area, 0.0, 0.4)[1] == 1     # 0.1 < 0.16
+    assert _merge_plan_slivers(pair, area, 0.0, 0.3)[1] == 0     # 0.1 > 0.09
+    assert _merge_plan_slivers(pair, area)[1] == 0
 
 
 @pytest.mark.parametrize("dip", [0.0, 0.2])

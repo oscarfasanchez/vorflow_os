@@ -45,9 +45,20 @@ def test_dipping_offset_links_each_overlap_once():
     assert entries[b2, a1] == (2, 0.5, 1.0, 180.0)
 
 
-def test_sliver_is_merged_into_its_neighbours_and_face_area_is_kept():
+def test_by_default_every_piece_is_kept():
     top = np.array([20.0, 20.0])
     d = _two_columns(top, [10.000, 0], [10.002, 0])
+    a1, b2 = d.nodemap[0, 0], d.nodemap[1, 1]
+    pairs = _pairs(d)
+    assert len(pairs) == 3
+    assert pairs[frozenset((a1, b2))][1] == pytest.approx(0.002)
+    assert d.diagnostics["slivers_merged"] == 0
+    assert "merged pieces" not in d.report()
+
+
+def test_opt_in_sliver_merge_keeps_face_area_and_is_reported():
+    top = np.array([20.0, 20.0])
+    d = _two_columns(top, [10.000, 0], [10.002, 0], sliver_tol=0.05)
     a1, b1, a2, b2 = d.nodemap[0, 0], d.nodemap[0, 1], d.nodemap[1, 0], d.nodemap[1, 1]
     pairs = _pairs(d)
     assert set(pairs) == {frozenset((a1, b1)), frozenset((a2, b2))}
@@ -59,18 +70,10 @@ def test_sliver_is_merged_into_its_neighbours_and_face_area_is_kept():
     assert entries[a1, b1][2] == pytest.approx(9.999 / 9.998)
     assert d.diagnostics["slivers_merged"] == 1
     assert d.diagnostics["largest_sliver"] == pytest.approx(0.002)
-    # With no tolerance every geometric overlap is a link.
-    exact = _two_columns(top, [10.000, 0], [10.002, 0], sliver_tol=0, sliver_abs=0)
-    assert frozenset((a1, b2)) in _pairs(exact) and len(_pairs(exact)) == 3
-
-
-def test_a_small_offset_on_a_real_dip_is_not_a_sliver():
-    top = np.array([20.0, 20.0])
-    # 0.02 m over a 1 m centre distance is a 1.15 degree dip: below 5 % of the cell, but real.
-    kept = _two_columns(top, [10.0, 0], [10.02, 0])
-    merged = _two_columns(top, [10.0, 0], [10.02, 0], sliver_dip=None)    # Thickness rule alone.
-    steeper_cap = _two_columns(top, [10.0, 0], [10.02, 0], sliver_dip=2.0)
-    assert len(_pairs(kept)) == 3 and len(_pairs(merged)) == 2 and len(_pairs(steeper_cap)) == 2
+    assert "not exact" in d.report()
+    # The absolute criterion alone: 2 mm is below 3 mm but not below 1 mm.
+    assert len(_pairs(_two_columns(top, [10.000, 0], [10.002, 0], sliver_abs=0.003))) == 2
+    assert len(_pairs(_two_columns(top, [10.000, 0], [10.002, 0], sliver_abs=0.001))) == 3
 
 
 def _brute_force(d):

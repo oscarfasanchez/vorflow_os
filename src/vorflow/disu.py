@@ -51,9 +51,8 @@ class DisuOptions:
     min_thickness: float = 0.0
     collapse: str | None = "split"
     connectivity: str = "full"
-    sliver_tol: float = 0.05
-    sliver_abs: float = 1e-3
-    sliver_dip: float | None = 1.0
+    sliver_tol: float = 0.0
+    sliver_abs: float = 0.0
     cl12: str = "plan"
     strict: bool = False
 
@@ -62,10 +61,6 @@ class DisuOptions:
             value = getattr(self, name)
             if isinstance(value, bool) or not np.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be a finite number >= 0, got {value!r}.")
-        if self.sliver_dip is not None and (
-            isinstance(self.sliver_dip, bool) or not 0 <= self.sliver_dip < 90
-        ):
-            raise ValueError(f"sliver_dip must be None or in [0, 90) degrees, got {self.sliver_dip!r}.")
         if self.collapse not in _columns.COLLAPSE_MODES:
             raise ValueError(f"collapse must be one of {_columns.COLLAPSE_MODES}, got {self.collapse!r}.")
         if self.connectivity not in CONNECTIVITY:
@@ -101,14 +96,14 @@ class DisuGrid:
         connectivity: ``"full"`` adds vertically staggered connections between
             offset neighbours (IHC=2); ``"layered"`` reproduces DISV
             connectivity (same-layer neighbours only).
-        sliver_tol, sliver_abs, sliver_dip: An offset across a face is noise,
-            and treated as aligned, when it is below ``sliver_tol`` (5 %) of the
-            thinner cell and also flatter than ``sliver_dip`` degrees (1) between
-            the two centres; ``sliver_abs`` is a floor in length units. Both
-            conditions matter: a small offset on a steep dip between small cells
-            is real. ``sliver_dip=None`` uses the thickness rule alone. Plan
-            overlaps between grids below ``sliver_tol`` of the smaller cell are
-            added to that cell's largest overlap.
+        sliver_tol, sliver_abs: Optional merging of small pieces, off by
+            default (0). A piece of a side face thinner than
+            ``max(sliver_abs, sliver_tol * thinner cell)`` is given to the
+            pieces above and below it; a plan overlap between grids smaller
+            than ``max(sliver_abs**2, sliver_tol * smaller cell area)`` is added
+            to that cell's largest overlap. Merging gives fewer connections but
+            moves face area between cells, so results are no longer exact; the
+            defaults keep every piece, and MODFLOW handles tiny ones fine.
         cl12: ``"plan"`` (perpendicular plan distance to the face, as in the
             paper; exact for XT3D) or ``"connector"``.
         strict: Raise instead of warn when a check fails.
@@ -124,12 +119,10 @@ class DisuGrid:
     """
 
     def __init__(self, grids, top, botm, idomain=None, *, min_thickness=0.0, collapse="split",
-                 connectivity="full", sliver_tol=0.05, sliver_abs=1e-3, sliver_dip=1.0,
-                 cl12="plan", strict=False):
+                 connectivity="full", sliver_tol=0.0, sliver_abs=0.0, cl12="plan", strict=False):
         self.options = DisuOptions(
             min_thickness=min_thickness, collapse=collapse, connectivity=connectivity,
-            sliver_tol=sliver_tol, sliver_abs=sliver_abs, sliver_dip=sliver_dip,
-            cl12=cl12, strict=strict,
+            sliver_tol=sliver_tol, sliver_abs=sliver_abs, cl12=cl12, strict=strict,
         )
         self._grids, self._layer_grid, self._layers = _layer_inputs(grids, top, botm, idomain)
         self.nodemap = None
@@ -225,7 +218,7 @@ class DisuGrid:
             centres = columns[["x", "y"]].to_numpy(dtype=float)
             horizontal, found = staggered_links(
                 status, nodemap, top_l, bot_l, self._faces, centres, sliver_tol=opts.sliver_tol,
-                sliver_abs=opts.sliver_abs, sliver_dip=opts.sliver_dip, cl12=opts.cl12,
+                sliver_abs=opts.sliver_abs, cl12=opts.cl12,
             )
             self.diagnostics.update(found)
         else:
@@ -371,10 +364,14 @@ class DisuGrid:
         if len(self._faces):
             lines.append(f"  max plan orthogonality error: {self._faces['ortho_error'].max():.3g} deg")
         diag = self.diagnostics
-        if self.options.connectivity == "full":
-            lines.append(f"  slivers merged: {diag['slivers_merged']} (largest {diag['largest_sliver']:.3g})")
+        merged = diag["slivers_merged"] + diag["plan_slivers_merged"]
+        if merged:
+            lines.append(
+                f"  merged pieces: {diag['slivers_merged']} on side faces (largest {diag['largest_sliver']:.3g}), "
+                f"{diag['plan_slivers_merged']} plan overlaps; merged pieces move face area between cells, "
+                "so results are not exact (sliver_tol=0, sliver_abs=0 keeps every piece)."
+            )
         if not self.single_grid:
-            lines.append(f"  plan-overlap slivers merged: {diag['plan_slivers_merged']}")
             if diag["vertical_offset"] > 0:
                 lines.append(
                     f"  cells above and below a change of grid overlap by up to {diag['vertical_offset']:.3g}; "
@@ -497,7 +494,8 @@ class DisuGrid:
             return pd.DataFrame({"col_a": [], "col_b": [], "area": []})
         overlaps = pd.concat(frames, ignore_index=True)
         overlaps = overlaps[overlaps.area > self._touch_area[overlaps.col_a.to_numpy(dtype=int)]]
-        overlaps, merged = _merge_plan_slivers(overlaps, self._area, self.options.sliver_tol)
+        overlaps, merged = _merge_plan_slivers(overlaps, self._area, self.options.sliver_tol,
+                                               self.options.sliver_abs)
         self.diagnostics["plan_slivers_merged"] = merged
         return overlaps
 
@@ -714,15 +712,15 @@ def _bent_face(shared, centres, pair):
             "normal_x": float(normal[0]), "normal_y": float(normal[1])}
 
 
-def _merge_plan_slivers(overlaps, area, sliver_tol):
-    """Add overlaps smaller than ``sliver_tol`` of the smaller cell to that cell's largest overlap."""
-    if overlaps.empty or sliver_tol == 0:
+def _merge_plan_slivers(overlaps, area, sliver_tol=0.0, sliver_abs=0.0):
+    """Add overlaps below ``max(sliver_abs**2, sliver_tol * smaller cell area)`` to that cell's largest overlap."""
+    if overlaps.empty or (sliver_tol == 0 and sliver_abs == 0):
         return overlaps.reset_index(drop=True), 0
     overlaps = overlaps.reset_index(drop=True)
     a = overlaps.col_a.to_numpy(dtype=np.int64)
     b = overlaps.col_b.to_numpy(dtype=np.int64)
     small_cell = np.where(area[a] <= area[b], a, b)
-    tiny = overlaps.area.to_numpy() < sliver_tol * area[small_cell]
+    tiny = overlaps.area.to_numpy() < np.maximum(sliver_tol * area[small_cell], sliver_abs ** 2)
     if not tiny.any():
         return overlaps, 0
     merged_area = overlaps.area.to_numpy(dtype=float).copy()
