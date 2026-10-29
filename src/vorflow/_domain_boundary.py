@@ -37,7 +37,7 @@ def construction_frames(polygons, lines, points, background_lc):
     row = {name: None for name in polygons.columns}
     row.update(geometry=support, zone_id="__vorflow_boundary_support__", lc=h,
                z_order=float(embedded.z_order.min()) - 1, fields=[], embed=True,
-               quad_buffer=False, quad_buffer_thickness=1, gap_wall=False)
+               quad_buffer=False, quad_buffer_thickness=1, gap_wall=False, is_internal=True)
     next_polygon = int(max(polygons.index, default=-1)) + 1
     extra = gpd.GeoDataFrame([row], index=[next_polygon], crs=polygons.crs)
     construction = gpd.GeoDataFrame(pd.concat([polygons, extra]), crs=polygons.crs)
@@ -49,7 +49,7 @@ def construction_frames(polygons, lines, points, background_lc):
     for polygon in polygon_parts(domain):
         for ring in [polygon.exterior, *polygon.interiors]:
             geometry = LineString(ring.coords)
-            name = "__vorflow_domain_boundary__"
+            name = "model domain boundary"
             while name in used:
                 name += "_"
             used.add(name)
@@ -57,9 +57,9 @@ def construction_frames(polygons, lines, points, background_lc):
             # Native barrier sizing evaluates the zone/line/point fields along
             # the perimeter; do not impose the finest zone on the entire ring.
             row.update(geometry=geometry, line_id=name, lc=h,
-                       is_barrier=True, embed=True, quad_buffer=False,
+                       is_barrier=False, embed=True, quad_buffer=False,
                        quad_buffer_thickness=1, fields=[], z_order=0,
-                       simplify_tolerance=0., barrier_events=[], gap_wall=False)
+                       simplify_tolerance=0., barrier_events=[], gap_wall=False, is_internal=True)
             rows.append(row)
             ids.append(next_line)
             next_line += 1
@@ -100,7 +100,7 @@ def retain_domain_cells(tessellator, raw):
             f"Conforming domain boundary crosses cell {cell.node_id} near ({cell.x:.6g}, {cell.y:.6g}); "
             "refusing to clip it. Refine the boundary resolution or simplify the domain outline.")
     if tessellator.n_exact_barrier_mirrors:
-        raise BarrierMeshError("Conforming domain boundary required mirror repairs; refusing clipped or repaired cells.")
+        raise BarrierMeshError("Exact-face construction required mirror repairs while boundary_method='conforming'; a model boundary or user barrier may be responsible. Inspect the barrier diagnostics; repaired cells are refused.")
     keep = (inside > limits) & (outside <= limits)
     retained = raw.loc[keep].copy()
     covered = shapely.union_all(retained.geometry.to_numpy())

@@ -1047,7 +1047,8 @@ class VoronoiTessellator:
         out = []
         if exact is not None and not exact.empty:
             done = {int(fid) for fid in exact['feature_id']}
-            out += [(geom, True) for geom, is_barrier in zip(exact.geometry, exact['is_barrier'])
+            selected = exact['is_barrier'] | exact.get('is_internal', False)
+            out += [(geom, True) for geom, is_barrier in zip(exact.geometry, selected)
                     if is_barrier and geom is not None and not geom.is_empty]
         lines = getattr(self.mg, "_construction_lines", None)
         if lines is None:
@@ -1516,7 +1517,7 @@ class VoronoiTessellator:
         logger.info(f"  -> After Barrier Cuts: {len(self.final_grid)}")
         self._report_barrier_repairs()
         if self.boundary_report is not None and self.n_exact_barrier_cuts:
-            raise BarrierMeshError("Conforming domain construction required cell cuts; refusing repaired cells.")
+            raise BarrierMeshError("Exact-face construction required cell cuts while boundary_method='conforming'; a model boundary or user barrier may be responsible. Inspect the barrier diagnostics; repaired cells are refused.")
 
         # Final cleanup after potential splits.
         self.final_grid = _explode_with_unique_ids(self.final_grid)

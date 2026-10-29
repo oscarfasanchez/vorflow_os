@@ -494,7 +494,9 @@ grid = vt.generate()
 
 The same barrier planner evaluates the existing polygon, line and point size
 fields along the boundary and grades the spacing across junctions. The
-physical domain, including its holes, stays fixed. Temporary sites on the
+physical domain, including its holes, stays fixed. Generated outline faces in
+`mg.barrier_lines` are marked `is_internal=True` and `is_barrier=False` so
+selecting user barriers cannot assign resistance to construction geometry. Temporary sites on the
 inactive side supply the other half of the circle construction; their whole
 cells are discarded. Retained centres and IDs belong to the actual Voronoi
 generators. `vt.boundary_report` records zero clipped area, coverage error and

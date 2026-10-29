@@ -219,3 +219,17 @@ def test_conforming_domain_mf6_analytical_flow(tmp_path):
     budget, _ = flopy.utils.Mf6ListBudget(Path(tmp_path) / 'domain.lst').get_budget()
     assert float(np.abs(budget['PERCENT_DISCREPANCY']).max()) < .1
     assert abs(float(budget['GHB_IN'].max()) / 500 - 1) < .02
+
+
+
+@pytest.mark.slow
+def test_internal_domain_faces_are_not_user_barriers():
+    cm = _model(box(0, 0, 120, 80), barrier=LineString([(0, 20), (120, 60)]))
+    mg, vt, _ = _build(cm)
+    internal = mg.barrier_lines.loc[mg.barrier_lines.is_internal]
+    assert not internal.empty and not internal.is_barrier.any()
+    assert set(mg.barrier_lines.loc[mg.barrier_lines.is_barrier, 'line_id']) == {'fault'}
+    assert len(vt._barrier_lines()) == len(mg.barrier_lines)
+    vt.n_exact_barrier_mirrors = 1
+    with pytest.raises(BarrierMeshError, match='model boundary or user barrier'):
+        retain_domain_cells(vt, vt.boundary_construction_grid)

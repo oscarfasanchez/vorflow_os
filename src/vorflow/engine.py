@@ -1009,7 +1009,10 @@ class MeshGenerator:
             (after stubs and sharp tips are removed and narrow junctions
             merged; a stretch the faces of several lines share is part of
             each of their rows), with ``feature_id``
-            (the clean-line index), ``line_id`` and ``is_barrier``.
+            (the clean-line index), ``line_id``, ``is_barrier`` and ``is_internal``.
+            Model-outline construction faces are internal geometry, with
+            ``is_internal=True`` and ``is_barrier=False``. They must not be
+            selected as user hydraulic barriers. No resistance is assigned.
         barrier_circles (tuple): ``(centres (k, 2), radii (k,))`` of the
             empty circles; no generator other than the barrier sites may
             lie inside one.
@@ -3156,6 +3159,11 @@ class MeshGenerator:
         self.node_edges, self.node_is_site = fitted["edges"], fitted["is_site"]
         self.barrier_circles = (plan.layout.xy + context.origin, plan.layout.radius.copy())
         self.barrier_lines = _barrier_frames.barrier_lines_frame(plan, context, crs)
+        construction = self._construction_lines
+        internal_ids = set() if construction is None or 'is_internal' not in construction else set(
+            construction.index[construction.is_internal.fillna(False).astype(bool)])
+        self.barrier_lines['is_internal'] = self.barrier_lines.feature_id.isin(internal_ids)
+        self.barrier_lines['is_barrier'] &= ~self.barrier_lines.is_internal
         self._set_barrier_report(_barrier_frames.report(plan, context, fitted))
 
     def _set_barrier_report(self, report):
