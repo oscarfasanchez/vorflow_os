@@ -1,10 +1,12 @@
 """Different plan grids per layer: splice, global columns, overlay links and MODFLOW 6 accuracy."""
 
+import functools
+
 import geopandas as gpd
 import numpy as np
 import pandas as pd
 import pytest
-from shapely.geometry import box
+from shapely.geometry import LineString, box
 
 from vorflow import disu
 from vorflow.disu import _merge_plan_slivers
@@ -75,7 +77,7 @@ def test_columns_and_links_across_a_change_of_grid(grids):
     assert "on 2 grids" in d.report()
 
 
-def test_tops_of_new_columns_come_from_the_cell_above(grids):
+def test_nested_refinement_keeps_each_coarse_bottom(grids):
     base, pit = grids
     slope = 6.0 - 0.1 * base.x.to_numpy()
     d = _pit_model(grids, [slope, slope - 2, np.full(len(pit), 1.0), np.full(len(pit), 0.0)])
@@ -84,6 +86,61 @@ def test_tops_of_new_columns_come_from_the_cell_above(grids):
     # A fine cell centred at x=1.25 lies in the coarse cell centred at x=1.5: bottom 6 - 0.15 - 2.
     first = fine_l2[np.isclose(fine_l2.x, 1.25)].iloc[0]
     assert first.top == pytest.approx(3.85)
+    # Each coarse cell is its own group, so nothing moves.
+    assert d.diagnostics["contact_groups"] == 4
+    assert d.diagnostics["max_contact_shift"] == 0.0
+    np.testing.assert_array_equal(cm[(cm.layer == 1)].bot.to_numpy(), slope - 2)
+
+
+def _straddling_pit(base):
+    """Fine cells inside PIT whose middle row and column straddle the coarse edges at 2."""
+    edges = [1.0, 1.75, 2.25, 3.0]
+    polygons = [box(edges[i], edges[j], edges[i + 1], edges[j + 1]) for j in range(3) for i in range(3)]
+    fine = gpd.GeoDataFrame({"node_id": np.arange(900, 909), "x": [p.centroid.x for p in polygons],
+                             "y": [p.centroid.y for p in polygons]}, geometry=polygons)
+    return disu.splice(base, fine, PIT)
+
+
+def _contact_is_gap_free(d, upper, lower):
+    """Every cell starting in ``lower`` meets the bottoms of all cells it overlaps in ``upper``."""
+    cm = d.cellmap
+    above = cm[cm.layer == upper].reset_index(drop=True)
+    below = cm[cm.layer == lower].reset_index(drop=True)
+    ga, gb = d.grids_per_layer[upper].geometry.to_numpy(), d.grids_per_layer[lower].geometry.to_numpy()
+    for i, cell in enumerate(gb):
+        hits = [k for k, g in enumerate(ga) if g.intersection(cell).area > 1e-9]
+        assert all(above.bot[k] == below.top[i] for k in hits)
+
+
+def test_a_straddling_refinement_gets_one_gap_free_contact():
+    base = _boxes(4, 1.0)
+    pit = _straddling_pit(base)
+    slope = 6.0 - 0.1 * base.x.to_numpy()
+    d = disu.DisuGrid([base, base, pit, pit], 10.0, [slope, slope - 2, np.full(len(pit), 1.0),
+                                                     np.full(len(pit), 0.0)]).build()
+    _contact_is_gap_free(d, 1, 2)
+    # The four coarse pit cells are linked by the straddling cells: one group at their mean bottom.
+    inside = d.cellmap[(d.cellmap.layer == 1) & d.cellmap.x.between(1, 3) & d.cellmap.y.between(1, 3)]
+    np.testing.assert_allclose(inside.bot, 6.0 - 0.1 * 2.0 - 2)
+    assert d.diagnostics["contact_groups"] == 1
+    assert d.diagnostics["max_contact_shift"] == pytest.approx(0.05)
+    assert d.diagnostics["vertical_offset"] == 0
+    assert "1 contact groups made gap-free" in d.report()
+    # Columns outside the pit continue unchanged.
+    outside = d.cellmap[(d.cellmap.layer == 1) & ~(d.cellmap.x.between(1, 3) & d.cellmap.y.between(1, 3))]
+    np.testing.assert_allclose(outside.bot, 6.0 - 0.1 * outside.x - 2)
+
+
+def test_given_tops_must_meet_the_bottoms_above():
+    base = _boxes(4, 1.0)
+    pit = _straddling_pit(base)
+    slope = 6.0 - 0.1 * base.x.to_numpy()
+    botm = [slope, slope - 2, np.full(len(pit), 1.0), np.full(len(pit), 0.0)]
+    with pytest.raises(ValueError, match="do not meet the bottoms"):
+        disu.DisuGrid([base, base, pit, pit], [10.0, None, np.full(len(pit), 3.8), None], botm).build()
+    flat = [np.full(len(base), 6.0), np.full(len(base), 4.0), np.full(len(pit), 1.0), np.full(len(pit), 0.0)]
+    d = disu.DisuGrid([base, base, pit, pit], [10.0, None, np.full(len(pit), 4.0), None], flat).build()
+    _contact_is_gap_free(d, 1, 2)
 
 
 def test_lists_shaped_like_botm_round_trip(grids):
@@ -138,3 +195,55 @@ def test_pit_refined_at_depth_reproduces_a_linear_head_with_xt3d(tmp_path, grids
     heads = _run(flopy, exe, tmp_path, lambda gwf: flopy.mf6.ModflowGwfdisu(gwf, **props), chd,
                  np.ones(d.nodes), k33=1.0, xt3doptions=True, angle2=0.0, angle3=0.0).ravel()
     assert np.abs(heads - exact)[~edge].max() < 1e-6
+
+
+VORONOI_DOMAIN, VORONOI_PIT = box(0, 0, 1000, 600), box(400, 200, 600, 400)
+
+
+@functools.lru_cache(maxsize=None)
+def voronoi_pit(pit_resolution=None):
+    """The notebook's Voronoi model: 60 m cells, the pit outline as a barrier, optionally 12 m inside.
+
+    Returns ``(tessellator, grid)``.
+    """
+    from vorflow import ConceptualMesh, MeshGenerator, VoronoiTessellator
+
+    cm = ConceptualMesh()
+    cm.add_polygon(VORONOI_DOMAIN, zone_id=1, resolution=60)
+    cm.add_line(LineString(VORONOI_PIT.exterior.coords), line_id="pit", resolution=30, is_barrier=True)
+    if pit_resolution:
+        cm.add_polygon(VORONOI_PIT, zone_id=2, resolution=pit_resolution, embed=False)
+    mg = MeshGenerator(background_lc=60, conceptual_mesh=cm, verbosity=0)
+    mg.generate()
+    vt = VoronoiTessellator(mg, cm)
+    return vt, vt.generate()
+
+
+def linear_field_error(tmp_path, grids, dip, gradient=(-0.01, 0.005, -0.3)):
+    """Max head error of a uniform gradient on six layers, MF6 with XT3D; grids is one per layer."""
+    flopy, exe = _mf6()
+    tilt = [-dip * g.x.to_numpy() for g in grids]
+    botm = [level + t for level, t in zip((80.0, 60.0, 50.0, 40.0, 30.0, 20.0), tilt)]
+    d = disu.DisuGrid(grids, 100.0 + tilt[0], botm).build()
+    cm = d.cellmap[d.cellmap.node >= 0].sort_values("node")
+    x, y, layer = cm.x.to_numpy(), cm.y.to_numpy(), cm.layer.to_numpy()
+    z = ((cm.top + cm.bot) / 2).to_numpy()
+    exact = 50.0 + gradient[0] * x + gradient[1] * y + gradient[2] * z
+    edge = (x < 60) | (x > 940) | (y < 60) | (y > 540) | (layer == 0) | (layer == 5)
+    chd = [[(int(n),), float(exact[n])] for n in np.flatnonzero(edge)]
+    props = d.get_gridprops_disu6()
+    heads = _run(flopy, exe, tmp_path, lambda gwf: flopy.mf6.ModflowGwfdisu(gwf, **props), chd,
+                 np.ones(d.nodes), k33=1.0, xt3doptions=True, angle2=0.0, angle3=0.0).ravel()
+    return np.abs(heads - exact)[~edge].max(), d
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("dip", [0.0, 0.03])
+def test_voronoi_pit_refined_at_depth_is_exact_with_xt3d(tmp_path, dip):
+    """Independent fine Voronoi below, hanging outline vertices, straddling cells: still exact."""
+    _, base = voronoi_pit()
+    _, fine = voronoi_pit(12)
+    pit = disu.splice(base, fine, VORONOI_PIT)
+    error, d = linear_field_error(tmp_path, [base] * 3 + [pit] * 3, dip)
+    assert d.diagnostics["vertical_offset"] == 0
+    assert error < 1e-6

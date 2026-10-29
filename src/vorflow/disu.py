@@ -32,6 +32,8 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import shapely
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components
 
 from . import _columns
 from ._columns import ABSENT, ACTIVE, NOFLOW, PASSTHROUGH, STATUS_NAMES, subdivide  # noqa: F401
@@ -81,8 +83,11 @@ class DisuGrid:
         top: Model top, scalar or one value per cell of the first layer's grid.
             With several grids it may also be a list with one entry per layer:
             ``None``, or the tops of that layer's cells. Where a layer's grid
-            has cells that the layer above lacks, their tops are taken from
-            the bottom of the cell above them unless given here.
+            has cells that the layer above lacks (a change of grid), the
+            contact is made gap-free: cells that overlap across it share one
+            elevation, the area-weighted mean of the bottoms above (exactly
+            those bottoms when they agree, e.g. for nested refinement). Tops
+            given here must match the bottoms above them.
         botm: Layer bottoms: ``(nlay,)`` or ``(nlay, ncpl)`` for one grid, or a
             list with one value or array per layer.
         idomain: ``None`` (all active), ``(nlay, ncpl)`` or a list per layer:
@@ -208,7 +213,8 @@ class DisuGrid:
         self._node_top, self._node_bot = top_l[active], bot_l[active]
         self._node_layer, self._node_cell = np.nonzero(active)
 
-        self.diagnostics = {"slivers_merged": 0, "largest_sliver": 0.0, "plan_slivers_merged": 0}
+        self.diagnostics = {"slivers_merged": 0, "largest_sliver": 0.0, "plan_slivers_merged": 0,
+                            **self._contact}
         overlaps = self._overlaps()
         vertical = concat_links(
             vertical_links(status, nodemap, top_l, bot_l, self._area),
@@ -238,9 +244,10 @@ class DisuGrid:
         accepts only 0 and 1 there, so use :attr:`cellmap` (or
         :meth:`save_cellmap`) to map nodes to layers, cells and zones.
 
-        Where layers use different grids and the cells above and below a
-        change of grid overlap slightly in elevation, ``vertical_offset_tolerance``
-        is set to the largest overlap so MODFLOW 6 accepts the connections.
+        Contacts at a change of grid are gap-free, so cells above and below
+        meet exactly. If any vertical connection still overlaps in elevation,
+        ``vertical_offset_tolerance`` is set to the largest overlap so MODFLOW 6
+        accepts it.
         """
         self._require_build()
         props = mf6_gridprops(
@@ -372,6 +379,11 @@ class DisuGrid:
                 "so results are not exact (sliver_tol=0, sliver_abs=0 keeps every piece)."
             )
         if not self.single_grid:
+            if diag["contact_groups"]:
+                lines.append(
+                    f"  change of grid: {diag['contact_groups']} contact groups made gap-free "
+                    f"(largest shift of a bottom above: {diag['max_contact_shift']:.3g})"
+                )
             if diag["vertical_offset"] > 0:
                 lines.append(
                     f"  cells above and below a change of grid overlap by up to {diag['vertical_offset']:.3g}; "
@@ -402,6 +414,7 @@ class DisuGrid:
         top_l = np.full((self.nlay, ncol), np.nan)
         bot_l = np.full((self.nlay, ncol), np.nan)
         idomain = np.zeros((self.nlay, ncol), dtype=np.int64)
+        self._contact = {"contact_groups": 0, "max_contact_shift": 0.0}
         for layer, (top, bot, ido) in enumerate(self._layers):
             cols = self._col_of[self._layer_grid[layer]]
             bot_l[layer, cols] = bot
@@ -412,10 +425,14 @@ class DisuGrid:
             above = bot_l[layer - 1, cols]
             new = np.isnan(above)
             layer_top = above.copy()
-            if top is not None:
-                layer_top[new] = np.broadcast_to(top, cols.shape)[new]
-            elif new.any():
-                layer_top[new] = self._sample_above(layer, cols[new], bot_l[layer - 1])
+            if new.any():
+                in_layer = np.zeros(ncol, dtype=bool)
+                in_layer[cols] = True
+                ending = np.flatnonzero(~np.isnan(bot_l[layer - 1]) & ~in_layer)
+                given = None if top is None else np.broadcast_to(top, cols.shape)[new]
+                start_top, end_bot = self._contact_levels(layer, ending, cols[new], bot_l[layer - 1], given)
+                bot_l[layer - 1, ending] = end_bot
+                layer_top[new] = start_top
             top_l[layer, cols] = layer_top
         with np.errstate(invalid="ignore"):
             bad = np.argwhere(top_l < bot_l)
@@ -423,9 +440,71 @@ class DisuGrid:
             layer, col = bad[0]
             raise ValueError(
                 f"Negative thickness in layer {layer} (column {col}): each bottom must lie at or "
-                "below the bottom of the layer above."
+                "below the bottom of the layer above. At a change of grid the contact is the "
+                "area-weighted mean of the bottoms above it; give a flat botm there to choose it."
             )
         return top_l, bot_l, idomain
+
+    def _contact_levels(self, layer, ending, starting, bot_above, given=None):
+        """One contact elevation per group of cells that meet across a change of grid.
+
+        ``ending`` columns stop below ``layer - 1`` and ``starting`` columns
+        begin in ``layer``. Cells that overlap in plan are joined into groups;
+        each group's contact is the area-weighted mean of its upper cells'
+        bottoms, so no gap or overlap remains between the two grids. A group
+        with a single upper cell (nested refinement), or whose bottoms already
+        agree, keeps that elevation exactly. Tops given for ``starting`` cells
+        are kept, and must match the bottoms above them.
+
+        Returns ``(top of each starting column, bottom of each ending column)``.
+        """
+        geoms = self._columns.geometry.to_numpy()
+        n_s, n_e = len(starting), len(ending)
+        s_idx = e_idx = np.zeros(0, dtype=np.int64)
+        if n_e:
+            s_idx, e_idx = shapely.STRtree(geoms[ending]).query(geoms[starting], predicate="intersects")
+            overlap = shapely.area(shapely.intersection(geoms[starting][s_idx], geoms[ending][e_idx]))
+            keep = overlap > self._touch_area[starting[s_idx]]
+            s_idx, e_idx = s_idx[keep], e_idx[keep]
+        graph = coo_matrix((np.ones(len(s_idx)), (s_idx, n_s + e_idx)), shape=(n_s + n_e, n_s + n_e))
+        n_groups, label = connected_components(graph, directed=False)
+        group_s, group_e = label[:n_s], label[n_s:]
+        bottom = bot_above[ending]
+        weight = self._area[ending]
+        total = np.bincount(group_e, weights=weight, minlength=n_groups)
+        level = np.full(n_groups, np.nan)
+        joined = total > 0
+        level[joined] = np.bincount(group_e, weights=weight * bottom, minlength=n_groups)[joined] / total[joined]
+        lowest = np.full(n_groups, np.inf)
+        highest = np.full(n_groups, -np.inf)
+        np.minimum.at(lowest, group_e, bottom)
+        np.maximum.at(highest, group_e, bottom)
+        agree = joined & (lowest == highest)
+        level[agree] = lowest[agree]
+
+        start_top = level[group_s]
+        if given is not None:
+            scale = np.nanmax(np.abs(np.r_[given, bottom, 1.0]))
+            spread = np.where(joined, highest - lowest, 0.0)[group_s]
+            mismatch = (np.abs(given - np.where(np.isnan(start_top), given, start_top)) > 1e-9 * scale) | (
+                spread > 1e-9 * scale)
+            if mismatch.any():
+                raise ValueError(
+                    f"Layer {layer}: the tops given for cells below the change of grid do not meet the "
+                    "bottoms of the cells above them. Leave that layer's top as None to make the contact "
+                    "gap-free automatically."
+                )
+            start_top = np.asarray(given, dtype=float).copy()
+        lone = np.isnan(start_top)
+        if lone.any():
+            start_top[lone] = self._sample_above(layer, starting[lone], bot_above)
+        end_bot = level[group_e]
+        groups = np.unique(group_s[~lone])
+        self._contact["contact_groups"] += int(len(groups))
+        if n_e:
+            self._contact["max_contact_shift"] = max(self._contact["max_contact_shift"],
+                                                     float(np.abs(end_bot - bottom).max()))
+        return start_top, end_bot
 
     def _sample_above(self, layer, cols, bot_above):
         """Bottom of the layer-above cell that contains each column's centre."""
