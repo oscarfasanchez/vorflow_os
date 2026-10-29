@@ -64,6 +64,7 @@ or useful enough to port.
 | 6 | First PyPI release | Done (`0.1.0`) | [06-pypi-publishing.md](06-pypi-publishing.md) |
 | 7 | Centred point cells and Lloyd relaxation | Done | [07-point-centring-lloyd.md](07-point-centring-lloyd.md) |
 | 8 | Exact barrier faces | Done (unreleased) | [08-exact-barrier-faces.md](08-exact-barrier-faces.md) |
+| 9 | Fully unstructured DISU with full connectivity | Done (unreleased) | [09-full-connectivity-disu.md](09-full-connectivity-disu.md) |
 
 The seven porting milestones are done. Milestone 8, exact barrier faces,
 followed after 0.3.0. `0.1.0` was released to PyPI (milestone 6),

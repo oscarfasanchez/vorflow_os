@@ -9,6 +9,28 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `vorflow.disu`: fully unstructured MODFLOW grids with full connectivity
+  (Provost et al. 2025, after Langevin's USGS `disv2disu.py`).
+  - `DisuGrid(grid, top, botm, idomain).build()` takes FloPy-style layer
+    arrays. `get_gridprops_disu6()` and `get_gridprops_disu5()` return
+    arguments for `flopy.mf6.ModflowGwfdisu` and `flopy.mfusg.MfUsgDisU`,
+    with gridgen's key names.
+  - Cells in different layers whose faces overlap vertically are connected
+    (IHC=2), found by merging the interface elevations of each face. Small
+    offsets that are flatter than `sliver_dip` and thinner than `sliver_tol`
+    of the cell are merged without losing face area.
+  - Pass-through cells (idomain -1 or thinner than `min_thickness`) are
+    removed without leaving gaps (`collapse`); idomain 0 stays no-flow.
+  - Layers can use different plan grids: `splice(base, fine, polygon)`
+    refines an area, and cells that change grid are joined by their plan
+    overlaps.
+  - `subdivide()` makes sublayers in all or some columns.
+  - `nodemap`, `cellmap`, `to_nodes`, `to_layers`, `locate`, `column` and
+    `save_cellmap` track cells; `from_disv()` reads existing DISV models.
+  - `report()` gives the offset ratio from the paper, a sublayer suggestion,
+    and the reminder that MF6 XT3D needs NPF `angle2`/`angle3` to account
+    for vertical offsets.
+  - See `docs/design/09-full-connectivity-disu.md`.
 - `ConceptualMesh.check(background_lc=None)` reports input defects that tend
   to produce bad Voronoi cells, before meshing and without Gmsh: short
   segments, close vertices (including a line crossing a polygon edge beside a

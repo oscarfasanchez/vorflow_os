@@ -17,4 +17,5 @@ examples/cleaning_limitations_demo
 examples/barrier_meshing
 examples/basic_example_modflow
 examples/basic_example_mfusg
+examples/full_connectivity_demo
 ```

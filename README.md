@@ -386,6 +386,49 @@ notebook kernel's environment. The example
 requires the separate `mfusg` executable on PATH or an `MFUSG_EXE` path;
 install it outside the notebook with `get-modflow /path/to/bin --subset mfusg`.
 
+### Fully unstructured DISU (full connectivity)
+
+`vorflow.disu` turns a vorflow grid and FloPy-style layer arrays into a fully
+unstructured DISU grid for MODFLOW 6 or MODFLOW-USG. Layers can follow
+dipping or undulating surfaces: cells whose shared faces overlap vertically
+are connected even when they are in different layers ("full connectivity",
+Provost et al. 2025).
+
+```python
+import flopy
+from vorflow import disu
+
+d = disu.DisuGrid(grid, top, botm, idomain).build()   # FloPy shapes: (ncpl,), (nlay, ncpl)
+print(d.report())
+flopy.mf6.ModflowGwfdisu(gwf, **d.get_gridprops_disu6())
+flopy.mf6.ModflowGwfnpf(gwf, k=d.to_nodes(k_layers), xt3doptions=True, angle2=0.0, angle3=0.0)
+heads = d.to_layers(gwf.output.head().get_data().ravel())  # back to (nlay, ncpl), NaN where removed
+```
+
+- **Pinch-outs:** idomain -1 or `min_thickness` marks pass-through cells.
+  They are removed, and their interval goes to the active cells above and
+  below (`collapse="split"`), so no thickness is lost. idomain 0 is no-flow
+  and never passes flow.
+- **XT3D:** use it with offset layers, and give NPF `angle2` and `angle3`
+  (zeros are fine). Without them MODFLOW 6 XT3D ignores the vertical
+  offsets. MODFLOW-USG (`get_gridprops_disu5()`, `write_gsf()`) has no XT3D
+  but still gains from the extra connections.
+- **Finer cells at depth:** `disu.splice(base, fine, polygon)` keeps the base
+  cells outside the polygon. Pass one grid per layer, e.g.
+  `DisuGrid([base, base, pit, pit], top, [b0, b1, b2, b3])`. The outline
+  must be cell faces in both grids (`add_line(outline, is_barrier=True)`).
+- **Sublayers:** `disu.subdivide(top, botm, idomain, nsub=..., where=mask)`
+  splits layers everywhere or only in some columns.
+- **Tracking:** `nodemap`, `cellmap` (or `save_cellmap()`), `to_nodes`,
+  `to_layers`, `locate(x, y, z)` and `column(x, y)`. MF6 DISU accepts
+  IDOMAIN 0/1 only, so tags live in the cell map; the layer number is also
+  on the IHC diagonal.
+- **Existing DISV models** (FloPy, LoopFlopy) go in through
+  `disu.DisuGrid.from_disv(vertices, cell2d, top, botm, idomain)`.
+
+See [design note 9](docs/design/09-full-connectivity-disu.md) for the
+method, the MODFLOW details it relies on and the validation.
+
 ### Optional file export
 
 GeoPandas writes formats such as Shapefile and GeoPackage through an I/O engine
@@ -561,6 +604,9 @@ around wells.
 [examples/barrier_meshing.ipynb](https://github.com/rhugman/vorflow/blob/main/examples/barrier_meshing.ipynb)
 shows how barrier faces are placed, what `barrier_report` lists and the
 remaining limits.
+[examples/full_connectivity_demo.ipynb](https://github.com/rhugman/vorflow/blob/main/examples/full_connectivity_demo.ipynb)
+builds DISU grids with full connectivity: the dipping-aquifer test of
+Provost et al. (2025) and a Voronoi model refined only at depth.
 
 ## Contributing
 
@@ -576,6 +622,18 @@ If you use `vorflow` in your work, please cite it using the metadata in
 (GitHub's "Cite this repository" button formats it).
 
 ## Acknowledgements
+
+The full-connectivity DISU builder (`vorflow.disu`) follows the algorithm of
+C. D. Langevin's USGS `disv2disu.py`, published with Provost, A.M., Bardot,
+K., Langevin, C.D. and McCallum, J.L. (2025), *Accurate simulation of flow
+through dipping aquifers with MODFLOW 6 using enhanced cell connectivity*,
+Groundwater 63(3), 399-408 (<https://doi.org/10.1111/gwat.13459>), and the
+problem described by Bardot, K., Lesueur, M., Siade, A.J. and McCallum, J.L.
+(2023), *Revisiting MODFLOW's capability to model flow through sedimentary
+structures*, Groundwater 61, 663-673 (<https://doi.org/10.1111/gwat.13273>).
+Its pass-through of pinched cells follows
+[LoopFlopy](https://github.com/kerrybardot/loopflopy) (Bardot et al. 2025,
+Environmental Modelling & Software 192, 106557).
 
 Thanks to David ([@d-strom](https://github.com/d-strom)) for reporting the
 line-junction problem in [#31](https://github.com/rhugman/vorflow/issues/31)
