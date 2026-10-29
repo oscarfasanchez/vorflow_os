@@ -68,7 +68,7 @@ def test_layered_csr_structure_and_symmetry():
     assert entries[0, 1] == (1, 0.5, 1.0, 0.0)
     assert entries[0, 3] == (1, 0.5, 1.0, 90.0)
     assert entries[0, 6] == (0, 2.5, 1.0, 0.0)
-    assert entries[6, 0][1] == 2.5
+    assert entries[6, 0] == (0, 2.5, 1.0, 0.0)          # Vertical links carry no angle either way.
     assert len(props["cell2d"]) == 12 and props["cell2d"][7][0] == 7
     np.testing.assert_array_equal(props["top"][:6], 10)
     np.testing.assert_array_equal(props["bot"][6:], 0)

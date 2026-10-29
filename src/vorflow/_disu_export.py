@@ -14,7 +14,8 @@ def _csr(nodes, links, diagonal):
     Returns the entry arrays sorted into rows and ``iac``.
     """
     n, m = links["n"], links["m"]
-    reverse = (links["angle"] + 180.0) % 360.0
+    # Horizontal faces point the other way from m; vertical links carry no angle.
+    reverse = np.where(links["ihc"] > 0, (links["angle"] + 180.0) % 360.0, 0.0)
     entries = {
         "row": np.concatenate([np.arange(nodes), n, m]),
         "col": np.concatenate([np.arange(nodes), m, n]),
