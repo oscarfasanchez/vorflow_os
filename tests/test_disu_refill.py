@@ -6,6 +6,7 @@ import shapely
 from shapely.geometry import Polygon, box
 
 from vorflow import disu
+from vorflow._mfusg import _planar_faces
 from vorflow._refill import outline_nodes
 
 from test_disu_multigrid import PIT, VORONOI_PIT, _boxes, linear_field_error, voronoi_pit
@@ -70,6 +71,10 @@ def test_refill_of_the_voronoi_pit_shares_all_outline_vertices():
     assert _outline_vertices(grid, VORONOI_PIT, True) == _outline_vertices(base, VORONOI_PIT, False)
     info = grid.attrs["refill"]
     assert info["outline_vertices"] == 28 and info["max_neighbour_area_ratio"] < 4
+    # Every face, the outline included, is perpendicular to the line between its two generators.
+    faces = _planar_faces(grid)[2]
+    assert faces["ortho_error"].max() < 1e-4          # degrees; roundoff only
+    assert faces["shared_length"].min() > 1e-3        # no roundoff-length faces on the outline
 
 
 @pytest.mark.slow

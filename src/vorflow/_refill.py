@@ -97,9 +97,18 @@ def check_circles(generators, centres, radii, own):
             )
 
 
-def voronoi_cells(generators, polygon, keep):
-    """Voronoi cells of ``generators`` clipped to ``polygon``, for the generators in ``keep``."""
+def voronoi_cells(generators, polygon, keep, nodes, tolerance):
+    """Voronoi cells of ``generators`` clipped to ``polygon``, for the generators in ``keep``.
+
+    Cell vertices within ``tolerance`` of an outline node are set to it
+    exactly, so they coincide with the base grid's vertices instead of
+    leaving roundoff-length faces.
+    """
     cells = shapely.voronoi_polygons(shapely.multipoints(generators), extend_to=polygon.buffer(polygon.length),
                                      ordered=True)
-    cells = np.asarray(cells.geoms)[keep]
-    return shapely.intersection(cells, polygon)
+    cells = shapely.intersection(np.asarray(cells.geoms)[keep], polygon)
+    coords = shapely.get_coordinates(cells)
+    distance, nearest = cKDTree(nodes).query(coords)
+    close = distance <= tolerance
+    coords[close] = nodes[nearest[close]]
+    return shapely.normalize(shapely.make_valid(shapely.set_coordinates(cells, coords)))

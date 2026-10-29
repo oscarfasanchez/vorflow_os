@@ -855,7 +855,7 @@ def refill(base, polygon, resolution, *, growth=1.2, border_divisions=1):
     own = own_site + [(-1, -1)] * len(fill) + own_site
     _refill.check_circles(generators, centres, radii, own)
     keep = np.arange(n + len(fill))
-    cells = _refill.voronoi_cells(generators, polygon, keep)
+    cells = _refill.voronoi_cells(generators, polygon, keep, nodes, tolerance)
     new = gpd.GeoDataFrame({"x": generators[keep, 0], "y": generators[keep, 1]}, geometry=cells, crs=base.crs)
     new_nodes = _refill.outline_nodes(cells, ring, tolerance)
     shared = _shared_points(base_nodes, new_nodes, tolerance)
@@ -881,19 +881,21 @@ def _shared_points(a, b, tolerance):
 
 def _refill_mesh_nodes(polygon, spacing, resolution, growth):
     """Gmsh nodes filling ``polygon``: ``spacing`` at the outline, growing to ``resolution`` inside."""
+    from ._log import verbosity_scope
     from .blueprint import ConceptualMesh
     from .engine import MeshGenerator
 
-    cm = ConceptualMesh()
-    cm.add_polygon(polygon, zone_id=1, resolution=max(spacing, resolution))
-    if resolution < spacing:
-        inradius = shapely.length(shapely.maximum_inscribed_circle(polygon))
-        inset = min((spacing - resolution) / (growth - 1), 0.5 * inradius)
-        core = polygon.buffer(-inset, join_style="mitre")
-        if not core.is_empty:
-            cm.add_polygon(core, zone_id=2, resolution=resolution, embed=False, growth_factor=growth)
-    mg = MeshGenerator(background_lc=max(spacing, resolution), conceptual_mesh=cm, verbosity=0)
-    mg.generate()
+    with verbosity_scope(0):
+        cm = ConceptualMesh()
+        cm.add_polygon(polygon, zone_id=1, resolution=max(spacing, resolution))
+        if resolution < spacing:
+            inradius = shapely.length(shapely.maximum_inscribed_circle(polygon))
+            inset = min((spacing - resolution) / (growth - 1), 0.5 * inradius)
+            core = polygon.buffer(-inset, join_style="mitre")
+            if not core.is_empty:
+                cm.add_polygon(core, zone_id=2, resolution=resolution, embed=False, growth_factor=growth)
+        mg = MeshGenerator(background_lc=max(spacing, resolution), conceptual_mesh=cm, verbosity=0)
+        mg.generate()
     return np.asarray(mg.nodes, dtype=float)[:, :2]
 
 
