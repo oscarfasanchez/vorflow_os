@@ -40,7 +40,7 @@ from ._columns import ABSENT, ACTIVE, NOFLOW, PASSTHROUGH, STATUS_NAMES, subdivi
 from ._connect3d import concat_links, layered_links, overlay_links, staggered_links, vertical_links
 from ._disu_export import mf6_gridprops, mfusg_gridprops, write_gsf
 
-__all__ = ["DisuGrid", "DisuOptions", "splice", "subdivide"]
+__all__ = ["DisuGrid", "DisuOptions", "refill", "splice", "subdivide"]
 
 CONNECTIVITY = ("full", "layered")
 CL12_MODES = ("plan", "connector")
@@ -676,6 +676,127 @@ def splice(base, fine, polygon):
     if "node_id" not in outside:
         outside["node_id"] = outside["source_node_id"]
     return gpd.GeoDataFrame(pd.concat([outside, inside], ignore_index=True), crs=base.crs)
+
+
+def refill(base, polygon, resolution, *, growth=1.2, border_divisions=1):
+    """Re-mesh the inside of ``polygon`` with finer Voronoi cells that share the outline's vertices.
+
+    The outline must be made of cell faces in ``base``, which vorflow gives
+    when it is added as a barrier line (``add_line(..., is_barrier=True)``).
+    Cells outside stay exactly as in ``base``, so their columns continue
+    through every layer; the new cells inside end at the same outline
+    vertices, so every outline face is shared one to one (no hanging
+    vertices). Use the result for the layers that need the finer cells, as
+    with :func:`splice`.
+
+    Args:
+        base: The vorflow grid to start from.
+        polygon: The area to re-mesh: one polygon without holes.
+        resolution: Target cell size inside.
+        growth: Cell-to-cell size ratio (> 1) from the outline spacing at
+            the outline to ``resolution`` further in; larger values reach the
+            fine size sooner.
+        border_divisions: Split every outline face into this many faces on
+            the inside, so the cells along the outline start finer (e.g. 2
+            for half the outline spacing). The base vertices are still
+            shared; the extra ones lie on the outside cells' faces.
+
+    Returns the spliced grid (base cells outside, new cells inside, with
+    ``splice_source`` and ``source_node_id`` as in :func:`splice`). Its
+    ``attrs["refill"]`` holds the number of new cells, the outline spacing
+    and the largest area ratio between neighbouring new cells.
+    """
+    from . import _refill
+
+    if not np.isfinite(resolution) or resolution <= 0:
+        raise ValueError(f"resolution must be a positive number, got {resolution!r}.")
+    if isinstance(growth, bool) or not growth > 1:
+        raise ValueError(f"growth must be greater than 1, got {growth!r}.")
+    if isinstance(border_divisions, bool) or int(border_divisions) != border_divisions or border_divisions < 1:
+        raise ValueError(f"border_divisions must be a positive integer, got {border_divisions!r}.")
+    polygon = shapely.make_valid(polygon)
+    if polygon.geom_type != "Polygon" or len(polygon.interiors):
+        raise ValueError("refill takes one polygon without holes; call it once per area.")
+    ring = polygon.exterior
+    geoms = base.geometry.to_numpy()
+    area = shapely.area(geoms)
+    inside = shapely.area(shapely.intersection(geoms, polygon))
+    crossing = (inside > 1e-9 * area) & (area - inside > 1e-9 * area)
+    if crossing.any():
+        raise ValueError(
+            f"{int(crossing.sum())} base cells cross the refill outline; add the outline as a barrier "
+            "line (is_barrier=True) so it becomes cell faces."
+        )
+    tolerance = 1e-7 * ring.length
+    touching = geoms[shapely.dwithin(geoms, ring, tolerance)]
+    base_nodes = _refill.outline_nodes(touching, ring, tolerance)
+    nodes = _refill.subdivide_outline(base_nodes, int(border_divisions))
+    sites_in, sites_out, centres, radii = _refill.mirrored_sites(nodes, polygon)
+    segment = np.linalg.norm(np.roll(nodes, -1, axis=0) - nodes, axis=1)
+    spacing = float(np.median(segment))
+    candidates = _refill_mesh_nodes(polygon, spacing, float(resolution), float(growth))
+    fill = _refill.fill_nodes(candidates, centres, radii, np.vstack([sites_in, sites_out]),
+                              min(float(resolution), spacing))
+    generators = np.vstack([sites_in, fill, sites_out])
+    n = len(nodes)
+    own_site = [(i, (i + 1) % n) for i in range(n)]
+    own = own_site + [(-1, -1)] * len(fill) + own_site
+    _refill.check_circles(generators, centres, radii, own)
+    keep = np.arange(n + len(fill))
+    cells = _refill.voronoi_cells(generators, polygon, keep)
+    new = gpd.GeoDataFrame({"x": generators[keep, 0], "y": generators[keep, 1]}, geometry=cells, crs=base.crs)
+    new_nodes = _refill.outline_nodes(cells, ring, tolerance)
+    shared = _shared_points(base_nodes, new_nodes, tolerance)
+    if shared < len(base_nodes):
+        raise ValueError(
+            f"refill: only {shared} of the {len(base_nodes)} outline vertices are shared; please report this."
+        )
+    result = splice(base, new, polygon)
+    result.attrs["refill"] = {
+        "cells": len(new), "outline_vertices": len(base_nodes), "outline_spacing": spacing,
+        "max_neighbour_area_ratio": _max_neighbour_ratio(cells),
+    }
+    return result
+
+
+def _shared_points(a, b, tolerance):
+    """How many points of ``a`` have a point of ``b`` within ``tolerance``."""
+    from scipy.spatial import cKDTree
+
+    distance, _ = cKDTree(b).query(a)
+    return int((distance <= tolerance).sum())
+
+
+def _refill_mesh_nodes(polygon, spacing, resolution, growth):
+    """Gmsh nodes filling ``polygon``: ``spacing`` at the outline, growing to ``resolution`` inside."""
+    from .blueprint import ConceptualMesh
+    from .engine import MeshGenerator
+
+    cm = ConceptualMesh()
+    cm.add_polygon(polygon, zone_id=1, resolution=max(spacing, resolution))
+    if resolution < spacing:
+        inradius = shapely.length(shapely.maximum_inscribed_circle(polygon))
+        inset = min((spacing - resolution) / (growth - 1), 0.5 * inradius)
+        core = polygon.buffer(-inset, join_style="mitre")
+        if not core.is_empty:
+            cm.add_polygon(core, zone_id=2, resolution=resolution, embed=False, growth_factor=growth)
+    mg = MeshGenerator(background_lc=max(spacing, resolution), conceptual_mesh=cm, verbosity=0)
+    mg.generate()
+    return np.asarray(mg.nodes, dtype=float)[:, :2]
+
+
+def _max_neighbour_ratio(cells):
+    """Largest area ratio between two cells that share a face."""
+    cells = np.asarray(cells)
+    area = shapely.area(cells)
+    i, j = shapely.STRtree(cells).query(cells, predicate="touches")
+    pair = i < j
+    i, j = i[pair], j[pair]
+    shared = shapely.length(shapely.intersection(cells[i], cells[j]))
+    i, j = i[shared > 0], j[shared > 0]
+    if not len(i):
+        return 1.0
+    return float((np.maximum(area[i], area[j]) / np.minimum(area[i], area[j])).max())
 
 
 def _layer_inputs(grids, top, botm, idomain):
