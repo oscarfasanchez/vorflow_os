@@ -193,6 +193,9 @@ class DisuGrid:
         self._columns = columns
         self._area = shapely.area(columns.geometry.to_numpy())
         tolerance = max(p[3] for p in planar)
+        # One threshold decides whether two cells of different grids overlap
+        # (vertical link) or only touch (face), so no pair gets both.
+        self._touch_area = tolerance * shapely.length(columns.geometry.to_numpy())
         self._faces = _global_faces([p[2] for p in planar], self._col_of)
         cross = self._cross_faces(tolerance)
         if len(cross):
@@ -463,7 +466,7 @@ class DisuGrid:
                     continue
                 ia, ib = shapely.STRtree(geoms[b_only]).query(geoms[a_only], predicate="intersects")
                 for i, j in zip(a_only[ia], b_only[ib]):
-                    if geoms[i].intersection(geoms[j]).area > tolerance * geoms[i].length:
+                    if geoms[i].intersection(geoms[j]).area > self._touch_area[i]:
                         continue                 # Overlapping cells meet vertically, not side by side.
                     shared = shapely.intersection(geoms[i].boundary, geoms[j].boundary, grid_size=tolerance)
                     try:
@@ -493,7 +496,7 @@ class DisuGrid:
         if not frames:
             return pd.DataFrame({"col_a": [], "col_b": [], "area": []})
         overlaps = pd.concat(frames, ignore_index=True)
-        overlaps = overlaps[overlaps.area > 1e-12 * self._area[overlaps.col_a.to_numpy(dtype=int)]]
+        overlaps = overlaps[overlaps.area > self._touch_area[overlaps.col_a.to_numpy(dtype=int)]]
         overlaps, merged = _merge_plan_slivers(overlaps, self._area, self.options.sliver_tol)
         self.diagnostics["plan_slivers_merged"] = merged
         return overlaps

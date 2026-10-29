@@ -151,3 +151,12 @@ def test_dipping_aquifer_full_connectivity_with_xt3d_is_accurate(tmp_path, dip):
         errors[connectivity] = np.abs(heads - exact)[aquifer & ~edge].max()
     assert errors["full"] < 1e-3
     assert errors["layered"] > 0.1
+
+
+def test_one_ulp_offset_does_not_duplicate_a_connection():
+    """A piece one ulp thick has a midpoint on a boundary; it must not repeat its neighbour's pair."""
+    top = np.array([20.0, 20.0])
+    d = _two_columns(top, [10.0, 0], [np.nextafter(10.0, 20.0), 0], sliver_tol=0, sliver_abs=0)
+    props = d.get_gridprops_disu6()                    # Raises on a duplicate connection.
+    assert props["nja"] == len(props["ja"])
+    assert sum(h for _, h in _pairs(d).values()) == pytest.approx(20.0)

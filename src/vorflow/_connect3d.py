@@ -199,6 +199,16 @@ def staggered_links(status, nodemap, top_l, bot_l, faces, centres, sliver_tol=0.
     both = (a >= 0) & (b >= 0)
     piece_face, z_hi, z_lo = piece_face[both], z_hi[both], z_lo[both]
     cell_a, cell_b = cells_i[a[both]], cells_j[b[both]]
+    # Elevations a roundoff apart split one overlap into two pieces with the
+    # same cells: join consecutive pieces that link the same pair.
+    repeat = np.zeros(len(piece_face), dtype=bool)
+    repeat[1:] = ((piece_face[1:] == piece_face[:-1]) & (cell_a[1:] == cell_a[:-1])
+                  & (cell_b[1:] == cell_b[:-1]) & (z_hi[1:] == z_lo[:-1]))
+    if repeat.any():
+        first = np.flatnonzero(~repeat)
+        last = np.r_[first[1:] - 1, len(repeat) - 1]
+        piece_face, cell_a, cell_b = piece_face[first], cell_a[first], cell_b[first]
+        z_hi, z_lo = z_hi[first], z_lo[last]
     height = z_hi - z_lo
 
     d1 = faces["distance_1"].to_numpy(dtype=float)[piece_face]
