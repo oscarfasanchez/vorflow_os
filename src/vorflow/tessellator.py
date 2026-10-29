@@ -555,8 +555,12 @@ class VoronoiTessellator:
         conceptual_mesh (ConceptualMesh, optional): The conceptual model, used
             for CRS, domain boundaries, and feature information. Defaults to
             the ``conceptual_mesh`` of ``mesh_generator``.
-        clip_to_boundary (bool): If True, the final Voronoi grid will be
-            clipped to the domain boundary defined in the conceptual model.
+        clip_to_boundary (bool): If True, restrict the grid to the model
+            domain. With ``MeshGenerator(boundary_method="conforming")``, this
+            selects whole cells without clipping. Conforming mode requires True
+            and the default ``boundary_centering``. Its untrimmed construction
+            grid and discarded IDs are in ``boundary_construction_grid`` and
+            ``boundary_report``.
         boundary_centering (str): ``"clip"`` keeps the historical behavior.
             ``"inset_mirror"`` shifts boundary generators inward and adds
             mirrored outside ghosts so boundary-cell centers move off the
@@ -692,6 +696,13 @@ class VoronoiTessellator:
                 "MeshGenerator(conceptual_mesh=...)."
             )
 
+        if getattr(mesh_generator, "boundary_method", "clip") == "conforming":
+            if not clip_to_boundary or boundary_centering != "clip":
+                raise ValueError(
+                    "boundary_method='conforming' owns the domain boundary; use clip_to_boundary=True "
+                    "and leave boundary_centering at its default. Whole cells are selected without clipping.")
+        self.boundary_construction_grid = None
+        self.boundary_report = None
         self.mg = mesh_generator
         self.cm = conceptual_mesh
         self.voronoi_gdf = None
@@ -1038,7 +1049,9 @@ class VoronoiTessellator:
             done = {int(fid) for fid in exact['feature_id']}
             out += [(geom, True) for geom, is_barrier in zip(exact.geometry, exact['is_barrier'])
                     if is_barrier and geom is not None and not geom.is_empty]
-        lines = self.cm.clean_lines
+        lines = getattr(self.mg, "_construction_lines", None)
+        if lines is None:
+            lines = self.cm.clean_lines
         if lines is None or lines.empty or 'is_barrier' not in lines.columns:
             return out
         mask = lines['is_barrier'].fillna(False).astype(bool)
@@ -1384,6 +1397,8 @@ class VoronoiTessellator:
 
         self.lloyd_report = None
         self.short_face_report = None
+        self.boundary_construction_grid = None
+        self.boundary_report = None
         lloyd_shift = None
         if self.lloyd_iterations > 0 or self.min_face_fraction > 0:
             relaxed = nodes
@@ -1418,7 +1433,10 @@ class VoronoiTessellator:
             raw_gdf.set_crs(self.cm.crs, inplace=True)
 
         
-        if self.clip_to_boundary:
+        if getattr(self.mg, "boundary_method", "clip") == "conforming":
+            from ._domain_boundary import retain_domain_cells
+            bounded_voronoi = retain_domain_cells(self, raw_gdf)
+        elif self.clip_to_boundary:
             logger.info("Clipping to Domain Boundary...")
             domain_geom = self._domain_geometry()
             if domain_geom is None:
@@ -1497,6 +1515,8 @@ class VoronoiTessellator:
         self.final_grid = self._enforce_barriers(zoned_grid)
         logger.info(f"  -> After Barrier Cuts: {len(self.final_grid)}")
         self._report_barrier_repairs()
+        if self.boundary_report is not None and self.n_exact_barrier_cuts:
+            raise BarrierMeshError("Conforming domain construction required cell cuts; refusing repaired cells.")
 
         # Final cleanup after potential splits.
         self.final_grid = _explode_with_unique_ids(self.final_grid)

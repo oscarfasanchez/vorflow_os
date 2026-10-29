@@ -478,6 +478,44 @@ steady radial-flow (Thiem) test
 threefold, while 100 Lloyd passes improved it by at most about 5%. Lower
 `growth_factor` (or the resolution) where accuracy matters.
 
+### Whole cells at the model boundary
+
+To avoid slivers and concave cells created by clipping, construct the active
+outline as ordinary exact-circle barriers before generating the Voronoi grid:
+
+```python
+mg = MeshGenerator(
+    background_lc=10.0, conceptual_mesh=cm, boundary_method="conforming",
+)
+mg.generate()
+vt = VoronoiTessellator(mg)
+grid = vt.generate()
+```
+
+The same barrier planner evaluates the existing polygon, line and point size
+fields along the boundary and grades the spacing across junctions. The
+physical domain, including its holes, stays fixed. Temporary sites on the
+inactive side supply the other half of the circle construction; their whole
+cells are discarded. Retained centres and IDs belong to the actual Voronoi
+generators. `vt.boundary_report` records zero clipped area, coverage error and
+discarded IDs; `vt.boundary_construction_grid` exposes the support cells.
+The Gmsh nodes and element grid include that support region, while
+`mg.zones_gdf` and the tessellator's DISV exports use the physical model.
+
+Set this option on `MeshGenerator`,
+leave `boundary_centering` at its default and keep `clip_to_boundary=True`.
+The default `boundary_method="clip"` remains available. Incompatible acute
+corners or fixed feature centres on the outline fail explicitly: simplify
+the outline or refine the target size rather than accepting a repaired cell.
+Inspect cell quality; even an exact boundary can surround a very narrow cell.
+
+With conforming boundaries, model centres lie inside the boundary. When prescribing a head
+at the physical face, account for its distance to the cell centre (for example
+with a GHB conductance); applying it directly to an interior cell changes the
+boundary-condition location. No hydraulic condition is assigned automatically.
+See [the executed comparison](examples/domain_boundary_demo.ipynb) for an
+outer boundary, an internal hole, varying size fields and corner close-ups.
+
 <!-- docs:usage-end -->
 
 ## Examples

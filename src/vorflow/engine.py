@@ -926,6 +926,18 @@ class MeshGenerator:
             mesh. When given, ``generate()`` can be called without arguments:
             it runs ``conceptual_mesh.generate()`` itself, and
             ``VoronoiTessellator(mesher)`` picks the model up from here.
+        boundary_method (str): ``"clip"`` (default) uses the historical
+            domain clipping in the tessellator. ``"conforming"`` sends the
+            exterior and hole perimeters through the existing exact-circle
+            barrier planner, using the same size fields and gradation.
+            A temporary surrounding construction region supplies inactive
+            partner sites. The tessellator selects whole active cells,
+            preserving their generators, instead of cutting them. Unsupported
+            geometry raises ``BarrierMeshError``. Set this before generating;
+            it cannot be enabled only at tessellation time. ``model_domain``
+            and ``construction_domain`` expose the two footprints; physical
+            zones remain in ``zones_gdf``. Gmsh nodes and element grids include
+            the construction region; use the tessellator grid for model export.
         gap_field (GapField, optional): Model-wide field that refines narrow
             gaps between embedded features to ``cells_across`` cells. It
             adds no Gmsh field where no gap needs refining. The estimate is
@@ -1012,9 +1024,16 @@ class MeshGenerator:
                  heal_fix_small_faces=True, diagnose=False,
                  conceptual_mesh=None, gap_field=None, barrier_gradation=_barrier_sizing.GRADATION,
                  sharp_angle=math.degrees(_barrier_network.SHARP_ANGLE),
-                 barrier_polish_iterations=_barrier_polish.ITERATIONS):
+                 barrier_polish_iterations=_barrier_polish.ITERATIONS, boundary_method="clip"):
         if gap_field is not None and not isinstance(gap_field, GapField):
             raise ValueError(f"gap_field must be a GapField or None. Got {gap_field!r}.")
+        if boundary_method not in {"clip", "conforming"}:
+            raise ValueError("boundary_method must be 'clip' or 'conforming'.")
+        self.boundary_method = boundary_method
+        self.model_domain = None
+        self.construction_domain = None
+        self.domain_boundary_line_ids = ()
+        self._construction_lines = None
         self.gap_field = gap_field
         self._gap_estimate = None
         self.conceptual_mesh = conceptual_mesh
@@ -3032,6 +3051,17 @@ class MeshGenerator:
 
     def _generate(self, clean_polys, clean_lines, clean_points, output_file=None, launch_gmsh_gui=False):
         """Run the Gmsh workflow behind ``generate()``."""
+        physical_polygons = clean_polys
+        self.model_domain = None
+        self.construction_domain = None
+        self.domain_boundary_line_ids = ()
+        self._construction_lines = None
+        if self.boundary_method == "conforming":
+            from ._domain_boundary import construction_frames
+            (clean_polys, clean_lines, clean_points, self.model_domain,
+             self.construction_domain, self.domain_boundary_line_ids) = construction_frames(
+                clean_polys, clean_lines, clean_points, self.background_lc)
+            self._construction_lines = clean_lines
         self.triangular_quality = None
         self.element_grid = None
         self._element_data = None
@@ -3086,7 +3116,7 @@ class MeshGenerator:
                 self._element_data, self.node_tags, self.background_lc
             )
             self.node_edges = _node_edges_from_elements(self._element_data, self.node_tags)
-            self.zones_gdf = clean_polys
+            self.zones_gdf = physical_polygons
             if launch_gmsh_gui:
                 gmsh.fltk.run()
             self._finalize_gmsh()

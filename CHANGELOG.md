@@ -9,6 +9,12 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `MeshGenerator(boundary_method="conforming")` constructs whole Voronoi
+  cells along domain outlines and holes using the joint native barrier planner
+  and existing size fields. Retained centres and IDs remain their generators;
+  diagnostics report discarded support cells and reject boundaries needing cuts.
+  The default clipping method remains available.
+
 - `ConceptualMesh.check(background_lc=None)` reports input defects that tend
   to produce bad Voronoi cells, before meshing and without Gmsh: short
   segments, close vertices (including a line crossing a polygon edge beside a
