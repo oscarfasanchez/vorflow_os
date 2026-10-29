@@ -1062,6 +1062,9 @@ class MeshGenerator:
         self.barrier_lines = None
         self.barrier_circles = None
         self.node_is_site = None
+        self.triangle_subregion = None
+        self.triangle_faults = ()
+        self.triangle_owned_line_ids = set()
 
     def _validate_background_lc(self):
         """Fail before any Gmsh work if background_lc is missing or not positive."""
@@ -3032,6 +3035,15 @@ class MeshGenerator:
 
     def _generate(self, clean_polys, clean_lines, clean_points, output_file=None, launch_gmsh_gui=False):
         """Run the Gmsh workflow behind ``generate()``."""
+        self.triangle_subregion = None
+        self.triangle_faults = ()
+        self.triangle_owned_line_ids = set()
+        if clean_polys.attrs.get("triangle_subregions"):
+            from ._hybrid import first_pass_features
+            (clean_lines, clean_points, self.triangle_subregion,
+             self.triangle_faults, self.triangle_owned_line_ids) = first_pass_features(
+                clean_polys, clean_lines, clean_points
+            )
         self.triangular_quality = None
         self.element_grid = None
         self._element_data = None

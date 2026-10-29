@@ -725,6 +725,14 @@ class VoronoiTessellator:
         self.min_face_fraction = float(min_face_fraction)
         # {"initial", "final", "passes", "rejected"} after a short-face cleanup.
         self.short_face_report = None
+        reservation = getattr(mesh_generator, "triangle_subregion", None)
+        self.requested_triangle_footprint = None if reservation is None else reservation["geometry"]
+        if reservation is not None and not clip_to_boundary:
+            raise ValueError("Triangle subregions require clip_to_boundary=True.")
+        self.realised_triangle_footprint = None
+        self.construction_grid = None
+        self.exterior_grid = None
+        self.hybrid_report = None
 
     def _lloyd_mesh_inputs(self, n_nodes):
         """(node_is_free, node_sizes, buffer_footprints) captured from the mesh generator, checked against ``n_nodes``."""
@@ -1038,12 +1046,13 @@ class VoronoiTessellator:
             done = {int(fid) for fid in exact['feature_id']}
             out += [(geom, True) for geom, is_barrier in zip(exact.geometry, exact['is_barrier'])
                     if is_barrier and geom is not None and not geom.is_empty]
+        owned = getattr(self.mg, "triangle_owned_line_ids", set())
         lines = self.cm.clean_lines
         if lines is None or lines.empty or 'is_barrier' not in lines.columns:
             return out
         mask = lines['is_barrier'].fillna(False).astype(bool)
         out += [(geom, False) for idx, geom in lines.loc[mask].geometry.items()
-                if int(idx) not in done and geom is not None and not geom.is_empty]
+                if int(idx) not in done and int(idx) not in owned and geom is not None and not geom.is_empty]
         return out
 
     def _barrier_circles(self):
@@ -1382,6 +1391,9 @@ class VoronoiTessellator:
         assert len(tags) == 0 or int(tags.max()) <= np.iinfo(np.int64).max, "node_tags exceed int64"
         tags = tags.astype(np.int64)
 
+        self.realised_triangle_footprint = None
+        self.construction_grid = self.exterior_grid = None
+        self.hybrid_report = None
         self.lloyd_report = None
         self.short_face_report = None
         lloyd_shift = None
@@ -1501,6 +1513,9 @@ class VoronoiTessellator:
         # Final cleanup after potential splits.
         self.final_grid = _explode_with_unique_ids(self.final_grid)
         self.final_grid = _merge_close_vertices(self.final_grid)
+        if self.requested_triangle_footprint is not None:
+            from ._hybrid import finish_hybrid
+            self.final_grid = finish_hybrid(self, self.final_grid)
         if lloyd_shift is not None:
             # Cells with a node_id that is no mesh node get NaN.
             self.final_grid['lloyd_shift'] = self.final_grid['node_id'].map(lloyd_shift)

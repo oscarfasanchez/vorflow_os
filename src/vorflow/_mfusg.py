@@ -194,8 +194,10 @@ def _prepare_grid(gdf, top, botm, nlay):
         "orig_index": np.tile(gdf.index.to_numpy(), nlay),
         "node_id": np.tile(planar["node_id"], nlay),
     })
-    if "zone_id" in gdf:
-        mapping["zone_id"] = np.tile(gdf["zone_id"].to_numpy(), nlay)
+    for column in ("zone_id", "cell_type", "source_element_id", "source_voronoi_index",
+                   "source_x", "source_y", "centre_adjusted", "generator_origin", "source_node_id"):
+        if column in gdf:
+            mapping[column] = np.tile(gdf[column].to_numpy(), nlay)
     return _LayeredGrid(planar, layer_top, bot, shapely.area(geoms), mapping, faces)
 
 

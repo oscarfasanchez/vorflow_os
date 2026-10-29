@@ -9,6 +9,17 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Triangle subregions with `cm.add_polygon(..., resolution=h, subregion="triangle")`.
+  Their perimeter uses the standard exact-circle barrier construction. Complete
+  interior Voronoi cells are removed and replaced by retained Gmsh triangles;
+  exterior centres and footprints are preserved without hybrid clipping or
+  generator repair. `construction_grid`, `exterior_grid`, requested/realised
+  footprints and `hybrid_report` expose the construction. MFUSG mapping retains
+  cell type and source IDs. One reservation is supported; incompatible interior
+  features and incomplete perimeter alignment fail explicitly.
+- An executed hybrid MFUSG example compares a zigzag fault and a junction,
+  including corner plots, whole-cell checks and analytical flow assertions.
+
 - `ConceptualMesh.check(background_lc=None)` reports input defects that tend
   to produce bad Voronoi cells, before meshing and without Gmsh: short
   segments, close vertices (including a line crossing a polygon edge beside a

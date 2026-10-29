@@ -483,6 +483,8 @@ class ConceptualMesh:
         self.raw_polygons = [] 
         self.raw_lines = []
         self.raw_points = []
+        self.raw_subregions = []
+        self.clean_subregions = gpd.GeoDataFrame(columns=["geometry", "lc", "interface_id"], crs=crs)
         
         # Geometries after cleaning, snapping, and processing.
         self.domain_boundary = None
@@ -493,7 +495,7 @@ class ConceptualMesh:
     def add_polygon(
         self,
         geometry,
-        zone_id,
+        zone_id=None,
         resolution=None,
         z_order=0,
         dist_min=None,
@@ -511,6 +513,7 @@ class ConceptualMesh:
         dist_max_out=None,
         label=None,
         gap_wall=True,
+        subregion=None,
     ):
         """
         Adds a polygon feature, such as a model boundary or a refinement zone.
@@ -570,6 +573,11 @@ class ConceptualMesh:
                 boundary, including edges shared with other polygons, is then
                 exempt.
 
+            subregion (str, optional): ``"triangle"`` reserves this polygon for
+                retained triangles. Its perimeter is an ordinary exact barrier;
+                complete interior Voronoi cells are discarded before filling it.
+                Omit ``zone_id``. One reservation is supported.
+
         Deprecated parameters:
             dist_min (float, optional): Distance from the polygon boundary where
                 the mesh size is held constant at the boundary's resolution. Supplying
@@ -587,6 +595,17 @@ class ConceptualMesh:
                 for ``border_density``.
             dist_max_out (float, optional): Alias for ``dist_max``.
         """
+        if subregion is not None:
+            if subregion != "triangle":
+                raise ValueError("subregion must be 'triangle' or None.")
+            if zone_id is not None or not embed or quad_buffer:
+                raise ValueError("A triangle reservation is separate from zones and quad buffers; omit zone_id and use embed=True.")
+            from ._hybrid import register_subregion
+            register_subregion(self, geometry, resolution)
+            return
+        if zone_id is None:
+            raise ValueError("A geological polygon requires zone_id; use subregion='triangle' for a meshing reservation.")
+
         if not geometry.is_valid:
             geometry = make_valid(geometry)
 
@@ -1446,7 +1465,13 @@ class ConceptualMesh:
                 default topology snapping tolerance during this preprocessing run.
         """
         with self._working_copies():
-            return self._generate_working_features(connectivity_tolerance)
+            if self.raw_subregions:
+                from ._hybrid import prepare_reservations
+                prepare_reservations(self)
+            frames = self._generate_working_features(connectivity_tolerance)
+            if self.raw_subregions:
+                frames[0].attrs["triangle_subregions"] = self.clean_subregions.to_dict("records")
+            return frames
 
     def check(self, background_lc=None):
         """

@@ -585,3 +585,46 @@ guard and junction diagnostics are part of the line-junction handling.
 ## License
 
 MIT — see [LICENSE](https://github.com/rhugman/vorflow/blob/main/LICENSE).
+
+## Hybrid triangle subregions
+
+On the exact-barrier branch, a closed circle-based barrier can define a hole
+between whole exterior Voronoi cells. Retain triangles inside that footprint:
+
+```python
+import numpy as np
+from shapely.geometry import LineString, box
+from vorflow import ConceptualMesh, MeshGenerator, VoronoiTessellator
+
+h = 5.0
+fault = LineString([(55, 40), (80, 60), (105, 40), (145, 60)])
+cm = ConceptualMesh()
+cm.add_polygon(box(0, 0, 200, 100), zone_id="aquifer", resolution=10.0)
+cm.add_polygon(
+    fault.buffer(np.sqrt(3) * h, cap_style="square", join_style="mitre"),
+    resolution=h, subregion="triangle",
+)
+cm.add_line(fault, line_id="fault", resolution=h, is_barrier=True)
+mg = MeshGenerator(background_lc=10.0, conceptual_mesh=cm)
+mg.generate()
+vt = VoronoiTessellator(mg, cm)
+grid = vt.generate()
+disu_arrays = vt.to_mfusg_disu(top=10.0, botm=[0.0], nlay=1)
+vt.to_gsf("hybrid.gsf", top=10.0, botm=[0.0], nlay=1)
+```
+
+The first construction pass meshes both sides of the perimeter. Its complete
+interior cells are support geometry and are discarded; `vt.construction_grid`
+and `vt.hybrid_report` record them. The second pass matches the retained
+exterior faces. No extra hybrid corner generators are inserted, no exterior
+cell is trimmed, and no hydraulic resistance is assigned. Circle barriers may
+refuse incompatible geometry rather than leave a partially aligned perimeter.
+
+The buffer argument is a radius, in model units. `sqrt(3)*h` is two ideal
+equilateral-triangle heights on each side, an example width rather than a
+quality guarantee. Inspect triangle angles and hydraulic accuracy.
+
+One reservation is supported. Embedded points and non-barrier lines inside it,
+exact alignment of other polygon boundaries, and ghost-node corrections are
+deferred. See [the runnable zigzag/junction example](examples/basic_example_hybrid_mfusg.ipynb)
+for optional FloPy setup, MFUSG execution and analytical flow checks.
