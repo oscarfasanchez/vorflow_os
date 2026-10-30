@@ -1,7 +1,4 @@
-"""MODFLOW-USG output of DisuGrid: IVSD/IVC, FAHL from overlaps, GSF and an MFUSG run."""
-
-import os
-import shutil
+"""MODFLOW-USG output of DisuGrid: IVSD/IVC, FAHL from overlaps and GSF."""
 
 import numpy as np
 import pytest
@@ -60,36 +57,13 @@ def test_gsf_lists_each_node_with_its_own_elevations(tmp_path):
     assert (int(node), float(z), int(layer), int(nverts)) == (3, 8.0, 2, 8)
 
 
-def _mfusg():
-    flopy = pytest.importorskip("flopy", minversion="3.10")
-    exe = os.environ.get("MFUSG_EXE") or shutil.which("mfusg")
-    if not exe:
-        pytest.skip("MFUSG executable not installed (set MFUSG_EXE or PATH).")
-    return flopy, exe
-
-
-def test_full_connectivity_improves_a_dipping_aquifer_in_mfusg(tmp_path):
-    """MODFLOW-USG has no XT3D, but staggered connections still let flow follow the dip."""
-    flopy, exe = _mfusg()
-    errors = {}
-    for connectivity in ("layered", "full"):
-        d, exact, edge, aquifer = _dipping_aquifer(30, connectivity)
-        # MODFLOW-USG resets heads below a cell's bottom even in confined layers; shift the field up.
-        exact = exact + 100.0
-        props = d.get_gridprops_disu5()
-        model = flopy.mfusg.MfUsg(modelname="dip", structured=False, model_ws=tmp_path / connectivity,
-                                  exe_name=exe)
-        flopy.mfusg.MfUsgDisU(model, **props)
-        layer = np.repeat(np.arange(d.nlay), props["nodelay"])
-        per_layer = lambda values: [values[layer == k] for k in range(d.nlay)]  # noqa: E731
-        k = np.where(aquifer, 1.0, 1e-4)
-        flopy.mfusg.MfUsgBas(model, ibound=per_layer(np.where(edge, -1, 1)), strt=per_layer(exact))
-        flopy.mfusg.MfUsgLpf(model, laytyp=0, hk=per_layer(k), vka=per_layer(k))
-        flopy.mfusg.MfUsgSms(model, hclose=1e-9, hiclose=1e-9, mxiter=200, iter1=1000)
-        flopy.modflow.ModflowOc(model, stress_period_data={(0, 0): ["save head"]})
-        model.write_input()
-        success, output = model.run_model(silent=True, report=True)
-        assert success, "\n".join(output[-20:])
-        heads = np.concatenate(flopy.utils.HeadUFile(tmp_path / connectivity / "dip.hds").get_data())
-        errors[connectivity] = np.abs(heads - exact)[aquifer & ~edge].max()
-    assert errors["full"] < 0.5 * errors["layered"]
+def test_disu5_side_areas_cover_the_walls_of_a_dipping_aquifer():
+    """Each aquifer cell's two walls are wholly connected: FAHL adds up to width x thickness."""
+    d, _, edge, aquifer = _dipping_aquifer(30, "full")
+    props = d.get_gridprops_disu5()
+    side = np.array([fahl[1:][ivc[1:] == 0].sum() for fahl, ivc in zip(_rows(props, "fahl"), _rows(props, "ivc"))])
+    below = np.array([fahl[1:][ivc[1:] == 1].sum() for fahl, ivc in zip(_rows(props, "fahl"), _rows(props, "ivc"))])
+    thickness = np.asarray(props["top"]) - np.asarray(props["bot"])
+    inner = aquifer & ~edge
+    np.testing.assert_allclose(side[inner], 2 * 1.0 * thickness[inner])
+    np.testing.assert_allclose(below[inner], 2 * 1.0)             # 1 m2 above and below.

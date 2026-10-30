@@ -1,15 +1,17 @@
-"""DisuGrid: layered DISU arrays, tracking and MODFLOW 6 equivalence with DISV."""
+"""DisuGrid: layered DISU arrays, tracking, and the geometry checks shared by the DISU tests.
 
-import os
-import shutil
+The MODFLOW runs live outside the test suite, in local benchmarks.
+"""
+
+from collections import defaultdict
 
 import geopandas as gpd
 import numpy as np
 import pytest
+import shapely
 from shapely.geometry import box
 
 from vorflow import disu
-from vorflow.utils import grid_to_disv
 
 
 def _grid(nx=3, ny=2, widths=None):
@@ -35,6 +37,40 @@ def _entries(props):
         for m, *values in zip(ja[1:], ihc[1:], cl[1:], hw[1:], ang[1:]):
             result[n, int(m)] = tuple(values)
     return result
+
+
+def assert_cells_close(d):
+    """Each cell's connections add up to its own geometry, as MODFLOW's cell-by-cell balance needs.
+
+    Side faces: the heights of a cell's connections across a plan face add
+    up to its overlap with the active cells of the neighbour column. Top and
+    bottom: the vertical connections cover the whole area or nothing, and
+    (with ``collapse``) the cells they join meet.
+    """
+    top, bot, col = d._node_top, d._node_bot, d._node_cell
+    n, m, ihc = (np.asarray(d.links[key]) for key in ("n", "m", "ihc"))
+    hwva, height = np.asarray(d.links["hwva"]), np.asarray(d.links["height"])
+    scale = max(1.0, float(np.abs(np.r_[top, bot]).max()))
+    vertical = ihc == 0
+    if d.options.collapse is not None:
+        np.testing.assert_allclose(top[m[vertical]], bot[n[vertical]], rtol=0, atol=1e-9 * scale)
+    area = d._area[col]
+    for side in (n, m):
+        covered = np.bincount(side[vertical], weights=hwva[vertical], minlength=d.nodes)
+        hit = covered > 0
+        np.testing.assert_allclose(covered[hit], area[hit], rtol=1e-9)
+    got = defaultdict(float)
+    for a, b, h in zip(n[~vertical], m[~vertical], height[~vertical]):
+        got[a, col[b]] += h
+        got[b, col[a]] += h
+    nodes_of = defaultdict(list)
+    for node, c in enumerate(col):
+        nodes_of[c].append(node)
+    for i, j in zip(d._faces["cell_id_1"], d._faces["cell_id_2"]):
+        for own, other in ((i, j), (j, i)):
+            for a in nodes_of[own]:
+                expected = sum(max(0.0, min(top[a], top[b]) - max(bot[a], bot[b])) for b in nodes_of[other])
+                assert got[a, other] == pytest.approx(expected, rel=1e-9, abs=1e-9 * scale), (a, other)
 
 
 def test_options_are_validated_eagerly():
@@ -113,59 +149,33 @@ def test_to_nodes_to_layers_round_trip():
     assert "5 nodes" in d.report()
 
 
-def _mf6():
-    flopy = pytest.importorskip("flopy")
-    exe = os.environ.get("MF6_EXE") or shutil.which("mf6")
-    if not exe:
-        pytest.skip("MODFLOW 6 executable not installed (set MF6_EXE or PATH).")
-    return flopy, exe
-
-
-def _run(flopy, exe, ws, add_dis, chd, k, **npf):
-    sim = flopy.mf6.MFSimulation(sim_ws=str(ws), exe_name=exe)
-    flopy.mf6.ModflowTdis(sim)
-    flopy.mf6.ModflowIms(sim, outer_maximum=50, inner_maximum=500, linear_acceleration="bicgstab",
-                         outer_dvclose=1e-10, inner_dvclose=1e-11, rcloserecord=1e-8)
-    gwf = flopy.mf6.ModflowGwf(sim, modelname="m")
-    add_dis(gwf)
-    flopy.mf6.ModflowGwfnpf(gwf, k=k, **(npf or {"k33": 0.1}))
-    flopy.mf6.ModflowGwfic(gwf, strt=8.0)
-    flopy.mf6.ModflowGwfchd(gwf, stress_period_data=chd)
-    flopy.mf6.ModflowGwfoc(gwf, head_filerecord="m.hds", saverecord=[("HEAD", "ALL")])
-    sim.write_simulation(silent=True)
-    success, output = sim.run_simulation(silent=True, report=True)
-    assert success, "\n".join(output)
-    return gwf.output.head().get_data()
-
-
-def test_layered_disu_reproduces_disv_heads_with_mf6(tmp_path):
-    """Same geometry and connectivity as DISV (incl. pass-through) must give identical heads."""
-    flopy, exe = _mf6()
+def test_layered_disu_has_the_disv_connections():
+    """Same-layer faces and columns through pass-through cells, with the DISV geometry (collapse=None)."""
     grid = _grid(nx=4, ny=3, widths=[1, 2, 1.5, 3])
     ncpl = len(grid)
     rng = np.random.default_rng(3)
     botm = np.array([6.0, 3.0, 0.0])[:, None] + rng.uniform(-0.5, 0.5, (3, ncpl))
     idomain = np.ones((3, ncpl), dtype=int)
     idomain[1, 5] = -1
-    k_layers = np.array([5.0, 0.5, 2.0])[:, None] * np.ones(ncpl)
-    left, right = grid.x.to_numpy() < 1, grid.x.to_numpy() > 4.5
-    planar = grid_to_disv(grid)
-
-    def add_disv(gwf):
-        flopy.mf6.ModflowGwfdisv(gwf, nlay=3, ncpl=ncpl, nvert=planar["nvert"],
-                                 vertices=planar["vertices"], cell2d=planar["cell2d"],
-                                 top=10.0, botm=botm, idomain=idomain)
-
-    chd_disv = [[(0, i), 10.0] for i in np.flatnonzero(left)] + [[(2, i), 5.0] for i in np.flatnonzero(right)]
-    heads_disv = _run(flopy, exe, tmp_path / "disv", add_disv, chd_disv, k_layers).reshape(3, ncpl)
-
     d = disu.DisuGrid(grid, 10.0, botm, idomain, connectivity="layered", collapse=None).build()
-    props = d.get_gridprops_disu6()
-    chd_disu = [[(int(d.nodemap[0, i]),), 10.0] for i in np.flatnonzero(left)] + [
-        [(int(d.nodemap[2, i]),), 5.0] for i in np.flatnonzero(right)]
-    heads_disu = _run(flopy, exe, tmp_path / "disu",
-                      lambda gwf: flopy.mf6.ModflowGwfdisu(gwf, **props), chd_disu, d.to_nodes(k_layers))
-    heads_disu = d.to_layers(heads_disu.ravel())
-    active = idomain > 0
-    np.testing.assert_allclose(heads_disu[active], heads_disv[active], rtol=0, atol=1e-8)
-    assert np.isnan(heads_disu[~active]).all()
+    entries = _entries(d.get_gridprops_disu6())
+    geoms, xy = grid.geometry.to_numpy(), grid[["x", "y"]].to_numpy()
+    top_l = np.vstack([np.full(ncpl, 10.0), botm[:-1]])
+    expected = {}
+    for i in range(ncpl):
+        for j in range(ncpl):
+            face = geoms[i].intersection(geoms[j])
+            if i == j or face.length == 0:
+                continue
+            angle = np.degrees(np.arctan2(*(xy[j] - xy[i])[::-1])) % 360
+            for k in np.flatnonzero((idomain[:, i] > 0) & (idomain[:, j] > 0)):
+                expected[d.nodemap[k, i], d.nodemap[k, j]] = (
+                    1, shapely.Point(xy[i]).distance(face), face.length, angle)
+        active = np.flatnonzero(idomain[:, i] > 0)
+        for k_up, k_down in zip(active[:-1], active[1:]):          # Pass-through cells are skipped.
+            n, m = d.nodemap[k_up, i], d.nodemap[k_down, i]
+            expected[n, m] = (0, (top_l[k_up, i] - botm[k_up, i]) / 2, geoms[i].area, 0.0)
+            expected[m, n] = (0, (top_l[k_down, i] - botm[k_down, i]) / 2, geoms[i].area, 0.0)
+    assert set(entries) == set(expected)
+    for key, value in expected.items():
+        np.testing.assert_allclose(entries[key], value, atol=1e-12, err_msg=str(key))

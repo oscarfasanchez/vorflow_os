@@ -7,6 +7,7 @@ import pytest
 
 from vorflow import disu
 
+from test_disu_grid import assert_cells_close
 from test_disu_multigrid import PIT, VORONOI_PIT, _boxes, _contact_is_gap_free, _straddling_pit, voronoi_pit
 
 
@@ -39,6 +40,7 @@ def test_upper_wedge_keeps_the_bottoms_above_and_belongs_to_the_layer_below():
     np.testing.assert_allclose(made.top - made.bot, 0.1)
     np.testing.assert_array_equal(made.bot, 3.75)
     _contact_is_gap_free(d, 2, 3)
+    assert_cells_close(d)
 
 
 def test_lower_wedge_follows_the_contact_given_on_the_fine_grid():
@@ -56,6 +58,7 @@ def test_lower_wedge_follows_the_contact_given_on_the_fine_grid():
     np.testing.assert_allclose(_layer(d, 2).top[fine], 3.8625)
     assert (_layer(d, 2).node[fine] >= 0).sum() == 6           # The column at x = 1.375 has no wedge.
     _contact_is_gap_free(d, 1, 2)
+    assert_cells_close(d)
 
 
 def test_min_thickness_moves_the_bottom_instead_by_at_most_that():
@@ -145,6 +148,7 @@ def test_voronoi_pit_keeps_the_dipping_contact(wedge, extra):
     assert d.diagnostics["max_contact_shift"] == 0
     assert d.nodes - today.nodes == extra
     assert (_layer(d, 2).node >= 0).sum() == extra
+    assert_cells_close(d)
     # The given contact is kept, to roundoff where a piece is a few ulps thin.
     if wedge == "upper":
         np.testing.assert_allclose(_layer(d, 1).bot, botm[1], rtol=1e-12)

@@ -1,4 +1,4 @@
-"""Different plan grids per layer: splice, global columns, overlay links and MODFLOW 6 accuracy."""
+"""Different plan grids per layer: splice, global columns, overlay links and gap-free contacts."""
 
 import functools
 
@@ -11,7 +11,7 @@ from shapely.geometry import LineString, box
 from vorflow import disu
 from vorflow.disu import _merge_plan_slivers
 
-from test_disu_grid import _mf6, _run
+from test_disu_grid import assert_cells_close
 
 
 def _boxes(n, size, start_id=0):
@@ -171,25 +171,15 @@ def test_plan_slivers_join_the_largest_overlap_of_the_smaller_cell():
 
 
 @pytest.mark.parametrize("dip", [0.0, 0.2])
-def test_pit_refined_at_depth_reproduces_a_linear_head_with_xt3d(tmp_path, grids, dip):
-    """Hanging-node ring faces and overlay links are exact for XT3D on a linear field."""
-    flopy, exe = _mf6()
+def test_pit_refined_at_depth_cells_close(grids, dip):
+    """Hanging-node ring faces, overlay links and cross-grid faces cover every cell's geometry."""
     base, pit = grids
     tilt_b, tilt_p = dip * base.x.to_numpy(), dip * pit.x.to_numpy()
     botm = [8.0 + tilt_b, 6.0 + tilt_b, 4.0 + tilt_b, 2.0 + tilt_p, 0.0 + tilt_p, -2.0 + tilt_p]
     d = disu.DisuGrid([base, base, base, pit, pit, pit], 10.0 + tilt_b, botm).build()
-    cm = d.cellmap[d.cellmap.node >= 0].sort_values("node")
-    z = ((cm.top + cm.bot) / 2).to_numpy()
-    x, y = cm.x.to_numpy(), cm.y.to_numpy()
-    exact = 50.0 - 1.0 * x + 0.5 * y - 0.3 * z
-    # A vertical gradient needs fixed heads on the top and bottom layers as well.
-    layer = cm.layer.to_numpy()
-    edge = (x < 1) | (x > 3) | (y < 1) | (y > 3) | (layer == 0) | (layer == 5)
-    chd = [[(int(n),), float(exact[n])] for n in np.flatnonzero(edge)]
-    props = d.get_gridprops_disu6()
-    heads = _run(flopy, exe, tmp_path, lambda gwf: flopy.mf6.ModflowGwfdisu(gwf, **props), chd,
-                 np.ones(d.nodes), k33=1.0, xt3doptions=True, angle2=0.0, angle3=0.0).ravel()
-    assert np.abs(heads - exact)[~edge].max() < 1e-6
+    assert d.diagnostics["vertical_offset"] == 0
+    assert_cells_close(d)
+    _contact_is_gap_free(d, 2, 3)
 
 
 VORONOI_DOMAIN, VORONOI_PIT = box(0, 0, 1000, 600), box(400, 200, 600, 400)
@@ -214,31 +204,19 @@ def voronoi_pit(pit_resolution=None):
     return vt, vt.generate()
 
 
-def linear_field_error(tmp_path, grids, dip, gradient=(-0.01, 0.005, -0.3)):
-    """Max head error of a uniform gradient on six layers, MF6 with XT3D; grids is one per layer."""
-    flopy, exe = _mf6()
+def six_layers(grids, dip):
+    """Six layers dipping at ``dip`` on the Voronoi pit domain; grids is one per layer."""
     tilt = [-dip * g.x.to_numpy() for g in grids]
     botm = [level + t for level, t in zip((80.0, 60.0, 50.0, 40.0, 30.0, 20.0), tilt)]
-    d = disu.DisuGrid(grids, 100.0 + tilt[0], botm).build()
-    cm = d.cellmap[d.cellmap.node >= 0].sort_values("node")
-    x, y, layer = cm.x.to_numpy(), cm.y.to_numpy(), cm.layer.to_numpy()
-    z = ((cm.top + cm.bot) / 2).to_numpy()
-    exact = 50.0 + gradient[0] * x + gradient[1] * y + gradient[2] * z
-    edge = (x < 60) | (x > 940) | (y < 60) | (y > 540) | (layer == 0) | (layer == 5)
-    chd = [[(int(n),), float(exact[n])] for n in np.flatnonzero(edge)]
-    props = d.get_gridprops_disu6()
-    heads = _run(flopy, exe, tmp_path, lambda gwf: flopy.mf6.ModflowGwfdisu(gwf, **props), chd,
-                 np.ones(d.nodes), k33=1.0, xt3doptions=True, angle2=0.0, angle3=0.0).ravel()
-    return np.abs(heads - exact)[~edge].max(), d
+    return disu.DisuGrid(grids, 100.0 + tilt[0], botm).build()
 
 
 @pytest.mark.slow
 @pytest.mark.parametrize("dip", [0.0, 0.03])
-def test_voronoi_pit_refined_at_depth_is_exact_with_xt3d(tmp_path, dip):
-    """Independent fine Voronoi below, hanging outline vertices, straddling cells: still exact."""
+def test_voronoi_pit_refined_at_depth_cells_close(dip):
+    """Independent fine Voronoi below, hanging outline vertices, straddling cells."""
     _, base = voronoi_pit()
     _, fine = voronoi_pit(12)
-    pit = disu.splice(base, fine, VORONOI_PIT)
-    error, d = linear_field_error(tmp_path, [base] * 3 + [pit] * 3, dip)
+    d = six_layers([base] * 3 + [disu.splice(base, fine, VORONOI_PIT)] * 3, dip)
     assert d.diagnostics["vertical_offset"] == 0
-    assert error < 1e-6
+    assert_cells_close(d)

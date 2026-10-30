@@ -10,7 +10,8 @@ from vorflow._mfusg import _planar_faces
 from vorflow._refill import outline_nodes
 from vorflow.fields import ExponentialField, MeshField
 
-from test_disu_multigrid import PIT, VORONOI_PIT, _boxes, linear_field_error, voronoi_pit
+from test_disu_grid import assert_cells_close
+from test_disu_multigrid import PIT, VORONOI_PIT, _boxes, six_layers, voronoi_pit
 
 
 def _outline_vertices(grid, polygon, inside):
@@ -125,9 +126,9 @@ def test_growth_priority_grades_the_voronoi_pit_more_smoothly():
 @pytest.mark.slow
 @pytest.mark.parametrize("outline_split", [1, 2])
 @pytest.mark.parametrize("dip", [0.0, 0.03])
-def test_voronoi_pit_refilled_at_depth_is_exact_with_xt3d(tmp_path, dip, outline_split):
+def test_voronoi_pit_refilled_at_depth_cells_close(dip, outline_split):
     _, base = voronoi_pit()
     grid = disu.refill(base, VORONOI_PIT, 12, outline_split=outline_split)
-    error, d = linear_field_error(tmp_path, [base] * 3 + [grid] * 3, dip)
+    d = six_layers([base] * 3 + [grid] * 3, dip)
     assert d.diagnostics["vertical_offset"] == 0
-    assert error < 1e-6
+    assert_cells_close(d)

@@ -1,11 +1,11 @@
-"""Full connectivity (IHC=2) by interface merging, sliver merging and MODFLOW 6 accuracy."""
+"""Full connectivity (IHC=2) by interface merging, sliver merging and face-area closure."""
 
 import numpy as np
 import pytest
 
 from vorflow import disu
 
-from test_disu_grid import _entries, _grid, _mf6, _run
+from test_disu_grid import _entries, _grid, assert_cells_close
 
 
 def _pairs(d):
@@ -97,6 +97,7 @@ def test_links_match_brute_force_overlaps_on_random_layers(collapse):
     idomain = rng.choice([1, 1, 1, 1, -1, 0], size=botm.shape)
     d = disu.DisuGrid(grid, 10.0, botm, idomain, collapse=collapse, min_thickness=0.2).build()
     assert set(_pairs(d)) == _brute_force(d)
+    assert_cells_close(d)
     # Each horizontal link's height is the vertical overlap of its two cells.
     top = d.cellmap.set_index("node")["top"]
     bot = d.cellmap.set_index("node")["bot"]
@@ -135,23 +136,13 @@ def _dipping_aquifer(dip, connectivity):
     return d, exact, edge, aquifer
 
 
-@pytest.mark.parametrize("dip", [10, 30])
-def test_dipping_aquifer_full_connectivity_with_xt3d_is_accurate(tmp_path, dip):
-    """Full connectivity + XT3D recovers the analytic head; layered connectivity cannot."""
-    flopy, exe = _mf6()
-    errors = {}
-    for connectivity in ("layered", "full"):
-        d, exact, edge, aquifer = _dipping_aquifer(dip, connectivity)
-        chd = [[(int(n),), float(exact[n])] for n in np.flatnonzero(edge)]
-        k = np.where(aquifer, 1.0, 1e-4)
-        props = d.get_gridprops_disu6()
-        # ANGLE2/ANGLE3 make XT3D use the vertical offsets of the cell centres.
-        heads = _run(flopy, exe, tmp_path / connectivity,
-                     lambda gwf: flopy.mf6.ModflowGwfdisu(gwf, **props), chd, k,
-                     k33=k, xt3doptions=True, angle2=0.0, angle3=0.0).ravel()
-        errors[connectivity] = np.abs(heads - exact)[aquifer & ~edge].max()
-    assert errors["full"] < 1e-3
-    assert errors["layered"] > 0.1
+@pytest.mark.parametrize("dip", [10, 30, 60])
+def test_dipping_aquifer_cells_close(dip):
+    """Every overlapping wall piece is connected and adds up to the cell geometry (what XT3D needs)."""
+    d = _dipping_aquifer(dip, "full")[0]
+    assert_cells_close(d)
+    layered = _dipping_aquifer(dip, "layered")[0]
+    assert len(_pairs(d)) > len(_pairs(layered))
 
 
 def test_one_ulp_offset_does_not_duplicate_a_connection():
