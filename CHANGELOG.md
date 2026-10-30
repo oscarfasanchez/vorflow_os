@@ -19,7 +19,7 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     (IHC=2), found by merging the interface elevations of each face. Every
     piece is kept by default, so each cell's face areas match its geometry
     and a uniform head gradient is reproduced exactly with XT3D. Merging
-    small pieces (`sliver_tol`, `sliver_abs`) is optional and inexact.
+    small pieces (`sliver_abs_tol`) is optional and inexact.
   - Pass-through cells (idomain -1 or thinner than `min_thickness`) are
     removed without leaving gaps (`collapse`); idomain 0 stays no-flow.
   - Layers can use different plan grids, joined by their plan overlaps.

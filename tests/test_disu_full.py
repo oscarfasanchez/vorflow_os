@@ -58,7 +58,7 @@ def test_by_default_every_piece_is_kept():
 
 def test_opt_in_sliver_merge_keeps_face_area_and_is_reported():
     top = np.array([20.0, 20.0])
-    d = _two_columns(top, [10.000, 0], [10.002, 0], sliver_tol=0.05)
+    d = _two_columns(top, [10.000, 0], [10.002, 0], sliver_abs_tol=0.003)
     a1, b1, a2, b2 = d.nodemap[0, 0], d.nodemap[0, 1], d.nodemap[1, 0], d.nodemap[1, 1]
     pairs = _pairs(d)
     assert set(pairs) == {frozenset((a1, b1)), frozenset((a2, b2))}
@@ -71,9 +71,8 @@ def test_opt_in_sliver_merge_keeps_face_area_and_is_reported():
     assert d.diagnostics["slivers_merged"] == 1
     assert d.diagnostics["largest_sliver"] == pytest.approx(0.002)
     assert "not exact" in d.report()
-    # The absolute criterion alone: 2 mm is below 3 mm but not below 1 mm.
-    assert len(_pairs(_two_columns(top, [10.000, 0], [10.002, 0], sliver_abs=0.003))) == 2
-    assert len(_pairs(_two_columns(top, [10.000, 0], [10.002, 0], sliver_abs=0.001))) == 3
+    # 2 mm is below 3 mm but not below 1 mm.
+    assert len(_pairs(_two_columns(top, [10.000, 0], [10.002, 0], sliver_abs_tol=0.001))) == 3
 
 
 def _brute_force(d):
@@ -96,8 +95,7 @@ def test_links_match_brute_force_overlaps_on_random_layers(collapse):
     ncpl = len(grid)
     botm = np.sort(rng.uniform(-30, 9, (6, ncpl)), axis=0)[::-1]
     idomain = rng.choice([1, 1, 1, 1, -1, 0], size=botm.shape)
-    d = disu.DisuGrid(grid, 10.0, botm, idomain, collapse=collapse, min_thickness=0.2,
-                      sliver_tol=0, sliver_abs=0).build()
+    d = disu.DisuGrid(grid, 10.0, botm, idomain, collapse=collapse, min_thickness=0.2).build()
     assert set(_pairs(d)) == _brute_force(d)
     # Each horizontal link's height is the vertical overlap of its two cells.
     top = d.cellmap.set_index("node")["top"]
@@ -159,7 +157,7 @@ def test_dipping_aquifer_full_connectivity_with_xt3d_is_accurate(tmp_path, dip):
 def test_one_ulp_offset_does_not_duplicate_a_connection():
     """A piece one ulp thick has a midpoint on a boundary; it must not repeat its neighbour's pair."""
     top = np.array([20.0, 20.0])
-    d = _two_columns(top, [10.0, 0], [np.nextafter(10.0, 20.0), 0], sliver_tol=0, sliver_abs=0)
+    d = _two_columns(top, [10.0, 0], [np.nextafter(10.0, 20.0), 0])
     props = d.get_gridprops_disu6()                    # Raises on a duplicate connection.
     assert props["nja"] == len(props["ja"])
     assert sum(h for _, h in _pairs(d).values()) == pytest.approx(20.0)

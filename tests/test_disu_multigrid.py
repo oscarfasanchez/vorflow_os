@@ -156,23 +156,18 @@ def test_lists_shaped_like_botm_round_trip(grids):
 
 
 def test_plan_slivers_join_the_largest_overlap_of_the_smaller_cell():
-    area = np.array([10.0, 4.0, 5.0, 0.2])
-    overlaps = pd.DataFrame({"col_a": [0, 0, 3], "col_b": [1, 2, 1], "area": [3.9, 5.0, 0.02]})
-    merged, count = _merge_plan_slivers(overlaps, area, 0.05)
-    assert count == 0                                 # 0.02 is 10 % of cell 3: not a sliver.
-    overlaps.loc[0, "area"] = 0.1                     # 0.1 is 2.5 % of cell 1, the smaller cell.
-    merged, count = _merge_plan_slivers(overlaps, area, 0.05)
+    area = np.array([10.0, 4.0, 5.0, 0.5])
+    overlaps = pd.DataFrame({"col_a": [0, 0, 3], "col_b": [1, 2, 1], "area": [0.1, 5.0, 0.3]})
+    # Overlaps are compared with sliver_abs_tol squared: 0.1 is below 0.16, 0.3 is not.
+    merged, count = _merge_plan_slivers(overlaps, area, 0.4)
     assert count == 1
-    # It joins cell 1's other (largest) overlap; total area is kept.
-    np.testing.assert_allclose(sorted(merged.area), [0.12, 5.0])
+    # It joins the largest other overlap of cell 1, the smaller cell; total area is kept.
+    np.testing.assert_allclose(sorted(merged.area), [0.4, 5.0])
+    assert _merge_plan_slivers(overlaps, area, 0.3)[1] == 0      # 0.1 > 0.09
+    assert _merge_plan_slivers(overlaps, area)[1] == 0
     # A sliver that is a cell's only overlap stays.
     alone = pd.DataFrame({"col_a": [0], "col_b": [1], "area": [0.01]})
-    assert _merge_plan_slivers(alone, area, 0.05)[1] == 0
-    # The absolute criterion compares areas with sliver_abs squared; the defaults merge nothing.
-    pair = pd.DataFrame({"col_a": [0, 2], "col_b": [1, 1], "area": [0.1, 3.9]})
-    assert _merge_plan_slivers(pair, area, 0.0, 0.4)[1] == 1     # 0.1 < 0.16
-    assert _merge_plan_slivers(pair, area, 0.0, 0.3)[1] == 0     # 0.1 > 0.09
-    assert _merge_plan_slivers(pair, area)[1] == 0
+    assert _merge_plan_slivers(alone, area, 0.4)[1] == 0
 
 
 @pytest.mark.parametrize("dip", [0.0, 0.2])

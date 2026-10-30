@@ -53,13 +53,12 @@ class DisuOptions:
     min_thickness: float = 0.0
     collapse: str | None = "split"
     connectivity: str = "full"
-    sliver_tol: float = 0.0
-    sliver_abs: float = 0.0
+    sliver_abs_tol: float = 0.0
     cl12: str = "plan"
     strict: bool = False
 
     def __post_init__(self):
-        for name in ("min_thickness", "sliver_tol", "sliver_abs"):
+        for name in ("min_thickness", "sliver_abs_tol"):
             value = getattr(self, name)
             if isinstance(value, bool) or not np.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be a finite number >= 0, got {value!r}.")
@@ -101,14 +100,13 @@ class DisuGrid:
         connectivity: ``"full"`` adds vertically staggered connections between
             offset neighbours (IHC=2); ``"layered"`` reproduces DISV
             connectivity (same-layer neighbours only).
-        sliver_tol, sliver_abs: Optional merging of small pieces, off by
-            default (0). A piece of a side face thinner than
-            ``max(sliver_abs, sliver_tol * thinner cell)`` is given to the
-            pieces above and below it; a plan overlap between grids smaller
-            than ``max(sliver_abs**2, sliver_tol * smaller cell area)`` is added
-            to that cell's largest overlap. Merging gives fewer connections but
-            moves face area between cells, so results are no longer exact; the
-            defaults keep every piece, and MODFLOW handles tiny ones fine.
+        sliver_abs_tol: Optional merging of small pieces, off by default
+            (0). A piece of a side face thinner than ``sliver_abs_tol`` is
+            given to the pieces above and below it; a plan overlap between
+            grids smaller than ``sliver_abs_tol**2`` is added to that cell's
+            largest overlap. Merging gives fewer connections but moves face
+            area between cells, so results are no longer exact; the default
+            keeps every piece, and MODFLOW handles tiny ones fine.
         cl12: ``"plan"`` (perpendicular plan distance to the face, as in the
             paper; exact for XT3D) or ``"connector"``.
         strict: Raise instead of warn when a check fails.
@@ -124,10 +122,10 @@ class DisuGrid:
     """
 
     def __init__(self, grids, top, botm, idomain=None, *, min_thickness=0.0, collapse="split",
-                 connectivity="full", sliver_tol=0.0, sliver_abs=0.0, cl12="plan", strict=False):
+                 connectivity="full", sliver_abs_tol=0.0, cl12="plan", strict=False):
         self.options = DisuOptions(
             min_thickness=min_thickness, collapse=collapse, connectivity=connectivity,
-            sliver_tol=sliver_tol, sliver_abs=sliver_abs, cl12=cl12, strict=strict,
+            sliver_abs_tol=sliver_abs_tol, cl12=cl12, strict=strict,
         )
         self._grids, self._layer_grid, self._layers = _layer_inputs(grids, top, botm, idomain)
         self.nodemap = None
@@ -224,8 +222,8 @@ class DisuGrid:
         if opts.connectivity == "full":
             centres = columns[["x", "y"]].to_numpy(dtype=float)
             horizontal, found = staggered_links(
-                status, nodemap, top_l, bot_l, self._faces, centres, sliver_tol=opts.sliver_tol,
-                sliver_abs=opts.sliver_abs, cl12=opts.cl12,
+                status, nodemap, top_l, bot_l, self._faces, centres, sliver_abs_tol=opts.sliver_abs_tol,
+                cl12=opts.cl12,
             )
             self.diagnostics.update(found)
         else:
@@ -508,7 +506,7 @@ class DisuGrid:
             lines.append(
                 f"  merged pieces: {diag['slivers_merged']} on side faces (largest {diag['largest_sliver']:.3g}), "
                 f"{diag['plan_slivers_merged']} plan overlaps; merged pieces move face area between cells, "
-                "so results are not exact (sliver_tol=0, sliver_abs=0 keeps every piece)."
+                "so results are not exact (sliver_abs_tol=0 keeps every piece)."
             )
         if not self.single_grid:
             if diag["contact_groups"]:
@@ -705,8 +703,7 @@ class DisuGrid:
             return pd.DataFrame({"col_a": [], "col_b": [], "area": []})
         overlaps = pd.concat(frames, ignore_index=True)
         overlaps = overlaps[overlaps.area > self._touch_area[overlaps.col_a.to_numpy(dtype=int)]]
-        overlaps, merged = _merge_plan_slivers(overlaps, self._area, self.options.sliver_tol,
-                                               self.options.sliver_abs)
+        overlaps, merged = _merge_plan_slivers(overlaps, self._area, self.options.sliver_abs_tol)
         self.diagnostics["plan_slivers_merged"] = merged
         return overlaps
 
@@ -1078,15 +1075,15 @@ def _bent_face(shared, centres, pair):
             "normal_x": float(normal[0]), "normal_y": float(normal[1])}
 
 
-def _merge_plan_slivers(overlaps, area, sliver_tol=0.0, sliver_abs=0.0):
-    """Add overlaps below ``max(sliver_abs**2, sliver_tol * smaller cell area)`` to that cell's largest overlap."""
-    if overlaps.empty or (sliver_tol == 0 and sliver_abs == 0):
+def _merge_plan_slivers(overlaps, area, sliver_abs_tol=0.0):
+    """Add overlaps smaller than ``sliver_abs_tol**2`` to the smaller cell's largest overlap."""
+    if overlaps.empty or sliver_abs_tol == 0:
         return overlaps.reset_index(drop=True), 0
     overlaps = overlaps.reset_index(drop=True)
     a = overlaps.col_a.to_numpy(dtype=np.int64)
     b = overlaps.col_b.to_numpy(dtype=np.int64)
     small_cell = np.where(area[a] <= area[b], a, b)
-    tiny = overlaps.area.to_numpy() < np.maximum(sliver_tol * area[small_cell], sliver_abs ** 2)
+    tiny = overlaps.area.to_numpy() < sliver_abs_tol ** 2
     if not tiny.any():
         return overlaps, 0
     merged_area = overlaps.area.to_numpy(dtype=float).copy()

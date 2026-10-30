@@ -93,11 +93,10 @@ entry (see Validation).
 - Each cell's faces must add up to its own geometry, because MODFLOW
   balances flow cell by cell. Every wall piece and every plan overlap is
   therefore kept, however small; MODFLOW handles tiny connections fine.
-- Merging is optional (`sliver_tol`, `sliver_abs`, off by default): a piece
-  below `max(sliver_abs, sliver_tol x size)` goes to its neighbours (size is
-  the thinner cell for wall pieces and the smaller cell's area for plan
-  overlaps, with `sliver_abs` squared). That moves face area between cell
-  pairs, so `report()` warns that the result is no longer exact.
+- Merging is optional (`sliver_abs_tol`, off by default): a wall piece
+  thinner than `sliver_abs_tol`, or a plan overlap smaller than
+  `sliver_abs_tol**2`, goes to its neighbours. That moves face area between
+  cell pairs, so `report()` warns that the result is no longer exact.
 - Measured on the Voronoi models below: merging removed 3-14 % of the
   connections with no measurable gain in build or MF6 run time, and gave
   errors of 2e-4 to 6e-4 m on dipping single grids and 0.028 m at a change
