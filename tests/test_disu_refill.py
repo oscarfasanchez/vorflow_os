@@ -37,12 +37,23 @@ def test_refill_shares_every_outline_vertex_and_keeps_the_outside():
     assert grid.attrs["refill"]["outline_vertices"] == 8
 
 
-def test_border_divisions_add_vertices_between_the_shared_ones():
+def test_outline_split_add_vertices_between_the_shared_ones():
     base = _boxes(4, 1.0)
-    grid = disu.refill(base, PIT, 0.25, border_divisions=2)
+    grid = disu.refill(base, PIT, 0.25, outline_split=2)
     inner, outer = _outline_vertices(grid, PIT, True), _outline_vertices(base, PIT, False)
     assert outer < inner and len(inner) == 2 * len(outer)
     assert grid.attrs["refill"]["outline_spacing"] == pytest.approx(0.5)
+
+
+def test_priority_chooses_between_resolution_and_smooth_growth():
+    base = _boxes(4, 1.0)
+    # From 0.25, growth 1.2 reaches only 0.35 within half the inradius (0.5): the default warns.
+    with pytest.warns(UserWarning, match="priority='growth'"):
+        sharp = disu.refill(base, PIT, 0.25).attrs["refill"]
+    assert sharp["core_size"] == 0.25 and sharp["size_at_outline"] == pytest.approx(0.35)
+    smooth = disu.refill(base, PIT, 0.25, priority="growth").attrs["refill"]
+    assert smooth["core_size"] == pytest.approx(0.99 - 0.2 * 0.5)
+    assert smooth["size_at_outline"] == pytest.approx(0.99)
 
 
 def test_refill_reports_the_size_jump_between_neighbours():
@@ -75,10 +86,12 @@ def test_refill_rejects_bad_input():
         disu.refill(base, PIT, 0.25, fields=[1.2])
     with pytest.raises(ValueError, match="python_size"):
         disu.refill(base, PIT, 0.25, fields=[_NoSizeField()])
-    with pytest.raises(ValueError, match="border_divisions"):
-        disu.refill(base, PIT, 0.25, border_divisions=0)
+    with pytest.raises(ValueError, match="outline_split"):
+        disu.refill(base, PIT, 0.25, outline_split=0)
     with pytest.raises(ValueError, match="resolution"):
         disu.refill(base, PIT, -1.0)
+    with pytest.raises(ValueError, match="priority"):
+        disu.refill(base, PIT, 0.25, priority="smooth")
 
 
 @pytest.mark.slow
@@ -100,11 +113,21 @@ def test_refill_of_the_voronoi_pit_shares_all_outline_vertices():
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("border_divisions", [1, 2])
-@pytest.mark.parametrize("dip", [0.0, 0.03])
-def test_voronoi_pit_refilled_at_depth_is_exact_with_xt3d(tmp_path, dip, border_divisions):
+def test_growth_priority_grades_the_voronoi_pit_more_smoothly():
     _, base = voronoi_pit()
-    grid = disu.refill(base, VORONOI_PIT, 12, border_divisions=border_divisions)
+    with pytest.warns(UserWarning, match="outline_split"):
+        sharp = disu.refill(base, VORONOI_PIT, 12, growth_factor=1.1).attrs["refill"]
+    smooth = disu.refill(base, VORONOI_PIT, 12, growth_factor=1.1, priority="growth").attrs["refill"]
+    assert sharp["core_size"] == 12 and smooth["core_size"] > 12
+    assert smooth["max_neighbour_area_ratio"] < sharp["max_neighbour_area_ratio"]
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("outline_split", [1, 2])
+@pytest.mark.parametrize("dip", [0.0, 0.03])
+def test_voronoi_pit_refilled_at_depth_is_exact_with_xt3d(tmp_path, dip, outline_split):
+    _, base = voronoi_pit()
+    grid = disu.refill(base, VORONOI_PIT, 12, outline_split=outline_split)
     error, d = linear_field_error(tmp_path, [base] * 3 + [grid] * 3, dip)
     assert d.diagnostics["vertical_offset"] == 0
     assert error < 1e-6

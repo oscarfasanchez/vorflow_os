@@ -28,8 +28,10 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `refill(base, polygon, resolution)` re-meshes the inside of a barrier
     outline with finer Voronoi cells that share the outline's vertices, so
     every face stays orthogonal; the inside is graded by `growth_factor` or
-    `fields`, as in `add_polygon`; `splice(base, fine, polygon)` joins grids
-    made separately.
+    `fields`, as in `add_polygon`. `outline_split` makes the cells along the
+    outline finer, and `priority="growth"` enlarges the core cells when the
+    grading cannot reach the outline size (the default keeps `resolution`
+    and warns). `splice(base, fine, polygon)` joins grids made separately.
   - `subdivide()` makes sublayers in all or some columns.
   - `nodemap`, `cellmap`, `to_nodes`, `to_layers`, `locate`, `column` and
     `save_cellmap` track cells; `idomain_layers`, `layer_view` and

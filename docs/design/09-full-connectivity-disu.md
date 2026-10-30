@@ -123,7 +123,7 @@ entry (see Validation).
   connections like hanging nodes, and the result is exact. Nesting the
   fine cells is not needed.
 
-**`refill(base, polygon, resolution, growth_factor, fields, border_divisions)`:**
+**`refill(base, polygon, resolution, growth_factor, fields, outline_split)`:**
 - vorflow's exact barriers make every outline vertex a node on the barrier
   line, spaced by that mesh's size field. A separately made fine mesh
   spaces them differently (11.8 m against 28.6 m on the notebook pit, 4 of
@@ -137,7 +137,7 @@ entry (see Validation).
   circles fill the rest, graded from the outline spacing to `resolution`
   by `growth_factor` or by `fields`, as in `add_polygon`. The outside generator of each pair only shapes the face.
 - The result shares every base outline vertex and every face is orthogonal.
-  `border_divisions=k` splits the outline faces on the inside: finer border
+  `outline_split=k` splits the outline faces on the inside: finer border
   cells, with the base vertices still shared and up to 20 degrees of
   orthogonality error along the outline.
 
@@ -211,7 +211,7 @@ layers of low K; analytic head on the perimeter):
   200 m pit below layer 3; six layers, flat and 3 % dip; horizontal,
   vertical and combined gradients; MF6, XT3D): max head error < 1e-6 m
   (about 4e-8 m) with an independent fine grid joined by `splice` and with
-  `refill` (`border_divisions` 1 and 2). Before the fixes in this note the
+  `refill` (`outline_split` 1 and 2). Before the fixes in this note the
   same model gave up to 0.029 m:
 
   | setup | max error |
@@ -241,7 +241,7 @@ layers of low K; analytic head on the perimeter):
   of base cell faces. The cells along the outline keep the base spacing;
   `growth_factor` (or `fields`) sets how fast the inside reaches `resolution` (largest area ratio
   between neighbours about 2.4 on the notebook pit, 1.9 with
-  `border_divisions=2`).
+  `outline_split=2`).
 - FloPy's `PlotCrossSection` misdrew a DISU model whose layers have
   different cell counts after `subdivide`. The review notebook draws its
   section from `cellmap` instead.
