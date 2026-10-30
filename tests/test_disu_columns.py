@@ -47,6 +47,15 @@ def test_classify_noflow_passthrough_and_thin_cells():
     np.testing.assert_array_equal(classify(top_l, bot_l, idomain)[:, 0], [ACTIVE, PASSTHROUGH, ACTIVE])
 
 
+def test_classify_treats_roundoff_thickness_as_zero():
+    # MODFLOW 6 stops on a cell a few ulps thick ("thickness <= 0"), so it passes flow through.
+    top_l, bot_l, idomain = _column([50.0, 50.0 - 1e-14, 40.0], top=60.0)
+    np.testing.assert_array_equal(classify(top_l, bot_l, idomain)[:, 0], [ACTIVE, PASSTHROUGH, ACTIVE])
+    # The threshold follows the elevations (1e-9 of the largest): 1 um is still a cell.
+    top_l, bot_l, idomain = _column([0.0, -1e-6, -1.0], top=1e-3)
+    np.testing.assert_array_equal(classify(top_l, bot_l, idomain)[:, 0], [ACTIVE, ACTIVE, ACTIVE])
+
+
 def test_vertical_pairs_pass_through_but_stop_at_noflow():
     status = np.array([[ACTIVE], [PASSTHROUGH], [ACTIVE], [NOFLOW], [PASSTHROUGH], [ACTIVE]])
     upper, lower, cells = vertical_pairs(status)

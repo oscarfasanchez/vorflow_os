@@ -6,7 +6,8 @@ the bottom of the layer above. No geometry and no flopy here.
 
 ``idomain`` follows MODFLOW 6: values above zero are active, zero is a
 no-flow cell that never passes flow, and -1 is a vertical pass-through cell.
-A cell thinner than ``min_thickness`` is treated as pass-through as well.
+A cell no thicker than ``min_thickness`` (or roundoff) is treated as
+pass-through as well.
 
 When layers use different plan grids, the arrays cover every plan column of
 every grid; a column missing from a layer's grid is ``ABSENT`` there (NaN
@@ -18,6 +19,13 @@ import numpy as np
 NOFLOW, ACTIVE, PASSTHROUGH, ABSENT = 0, 1, 2, 3
 STATUS_NAMES = {NOFLOW: "noflow", ACTIVE: "active", PASSTHROUGH: "passthrough", ABSENT: "absent"}
 COLLAPSE_MODES = ("split", "up", "down", None)
+ROUNDOFF = 1e-9         # relative to the largest elevation: thinner cells have zero thickness
+
+
+def roundoff(*elevations):
+    """Thickness that counts as zero: ``ROUNDOFF`` times the largest elevation (at least 1)."""
+    scale = max([1.0] + [float(np.nanmax(np.abs(e), initial=0.0)) for e in elevations])
+    return ROUNDOFF * scale
 
 
 def layer_arrays(top, botm, idomain=None, ncpl=None):
@@ -71,11 +79,15 @@ def layer_arrays(top, botm, idomain=None, ncpl=None):
 
 def classify(top_l, bot_l, idomain, min_thickness=0.0):
     """Status per cell: ``NOFLOW`` (idomain 0), ``PASSTHROUGH`` (idomain < 0 or thin),
-    ``ABSENT`` (NaN elevations) or ``ACTIVE``."""
+    ``ABSENT`` (NaN elevations) or ``ACTIVE``.
+
+    A cell is thin at or below ``min_thickness``, or below roundoff
+    (``ROUNDOFF`` times the largest elevation), which MODFLOW rejects as zero.
+    """
     thickness = top_l - bot_l
     status = np.full(idomain.shape, ACTIVE, dtype=np.int8)
     with np.errstate(invalid="ignore"):
-        thin = thickness <= min_thickness if min_thickness > 0 else thickness <= 0
+        thin = thickness <= max(min_thickness, roundoff(top_l, bot_l))
     status[(idomain < 0) | thin] = PASSTHROUGH
     status[idomain == 0] = NOFLOW
     status[np.isnan(thickness)] = ABSENT

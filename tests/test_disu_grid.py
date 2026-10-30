@@ -92,6 +92,13 @@ def test_pass_through_and_noflow_cells_are_removed_and_tracked():
     assert props["bot"][1] == 6 and props["top"][3] == 4
 
 
+def test_roundoff_thin_cells_are_passed_through():
+    grid = _grid(nx=2, ny=1)
+    d = disu.DisuGrid(grid, 60.0, [[50.0, 50.0], [50.0 - 7e-15, 45.0], [40.0, 40.0]]).build()
+    np.testing.assert_array_equal(d.nodemap, [[0, 1], [-1, 2], [3, 4]])
+    assert (d.get_gridprops_disu6()["top"] > d.get_gridprops_disu6()["bot"]).all()
+
+
 def test_to_nodes_to_layers_round_trip():
     grid = _grid(nx=2, ny=1)
     d = disu.DisuGrid(grid, 10.0, [[6, 6], [4, 4], [0, 0]], [[1, 1], [-1, 1], [1, 1]],
