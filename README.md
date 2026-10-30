@@ -418,8 +418,14 @@ heads = d.to_layers(gwf.output.head().get_data().ravel())  # back to (nlay, ncpl
   cells that share the outline's vertices. The outline must be cell faces
   (`add_line(outline, is_barrier=True)`). Pass one grid per layer, e.g.
   `DisuGrid([base, base, pit, pit], top, [b0, b1, b2, b3])`; the contact
-  where the grid changes is made gap-free. `disu.splice(base, fine, polygon)`
-  joins a fine grid made separately.
+  where the grid changes is made gap-free. `outline_split=2` makes the cells
+  along the outline finer. `disu.splice(base, fine, polygon)` joins a fine
+  grid made separately. A change of grid at depth suits near-vertical
+  features; for subhorizontal ones use the same grid in every layer.
+- **Dipping contacts at a change of grid:** the gap-free contact under a
+  refinement is flat, which moves the bottoms above it (`report()` says by
+  how much). `grids, top, botm, idomain, parent = disu.split_contacts(grids,
+  top, botm, idomain)` keeps them as given by adding a wedge layer.
 - **Sublayers:** `disu.subdivide(top, botm, idomain, nsub=..., where=mask)`
   splits layers everywhere or only in some columns.
 - **Tracking:** `nodemap`, `cellmap` (or `save_cellmap()`), `to_nodes`,
@@ -615,7 +621,7 @@ builds DISU grids with full connectivity: the dipping-aquifer test of
 Provost et al. (2025) and a Voronoi model refined only at depth.
 [examples/disu_refined_at_depth.ipynb](https://github.com/rhugman/vorflow/blob/main/examples/disu_refined_at_depth.ipynb)
 refines a pit below some layers with `disu.refill` (shared outline vertices, gap-free contacts),
-checks the accuracy, and maps the results in 2D with FloPy, `idomain_layers` and `layer_view`.
+keeps the dipping contact with `disu.split_contacts`, checks the accuracy, and maps the results in 2D with FloPy, `idomain_layers` and `layer_view`.
 
 ## Contributing
 

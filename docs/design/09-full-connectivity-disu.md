@@ -24,7 +24,8 @@ flopy.mf6.ModflowGwfdisu(gwf, **d.get_gridprops_disu6())
 - **Different plan grids per layer.** For example, a pit refined only at
   depth with `disu.refill`, which shares the outline's vertices with the
   base grid, or `disu.splice` for grids made separately. Contacts where the
-  grid changes are gap-free.
+  grid changes are gap-free; `disu.split_contacts` keeps dipping bottoms
+  there as given.
 - **Sublayers**, everywhere or in some columns, with `disu.subdivide`.
 - **Node tracking:** `nodemap`, `cellmap`, `to_nodes`/`to_layers` and
   `locate`/`column`; `idomain_layers`, `layer_view` and `vertex_grid` for 2D
@@ -122,8 +123,37 @@ entry (see Validation).
 - Fine cells may straddle several coarse cells: XT3D treats the vertical
   connections like hanging nodes, and the result is exact. Nesting the
   fine cells is not needed.
+- **Why the contact is flat under a refinement.** Each cell has one top and
+  one bottom, so a dipping layer is a staircase on each grid. Fine cells
+  straddle the steps of the coarse cells above, so the groups chain
+  together and the whole contact becomes one level. The coarse bottoms
+  then move by about dip x half the refined width: 2.57 m at a 3 % dip on
+  the notebook's 200 m pit.
 
-**`refill(base, polygon, resolution, growth_factor, fields, outline_split)`:**
+**`split_contacts(grids, top, botm, idomain, wedge, min_thickness, layers)`:**
+- Cuts each group that needs it flat and adds one wedge layer between the
+  cut and the given contact, so the given bottoms stay where they are.
+  Groups whose bottoms already agree (nested refinement) are left alone.
+- `wedge="upper"`: on the grid above, from each upper bottom down to the
+  lowest one; it belongs to the layer below. On the notebook pit it adds
+  39 cells.
+- `wedge="lower"`: on the grid below, from the highest contact down to the
+  contact at each lower cell (the `top` given for that layer, else the
+  bottom above the cell's centre); it belongs to the layer above and
+  follows the contact on the finer grid. On the notebook pit it adds 202
+  cells.
+- Wedge pieces up to `min_thickness` are not made; the bottom next to them
+  moves to the cut instead.
+- It returns the new layer lists and `parent`, the input layer of each new
+  layer; after `subdivide`, `subdivide_parent[parent]` gives the original
+  layers. Both wedges reproduce a uniform gradient to 4.5e-8 m in MF6
+  (XT3D), as does the flat contact.
+- **When to change the grid at depth.** It suits near-vertical features,
+  such as a pit or a fault zone. For subhorizontal features (dipping less
+  than about 45 degrees), use the same plan grid in every layer, refined
+  where needed, as in normal meshing.
+
+**`refill(base, polygon, resolution, growth_factor, fields, outline_split, priority)`:**
 - vorflow's exact barriers make every outline vertex a node on the barrier
   line, spaced by that mesh's size field. A separately made fine mesh
   spaces them differently (11.8 m against 28.6 m on the notebook pit, 4 of
@@ -137,16 +167,31 @@ entry (see Validation).
   circles fill the rest, graded from the outline spacing to `resolution`
   by `growth_factor` or by `fields`, as in `add_polygon`. The outside generator of each pair only shapes the face.
 - The result shares every base outline vertex and every face is orthogonal.
-  `outline_split=k` splits the outline faces on the inside: finer border
-  cells, with the base vertices still shared and up to 20 degrees of
-  orthogonality error along the outline.
+- `outline_split=k` splits the outline faces on the inside: finer border
+  cells, with the base vertices still shared. The extra vertices hang on
+  the outside cells' faces, as in a quadtree grid, with up to 20 degrees of
+  orthogonality error along the outline. XT3D handles them exactly.
+- The core of `resolution` cells is inset from the outline by the distance
+  at which the fields reach the outline spacing, at most half the polygon's
+  inradius. If they cannot grow that far, `priority="resolution"` (the
+  default) keeps the core size and warns, and `priority="growth"` raises it
+  by bisection just enough. On the notebook pit with `growth_factor=1.1`,
+  `"resolution"` reaches 17 m at a 28.6 m outline (neighbour area ratio
+  3.0) and `"growth"` uses 23 m core cells (ratio 1.9);
+  `outline_split=2` with the default growth gives a ratio of 1.8.
+  `attrs["refill"]` records `core_size` and `size_at_outline`.
+- Without XT3D a change of grid is not exact even with shared outline
+  vertices, because the vertical connections join cells whose centres are
+  offset in plan (0.066 m with `outline_split=1` and 0.10 m with 2, flat
+  pit, horizontal gradient).
 
 **Diagnostics** (`report()`):
 - the offset ratio r = offset / thinner cell, which is the paper's quantity:
   same-layer neighbours stop touching at r = 1;
 - a sublayer suggestion where r >= 1;
 - merged-piece counts, when merging is switched on, with a warning;
-- the contact groups at a change of grid and the largest shift;
+- the contact groups at a change of grid and, when the contact moved
+  bottoms, the largest move with a pointer to `split_contacts`;
 - the XT3D advice below.
 
 ## What MODFLOW does with the geometry
@@ -181,6 +226,11 @@ IHC=2.
 
 ## Validation
 
+The MODFLOW runs below are local benchmark scripts, outside the test suite
+(`benchmarks/disu_validation/`, not in the repository). The tests check the
+geometry those runs depend on: each cell's connections add up to its own
+faces, contacts meet, and the connection arrays equal the reference.
+
 **Reference implementation:**
 - On random offset layers (up to 30×30×8 cells), ja, ihc, cl12, hwva,
   angldegx and iac equal the USGS `disv2disu.py` (`staggered=True`) entry for
@@ -210,8 +260,9 @@ layers of low K; analytic head on the perimeter):
 - **Voronoi pit at depth** (the notebook model: 60 m cells, 12 m inside a
   200 m pit below layer 3; six layers, flat and 3 % dip; horizontal,
   vertical and combined gradients; MF6, XT3D): max head error < 1e-6 m
-  (about 4e-8 m) with an independent fine grid joined by `splice` and with
-  `refill` (`outline_split` 1 and 2). Before the fixes in this note the
+  (about 4e-8 m) with an independent fine grid joined by `splice`, with
+  `refill` (`outline_split` 1 and 2) and with `split_contacts` (both
+  wedges). Before the fixes in this note the
   same model gave up to 0.029 m:
 
   | setup | max error |
@@ -227,8 +278,7 @@ layers of low K; analytic head on the perimeter):
 
 - A gap-free contact moves the bottoms above a non-nested change of grid
   to one elevation per group (on the notebook pit, by up to 2.6 m with a
-  3 % dip). Give a flat `botm` there to choose the level yourself; split
-  layers with `subdivide` where the dip inside the refined area matters.
+  3 % dip). `split_contacts` keeps them, at the cost of one wedge layer.
 - Plan cells of different grids that overlap get only vertical connections.
   Where a dip is steep, give adjacent layers the same grid in that area.
 - Cells match across grids only when their generator and footprint are
@@ -238,10 +288,8 @@ layers of low K; analytic head on the perimeter):
   hanging nodes (exact for DISU, but not orthogonal); use `refill` when the
   fine cells can be made from the base grid.
 - `refill` takes one polygon without holes per call, whose outline is made
-  of base cell faces. The cells along the outline keep the base spacing;
-  `growth_factor` (or `fields`) sets how fast the inside reaches `resolution` (largest area ratio
-  between neighbours about 2.4 on the notebook pit, 1.9 with
-  `outline_split=2`).
+  of base cell faces. The cells along the outline keep the base spacing
+  (or a fraction of it, with `outline_split`).
 - FloPy's `PlotCrossSection` misdrew a DISU model whose layers have
   different cell counts after `subdivide`. The review notebook draws its
   section from `cellmap` instead.
@@ -254,6 +302,7 @@ layers of low K; analytic head on the perimeter):
 - Examples: `examples/full_connectivity_demo.ipynb`,
   `examples/disu_refined_at_depth.ipynb`.
 - Tests: `tests/test_disu_*.py`.
+- Solver checks: local scripts in `benchmarks/disu_validation/` (git-ignored).
 - Changed: `src/vorflow/_mfusg.py`. The plan faces are shared (`_planar_faces`
   now also returns the face normal), and the USG arrays and GSF come from the
   DISU core, with unchanged output.

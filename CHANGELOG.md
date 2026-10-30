@@ -25,6 +25,8 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - Layers can use different plan grids, joined by their plan overlaps.
     Contacts where the grid changes are gap-free: cells that overlap across
     them share one elevation (the area-weighted mean of the bottoms above).
+    `split_contacts()` keeps dipping bottoms there as given, by adding a
+    wedge layer under a flat cut, on the grid above or below.
   - `refill(base, polygon, resolution)` re-meshes the inside of a barrier
     outline with finer Voronoi cells that share the outline's vertices, so
     every face stays orthogonal; the inside is graded by `growth_factor` or
@@ -38,7 +40,8 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `vertex_grid` give per-layer status maps and 2D views of split layers
     for FloPy plots; `from_disv()` reads existing DISV models.
   - `report()` gives the offset ratio from the paper, a sublayer suggestion,
-    and the reminder that MF6 XT3D needs NPF `angle2`/`angle3` to account
+    how far a contact at a change of grid moved the bottoms above it, and
+    the reminder that MF6 XT3D needs NPF `angle2`/`angle3` to account
     for vertical offsets.
   - See `docs/design/09-full-connectivity-disu.md`.
 - `ConceptualMesh.check(background_lc=None)` reports input defects that tend

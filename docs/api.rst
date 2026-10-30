@@ -67,6 +67,7 @@ connectivity from vorflow grids and FloPy-style layer arrays; import it as
    DisuGrid
    refill
    splice
+   split_contacts
    subdivide
 
 Grid quality and utilities
