@@ -1,8 +1,9 @@
 """DISU array serialization from a link table (see ``_connect3d``).
 
 ``mf6_gridprops`` returns the keyword arguments of ``flopy.mf6.ModflowGwfdisu``
-and ``mfusg_gridprops`` those of ``flopy.mfusg.MfUsgDisU``, with the keys of
-``flopy.utils.gridgen.Gridgen.get_gridprops_disu6`` and ``..._disu5``.
+and ``mfusg_gridprops`` those of ``flopy.mfusg.MfUsgDisU`` (behind
+``DisuGrid.get_gridprops_mf6_disu`` and ``get_gridprops_mfusg_disu``), with the
+keys of ``flopy.utils.gridgen.Gridgen.get_gridprops_disu6`` and ``..._disu5``.
 """
 
 import logging

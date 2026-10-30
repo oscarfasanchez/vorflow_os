@@ -2,7 +2,7 @@
 
 The workflow follows FloPy conventions: give the 2D grid and the usual layer
 arrays (``top``, ``botm``, ``idomain``), call :meth:`DisuGrid.build`, then
-unpack :meth:`DisuGrid.get_gridprops_disu6` into ``flopy.mf6.ModflowGwfdisu``,
+unpack :meth:`DisuGrid.get_gridprops_mf6_disu` into ``flopy.mf6.ModflowGwfdisu``,
 as with ``flopy.utils.gridgen.Gridgen``. vorflow reads no rasters and writes
 no model files.
 
@@ -263,7 +263,7 @@ class DisuGrid:
         used = np.isin(np.minimum(f1, f2) * ncol + np.maximum(f1, f2), np.minimum(a, b) * ncol + np.maximum(a, b))
         return float(self._faces["ortho_error"].to_numpy()[used].max()) if used.any() else 0.0
 
-    def get_gridprops_disu6(self):
+    def get_gridprops_mf6_disu(self):
         """Keyword arguments for ``flopy.mf6.ModflowGwfdisu`` (gridgen key names).
 
         The one-based layer number is written on the IHC diagonal, which
@@ -285,7 +285,7 @@ class DisuGrid:
             props["vertical_offset_tolerance"] = self.diagnostics["vertical_offset"] * (1 + 1e-9)
         return props
 
-    def get_gridprops_disu5(self):
+    def get_gridprops_mfusg_disu(self):
         """Keyword arguments for ``flopy.mfusg.MfUsgDisU`` (MODFLOW-USG; gridgen key names).
 
         Uses ``ivsd=1`` with an explicit ``ivc`` so staggered connections stay

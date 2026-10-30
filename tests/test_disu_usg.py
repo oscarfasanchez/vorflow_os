@@ -12,7 +12,7 @@ from test_disu_grid import _grid, _rows
 
 def test_disu5_marks_vertical_connections_explicitly():
     d = _two_columns(np.array([20.0, 20.0]), [12, 4], [16, 0])
-    props = d.get_gridprops_disu5()
+    props = d.get_gridprops_mfusg_disu()
     assert (props["ivsd"], props["idsymrd"], props["nlay"]) == (1, 0, 2)
     np.testing.assert_array_equal(props["nodelay"], [2, 2])
     a1, b1, a2, b2 = d.nodemap[0, 0], d.nodemap[0, 1], d.nodemap[1, 0], d.nodemap[1, 1]
@@ -28,16 +28,16 @@ def test_disu5_marks_vertical_connections_explicitly():
 def test_disu5_counts_nodes_per_layer_after_removing_cells():
     grid = _grid(nx=3, ny=1)
     d = disu.DisuGrid(grid, 10.0, [[6, 6, 6], [4, 4, 4], [0, 0, 0]], [[1, 1, 1], [1, -1, 0], [1, 1, 1]]).build()
-    np.testing.assert_array_equal(d.get_gridprops_disu5()["nodelay"], [3, 1, 3])
+    np.testing.assert_array_equal(d.get_gridprops_mfusg_disu()["nodelay"], [3, 1, 3])
     empty = disu.DisuGrid(grid, 10.0, [[6, 6, 6], [6, 6, 6]]).build()
     with pytest.raises(ValueError, match="Layer 1 has no active cells"):
-        empty.get_gridprops_disu5()
+        empty.get_gridprops_mfusg_disu()
 
 
 def test_layered_disu5_matches_the_original_usg_export():
     grid = _grid(nx=3, ny=2, widths=[1, 2, 1])
     legacy = grid_to_mfusg_disu(grid, 10.0, [6.0, 0.0], nlay=2)
-    new = disu.DisuGrid(grid, 10.0, [6.0, 0.0], connectivity="layered").build().get_gridprops_disu5()
+    new = disu.DisuGrid(grid, 10.0, [6.0, 0.0], connectivity="layered").build().get_gridprops_mfusg_disu()
     for key in ("iac", "ja", "cl12", "fahl", "top", "bot", "nodelay"):
         np.testing.assert_allclose(new[key], legacy[key], err_msg=key)
     # The original export keeps one layer of areas and lets USG infer vertical connections.
@@ -60,7 +60,7 @@ def test_gsf_lists_each_node_with_its_own_elevations(tmp_path):
 def test_disu5_side_areas_cover_the_walls_of_a_dipping_aquifer():
     """Each aquifer cell's two walls are wholly connected: FAHL adds up to width x thickness."""
     d, _, edge, aquifer = _dipping_aquifer(30, "full")
-    props = d.get_gridprops_disu5()
+    props = d.get_gridprops_mfusg_disu()
     side = np.array([fahl[1:][ivc[1:] == 0].sum() for fahl, ivc in zip(_rows(props, "fahl"), _rows(props, "ivc"))])
     below = np.array([fahl[1:][ivc[1:] == 1].sum() for fahl, ivc in zip(_rows(props, "fahl"), _rows(props, "ivc"))])
     thickness = np.asarray(props["top"]) - np.asarray(props["bot"])

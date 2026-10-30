@@ -39,7 +39,7 @@ def test_dipping_offset_links_each_overlap_once():
     assert pairs[frozenset((a1, b1))] == (2, 4)
     assert pairs[frozenset((a1, b2))] == (2, 4)
     assert pairs[frozenset((a2, b2))] == (2, 8)
-    props = d.get_gridprops_disu6()
+    props = d.get_gridprops_mf6_disu()
     entries = _entries(props)
     assert entries[a1, b2] == (2, 0.5, 1.0, 0.0)     # HWVA is the face width; MF6 applies the overlap.
     assert entries[b2, a1] == (2, 0.5, 1.0, 180.0)
@@ -66,7 +66,7 @@ def test_opt_in_sliver_merge_keeps_face_area_and_is_reported():
     assert pairs[frozenset((a2, b2))][1] == pytest.approx(10.001)
     assert sum(h for _, h in pairs.values()) == pytest.approx(20.0)
     # MF6 recomputes the overlap (9.998) from the elevations, so HWVA carries the merged height.
-    entries = _entries(d.get_gridprops_disu6())
+    entries = _entries(d.get_gridprops_mf6_disu())
     assert entries[a1, b1][2] == pytest.approx(9.999 / 9.998)
     assert d.diagnostics["slivers_merged"] == 1
     assert d.diagnostics["largest_sliver"] == pytest.approx(0.002)
@@ -149,6 +149,6 @@ def test_one_ulp_offset_does_not_duplicate_a_connection():
     """A piece one ulp thick has a midpoint on a boundary; it must not repeat its neighbour's pair."""
     top = np.array([20.0, 20.0])
     d = _two_columns(top, [10.0, 0], [np.nextafter(10.0, 20.0), 0])
-    props = d.get_gridprops_disu6()                    # Raises on a duplicate connection.
+    props = d.get_gridprops_mf6_disu()                    # Raises on a duplicate connection.
     assert props["nja"] == len(props["ja"])
     assert sum(h for _, h in _pairs(d).values()) == pytest.approx(20.0)

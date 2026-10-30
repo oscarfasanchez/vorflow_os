@@ -18,9 +18,9 @@ def test_from_disv_matches_building_from_the_grid():
     idomain = np.ones(botm.shape, dtype=int)
     idomain[1, 4] = -1
     planar = grid_to_disv(grid)
-    direct = disu.DisuGrid(grid, 10.0, botm, idomain).build().get_gridprops_disu6()
+    direct = disu.DisuGrid(grid, 10.0, botm, idomain).build().get_gridprops_mf6_disu()
     standalone = disu.DisuGrid.from_disv(planar["vertices"], planar["cell2d"], 10.0, botm, idomain)
-    props = standalone.build().get_gridprops_disu6()
+    props = standalone.build().get_gridprops_mf6_disu()
     for key in ("iac", "ja", "ihc", "cl12", "hwva", "angldegx", "top", "bot", "area"):
         np.testing.assert_allclose(props[key], direct[key], err_msg=key)
     assert list(standalone.cellmap.node_id[:4]) == [0, 1, 2, 3]
@@ -118,5 +118,5 @@ def test_flopy_reads_the_layers_from_the_disu_grid():
     d = _three_columns([[1, 1, 1], [-1, 1, 0], [1, 1, 1]])
     sim = flopy.mf6.MFSimulation()
     gwf = flopy.mf6.ModflowGwf(sim)
-    flopy.mf6.ModflowGwfdisu(gwf, **d.get_gridprops_disu6())
+    flopy.mf6.ModflowGwfdisu(gwf, **d.get_gridprops_mf6_disu())
     np.testing.assert_array_equal(gwf.modelgrid.ncpl, [3, 1, 3])

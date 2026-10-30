@@ -13,7 +13,7 @@ from vorflow import disu
 
 d = disu.DisuGrid(grid, top, botm, idomain).build()
 print(d.report())
-flopy.mf6.ModflowGwfdisu(gwf, **d.get_gridprops_disu6())
+flopy.mf6.ModflowGwfdisu(gwf, **d.get_gridprops_mf6_disu())
 ```
 
 - **Full connectivity.** Cells in different layers whose shared faces
@@ -32,9 +32,10 @@ flopy.mf6.ModflowGwfdisu(gwf, **d.get_gridprops_disu6())
   maps with FloPy.
 - **Existing DISV models** go in through `DisuGrid.from_disv`.
 
-vorflow stays a mesher. It takes numbers in FloPy's conventions, returns the
-`gridprops` dictionaries of `flopy.utils.gridgen` (`get_gridprops_disu6/5`),
-and reads no rasters.
+vorflow stays a mesher. It takes numbers in FloPy's conventions and reads
+no rasters. `get_gridprops_mf6_disu()` and `get_gridprops_mfusg_disu()`
+return dictionaries with the keys of `flopy.utils.gridgen`'s
+`get_gridprops_disu6/5`.
 
 ## Why
 
@@ -219,7 +220,7 @@ IHC=2.
 **MODFLOW-USG:**
 - FAHL is an area, which USG divides by the mean thickness.
 - With `ivsd` 0 or -1, USG labels every connection to a lower layer as
-  vertical. `get_gridprops_disu5` therefore writes `ivsd=1` with an explicit
+  vertical. `get_gridprops_mfusg_disu` therefore writes `ivsd=1` with an explicit
   `ivc`, otherwise staggered connections would take their conductance from
   VKA.
 - USG also resets heads below a cell bottom, even in confined layers.

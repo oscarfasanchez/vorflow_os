@@ -400,7 +400,7 @@ from vorflow import disu
 
 d = disu.DisuGrid(grid, top, botm, idomain).build()   # FloPy shapes: (ncpl,), (nlay, ncpl)
 print(d.report())
-flopy.mf6.ModflowGwfdisu(gwf, **d.get_gridprops_disu6())
+flopy.mf6.ModflowGwfdisu(gwf, **d.get_gridprops_mf6_disu())
 flopy.mf6.ModflowGwfnpf(gwf, k=d.to_nodes(k_layers), xt3doptions=True, angle2=0.0, angle3=0.0)
 heads = d.to_layers(gwf.output.head().get_data().ravel())  # back to (nlay, ncpl), NaN where removed
 ```
@@ -411,7 +411,7 @@ heads = d.to_layers(gwf.output.head().get_data().ravel())  # back to (nlay, ncpl
   and never passes flow.
 - **XT3D:** use it with offset layers, and give NPF `angle2` and `angle3`
   (zeros are fine). Without them MODFLOW 6 XT3D ignores the vertical
-  offsets. MODFLOW-USG (`get_gridprops_disu5()`, `write_gsf()`) has no XT3D
+  offsets. MODFLOW-USG (`get_gridprops_mfusg_disu()`, `write_gsf()`) has no XT3D
   but still gains from the extra connections.
 - **Finer cells at depth:** `disu.refill(base, polygon, resolution)` keeps the
   base cells outside the polygon and fills the inside with finer Voronoi

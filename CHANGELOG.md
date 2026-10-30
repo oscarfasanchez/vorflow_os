@@ -12,7 +12,7 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `vorflow.disu`: fully unstructured MODFLOW grids with full connectivity
   (Provost et al. 2025, after Langevin's USGS `disv2disu.py`).
   - `DisuGrid(grid, top, botm, idomain).build()` takes FloPy-style layer
-    arrays. `get_gridprops_disu6()` and `get_gridprops_disu5()` return
+    arrays. `get_gridprops_mf6_disu()` and `get_gridprops_mfusg_disu()` return
     arguments for `flopy.mf6.ModflowGwfdisu` and `flopy.mfusg.MfUsgDisU`,
     with gridgen's key names.
   - Cells in different layers whose faces overlap vertically are connected

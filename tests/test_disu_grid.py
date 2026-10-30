@@ -82,13 +82,13 @@ def test_options_are_validated_eagerly():
     with pytest.raises(ValueError, match="6 cells per layer"):
         disu.DisuGrid(grid, 10, [[0, 0]])
     with pytest.raises(RuntimeError, match="build"):
-        disu.DisuGrid(grid, 10, [0], connectivity="layered").get_gridprops_disu6()
+        disu.DisuGrid(grid, 10, [0], connectivity="layered").get_gridprops_mf6_disu()
 
 
 def test_layered_csr_structure_and_symmetry():
     grid = _grid()
     d = disu.DisuGrid(grid, 10.0, [5.0, 0.0], connectivity="layered").build()
-    props = d.get_gridprops_disu6()
+    props = d.get_gridprops_mf6_disu()
     assert props["nodes"] == 12 and len(props["iac"]) == 12
     assert props["nja"] == props["iac"].sum() == len(props["ja"])
     for node, (ja, ihc) in enumerate(zip(_rows(props, "ja"), _rows(props, "ihc"))):
@@ -117,7 +117,7 @@ def test_pass_through_and_noflow_cells_are_removed_and_tracked():
     np.testing.assert_array_equal(d.nodemap, [[0, 1], [-1, -1], [2, 3]])
     assert list(d.cellmap["status"]) == ["active", "active", "passthrough", "noflow", "active", "active"]
     assert list(d.cellmap["node_id"]) == [100, 101] * 3
-    props = d.get_gridprops_disu6()
+    props = d.get_gridprops_mf6_disu()
     entries = _entries(props)
     # Pass-through links node 0 to node 2; no-flow breaks the second column.
     assert (0, 2) in entries and (1, 3) not in entries
@@ -132,7 +132,7 @@ def test_roundoff_thin_cells_are_passed_through():
     grid = _grid(nx=2, ny=1)
     d = disu.DisuGrid(grid, 60.0, [[50.0, 50.0], [50.0 - 7e-15, 45.0], [40.0, 40.0]]).build()
     np.testing.assert_array_equal(d.nodemap, [[0, 1], [-1, 2], [3, 4]])
-    assert (d.get_gridprops_disu6()["top"] > d.get_gridprops_disu6()["bot"]).all()
+    assert (d.get_gridprops_mf6_disu()["top"] > d.get_gridprops_mf6_disu()["bot"]).all()
 
 
 def test_to_nodes_to_layers_round_trip():
@@ -145,7 +145,7 @@ def test_to_nodes_to_layers_round_trip():
     np.testing.assert_array_equal(np.isnan(back), [[0, 0], [1, 0], [0, 0]])
     np.testing.assert_array_equal(np.nan_to_num(back), np.where(np.isnan(back), 0, k))
     # MF6 DISU accepts IDOMAIN 0/1 only, so no tags are written there.
-    assert "idomain" not in d.get_gridprops_disu6()
+    assert "idomain" not in d.get_gridprops_mf6_disu()
     assert "5 nodes" in d.report()
 
 
@@ -158,7 +158,7 @@ def test_layered_disu_has_the_disv_connections():
     idomain = np.ones((3, ncpl), dtype=int)
     idomain[1, 5] = -1
     d = disu.DisuGrid(grid, 10.0, botm, idomain, connectivity="layered", collapse=None).build()
-    entries = _entries(d.get_gridprops_disu6())
+    entries = _entries(d.get_gridprops_mf6_disu())
     geoms, xy = grid.geometry.to_numpy(), grid[["x", "y"]].to_numpy()
     top_l = np.vstack([np.full(ncpl, 10.0), botm[:-1]])
     expected = {}
