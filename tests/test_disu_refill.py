@@ -1,6 +1,5 @@
 """disu.refill: finer cells inside an outline that share the outline's vertices with the base grid."""
 
-import numpy as np
 import pytest
 import shapely
 from shapely.geometry import Polygon, box

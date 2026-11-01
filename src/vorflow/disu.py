@@ -40,8 +40,9 @@ from . import _columns
 from ._columns import ABSENT, ACTIVE, NOFLOW, PASSTHROUGH, STATUS_NAMES, subdivide  # noqa: F401
 from ._connect3d import concat_links, layered_links, overlay_links, staggered_links, vertical_links
 from ._disu_export import mf6_gridprops, mfusg_gridprops, write_gsf
+from ._gnc_export import GncCorrections
 
-__all__ = ["DisuGrid", "DisuOptions", "refill", "splice", "split_contacts", "subdivide"]
+__all__ = ["DisuGrid", "DisuOptions", "GncCorrections", "refill", "splice", "split_contacts", "subdivide"]
 
 CONNECTIVITY = ("full", "layered")
 CL12_MODES = ("plan", "connector")
@@ -298,6 +299,53 @@ class DisuGrid:
             self.nodes, self.nlay, self._node_top, self._node_bot, self._area[self._node_cell],
             self._node_layer, self.links,
         )
+
+    def estimate_gnc(self, k=None, *, method="geometric", connections="3d",
+                     min_offset=0., blocked_pairs=(), strict=False):
+        """Return one-ring ghost-node corrections for explicit model export.
+
+        Geometry-only estimation is the default. ``method='k_aware'`` requires
+        current positive scalar conductivity in active-node order and remains
+        experimental. Both methods use only immediate connected neighbours;
+        unsupported connections are reported and retain standard conductance.
+
+        Parameters
+        ----------
+        k : float or array_like of shape (nodes,), optional
+            Current positive scalar isotropic conductivity in active-node
+            order. Required for ``k_aware``; ignored by ``geometric``.
+        method : {'geometric', 'k_aware'}, default 'geometric'
+            Geometry-only or experimental local scalar-K interpolation.
+        connections : {'3d', 'all'}, default '3d'
+            Select vertical connections and lateral elevation offsets, or
+            also select in-plane offsets at splices and other mesh changes.
+        min_offset : float, default 0
+            Skip transverse offsets no greater than this fraction of the
+            perpendicular centre distance.
+        blocked_pairs : iterable of pairs of int, optional
+            Zero-based active-node pairs excluded from correction and support.
+            This option does not create a model hydraulic barrier.
+        strict : bool, default False
+            Raise on unsupported selected connections instead of warning.
+
+        Returns
+        -------
+        GncCorrections
+            Inspectable records, unsupported connections and MF6/MFUSG package
+            dictionaries. Existing grid exports are not modified.
+
+        Notes
+        -----
+        The tested physical scope is confined scalar isotropic flow.
+        K-aware estimation has known flow errors on a stepped dipping-aquifer
+        benchmark and is not a general replacement for XT3D. Recompute it
+        whenever K changes. Do not combine MF6 GNC with XT3D.
+        """
+        from ._gnc import estimate_gnc
+
+        return estimate_gnc(self, k, method=method, connections=connections,
+                            min_offset=min_offset, blocked_pairs=blocked_pairs,
+                            strict=strict)
 
     def write_gsf(self, filepath):
         """Write the grid specification file (GSF) used by MODFLOW-USG post-processors."""
@@ -699,6 +747,11 @@ class DisuGrid:
         if not frames:
             return pd.DataFrame({"col_a": [], "col_b": [], "area": []})
         overlaps = pd.concat(frames, ignore_index=True)
+        # Separate grid objects can reuse the same global plan columns.
+        # overlay_links reuses a column pair at each layer transition, so
+        # collecting that pair twice would create duplicate DISU links.
+        pairs = np.sort(overlaps[["col_a", "col_b"]].to_numpy(dtype=np.int64), axis=1)
+        overlaps = overlaps.loc[~pd.DataFrame(pairs).duplicated().to_numpy()]
         overlaps = overlaps[overlaps.area > self._touch_area[overlaps.col_a.to_numpy(dtype=int)]]
         overlaps, merged = _merge_plan_slivers(overlaps, self._area, self.options.sliver_abs_tol)
         self.diagnostics["plan_slivers_merged"] = merged

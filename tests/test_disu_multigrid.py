@@ -58,6 +58,21 @@ def _pit_model(grids, botm_value=None, **kwargs):
     return disu.DisuGrid([base, base, pit, pit], 10.0, botm, **kwargs).build()
 
 
+def test_repeated_footprints_in_distinct_grids_do_not_duplicate_connections():
+    grids = [_boxes(2, .5), _boxes(3, 1/3), _boxes(2, .5, start_id=100)]
+    d = disu.DisuGrid(grids, 3., [2., 1., 0.]).build()
+    links = pd.DataFrame(d.links)
+    pairs = np.sort(links[["n", "m"]].to_numpy(), axis=1)
+    assert len(np.unique(pairs, axis=0)) == len(pairs)
+    cells = d.cellmap[d.cellmap.node >= 0].sort_values("node")
+    layer = cells.layer.to_numpy()
+    for upper in [0, 1]:
+        use = (links.ihc == 0) & (layer[links.n] == upper) & (layer[links.m] == upper+1)
+        assert links.loc[use, "fahl"].sum() == pytest.approx(1.)
+    for props in [d.get_gridprops_mf6_disu(), d.get_gridprops_mfusg_disu()]:
+        assert len(props["ja"]) == d.nodes + 2*len(links)
+
+
 def test_columns_and_links_across_a_change_of_grid(grids):
     base, pit = grids
     d = _pit_model(grids)

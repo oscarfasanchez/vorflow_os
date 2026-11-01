@@ -70,3 +70,63 @@ What is checked:
 Many come from grading and from clipping at the domain boundary, not from the
 inputs; use `vorflow.utils.calculate_mesh_quality` on the finished grid for
 those.
+
+## One-ring ghost-node corrections for DISU
+
+After building a `vorflow.disu.DisuGrid`, request one collection of corrections:
+
+```python
+corrections = d.estimate_gnc()  # geometric, one-ring, 3D connections
+print(corrections.corrected_connections, len(corrections.unsupported))
+```
+
+The geometric estimator uses only cell geometry. Both available methods search
+immediate connected neighbours; they do not add numerical cells or layers.
+Vertical connections and lateral elevation offsets are selected by default.
+Use `connections="all"` to include in-plane offsets, for example at a splice.
+`min_offset` skips offsets smaller than a specified fraction of the perpendicular
+centre distance. `blocked_pairs` excludes zero-based node pairs from estimation
+and interpolation support; it does not create a model hydraulic barrier.
+
+`records` gives each host, neighbour, ghost target, contributing nodes and
+weights. `unsupported` gives selected connections where weights could not be
+built. Those connections receive no GNC record and retain standard conductance;
+`strict=True` raises instead. `record_count` counts ghost records, while
+`corrected_connections` counts physical connections: a connection can use two
+ghost records. Inspect coverage before applying the package.
+
+For MODFLOW 6, keep XT3D disabled when applying GNC:
+
+```python
+options = corrections.get_gridprops_mf6_gnc()
+if options is not None:
+    flopy.mf6.ModflowGwfgnc(gwf, **options)
+```
+
+For MODFLOW-USG, explicit correction is the default export mode. FloPy stores
+USG fractions as single precision; the native writer preserves double precision:
+
+```python
+options = corrections.get_gridprops_mfusg_gnc()
+if options is not None:
+    package = flopy.mfusg.MfUsgGnc(model, **options)
+    model.write_input()
+    corrections.write_mfusg_gnc(package.fn_path)
+```
+
+Empty collections return `None` from either package-export helper. Existing
+DISU exports are unchanged; estimating a collection attaches no model package.
+
+The optional K-aware method needs current positive scalar isotropic conductivity
+in active-node order (use `d.to_nodes(...)` to map layer values):
+
+```python
+k_corrections = d.estimate_gnc(k, method="k_aware")
+```
+
+This method is experimental. It reproduces controlled, locally compatible
+transmission fields but has known physical-flow errors in a stepped
+dipping-aquifer benchmark, even with nearly matching heads. It is not a verified
+copy of ModelMuse or Gridgen and is not a general replacement for XT3D.
+Recompute corrections whenever K changes. Confined scalar isotropic flow is
+the tested scope; anisotropy tensors and head-dependent fractions are unsupported.

@@ -9,6 +9,12 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `DisuGrid.estimate_gnc()` returns an inspectable one-ring correction collection:
+  geometry-only estimation by default, or explicitly selected experimental
+  scalar-K-aware estimation. The collection reports unsupported connections
+  and exports MF6/MFUSG GNC package arguments. A precise MFUSG writer preserves
+  double-precision fractions. Existing DISU exports do not enable GNC implicitly.
+
 - `vorflow.disu`: fully unstructured MODFLOW grids with full connectivity
   (Provost et al. 2025, after Langevin's USGS `disv2disu.py`).
   - `DisuGrid(grid, top, botm, idomain).build()` takes FloPy-style layer
