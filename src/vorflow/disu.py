@@ -310,6 +310,9 @@ class DisuGrid:
         experimental. Both methods use only immediate connected neighbours;
         unsupported connections are reported and retain standard conductance.
 
+        Each offset connection needs a small linear program, a few
+        milliseconds each: expect minutes for 100,000 offset connections.
+
         Parameters
         ----------
         k : float or array_like of shape (nodes,), optional
