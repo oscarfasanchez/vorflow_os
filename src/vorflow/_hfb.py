@@ -5,19 +5,21 @@ meant to conform to it. The barrier is then a staircase: a vertical wall on
 each layer's trace and a horizontal tread between the traces of consecutive
 layers. A connection is cut when it crosses that staircase:
 
-* horizontal, between layers with the same trace: the plan segment between
-  the two cell centres crosses the trace. On a grid meshed with
-  ``is_barrier=True`` these are exactly the faces lying on the trace;
-  elsewhere they are the faces nearest it (a zig-zag), which still separates
-  the two sides;
+* horizontal, between layers with the same trace: the two cell centres lie
+  on opposite sides of the trace and the plan segment between them touches
+  it. A centre on the trace counts as left of it, so such cells all fall on
+  one side. On a grid meshed with ``is_barrier=True`` these are exactly the
+  faces lying on the trace; elsewhere they are the faces nearest it (a
+  zig-zag), which still separates the two sides;
 * vertical, between layers with different traces: the plan contact of the two
   cells lies inside the polygon joining the two traces (closed at the tips);
 * horizontal between layers with different traces: the cells lie on opposite
   sides of their own layers' traces and the segment between them touches the
   fault.
 
-``factor`` is |n_fault . n_face| for the plane through consecutive traces,
-each at its layer's mid-depth, so that with flow normal to the fault the staircase has the plane's resistance.
+``factor`` is ``|n_fault · n_face|`` for the plane through consecutive
+traces, each at its layer's mid-depth, so that with flow normal to the fault
+the staircase has the plane's resistance.
 This module returns FloPy constructor arguments without importing FloPy. Node
 numbers are zero-based.
 """
@@ -63,8 +65,11 @@ class _Step:
                 shapely.get_type_id(b) != shapely.GeometryType.LINESTRING:
             raise ValueError("Traces that differ between layers (a dipping fault) must each be one LineString; "
                              "give one fault per barrier_faces call.")
-        start, end = shapely.points(a.coords[0]), shapely.points(a.coords[-1])
-        if start.distance(shapely.points(b.coords[0])) > end.distance(shapely.points(b.coords[0])):
+        # Pair the ends that lie closer together; comparing one end only fails when
+        # one trace covers part of the other's strike.
+        a0, a1, b0, b1 = (np.asarray(p, dtype=float)[:2] for p in (a.coords[0], a.coords[-1],
+                                                                   b.coords[0], b.coords[-1]))
+        if np.hypot(*(a0 - b0)) + np.hypot(*(a1 - b1)) > np.hypot(*(a0 - b1)) + np.hypot(*(a1 - b0)):
             b = LineString(b.coords[::-1])
         self.a, self.b = a, b
         self.polygon = shapely.make_valid(Polygon(list(a.coords) + list(b.coords)[::-1]))
@@ -93,6 +98,12 @@ def _side(line, xy):
     near = shapely.get_coordinates(shapely.line_interpolate_point(line, d))
     t, p = after - before, xy - near
     return np.sign(t[:, 0] * p[:, 1] - t[:, 1] * p[:, 0])
+
+
+def _sides(line, xy, tolerance):
+    """+1 or -1 for points left or right of an oriented LineString; points on it count as left."""
+    on = shapely.distance(line, shapely.points(xy)) <= tolerance
+    return np.where(on, 1.0, _side(line, xy))
 
 
 def barrier_faces(grid, trace):
@@ -146,9 +157,10 @@ def barrier_faces(grid, trace):
     horizontal = np.flatnonzero((ihc != 0) & same)
     tree = shapely.STRtree(shapely.linestrings(np.stack((xy[n[horizontal]], xy[m[horizontal]]), axis=1)))
     for t in {id(t): t for t in traces if t is not None}.values():
-        found = horizontal[tree.query(t, predicate="crosses")]
+        found = horizontal[tree.query(t, predicate="dwithin", distance=tolerance)]
         own = [k for k, other in enumerate(traces) if _same(other, t)]
-        hit[found[np.isin(layer[n[found]], own) | np.isin(layer[m[found]], own)]] = True
+        found = found[np.isin(layer[n[found]], own) | np.isin(layer[m[found]], own)]
+        hit[found[_sides(t, xy[n[found]], tolerance) != _sides(t, xy[m[found]], tolerance)]] = True
     walls = np.flatnonzero(hit)
     if len(walls):
         faces = shapely.intersection(shapely.boundary(polygons[n[walls]]), shapely.boundary(polygons[m[walls]]))
@@ -192,7 +204,8 @@ def barrier_faces(grid, trace):
             # Staggered horizontal links: opposite sides of their own traces, across the fault zone.
             s = pair[~vertical]
             connector = shapely.linestrings(np.stack((xy[n[s]], xy[m[s]]), axis=1))
-            cut = shapely.intersects(connector, step.zone) & (_side(step.a, xy[n[s]]) != _side(step.b, xy[m[s]]))
+            cut = shapely.dwithin(connector, step.zone, tolerance) & (
+                _sides(step.a, xy[n[s]], tolerance) != _sides(step.b, xy[m[s]], tolerance))
             s = s[cut]
             dh, d = dip(shapely.points((xy[n[s]] + xy[m[s]]) / 2), step.a, la, step.b, lb, dv[~vertical][cut])
             hit[s] = True

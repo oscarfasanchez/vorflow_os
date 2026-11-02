@@ -368,9 +368,11 @@ class DisuGrid:
         with ``add_line(..., is_barrier=True)`` at that layer's trace). The
         barrier is then a staircase: walls on each layer's trace and treads
         between the traces of consecutive layers. Horizontal connections are
-        cut where the segment between the two cell centres crosses the trace
-        (``on_trace`` True when the face lies on it, otherwise the nearest
-        faces, a zig-zag that still separates the two sides). Vertical
+        cut where the two cell centres lie on opposite sides of the trace and
+        the segment between them touches it (``on_trace`` True when the face
+        lies on it, otherwise the nearest faces, a zig-zag that still
+        separates the two sides). A centre on the trace counts as left of it,
+        in the direction the trace is drawn. Vertical
         connections are cut where the two cells' plan contact lies inside the
         polygon joining two consecutive traces, closed at the fault tips.
 

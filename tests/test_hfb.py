@@ -227,6 +227,76 @@ def test_stacked_traces_cut_every_connection_that_changes_side(name):
     assert faces.vertical.any() and np.all((faces.factor > 0) & (faces.factor < 1))
 
 
+@pytest.mark.parametrize("slope", [0.6, -0.6, 0.0])
+@pytest.mark.parametrize("partial", [0, 1])
+@pytest.mark.parametrize("flip", [False, True])
+def test_traces_of_different_length_are_paired_end_to_end(slope, partial, flip):
+    # A fault that dies out along the strike in one layer: x = 3 in layer 0, x = 4 in layer 1,
+    # one of them only for y in [6, 11]. Where both exist, every change of side is cut, and nothing else.
+    grid = boxes(10)
+    x = grid.x.to_numpy()
+    d = disu.DisuGrid(grid, 10 - slope * x, [7 - slope * x, 4 - slope * x]).build()
+    traces = [LineString([(3 + k, 6 if k == partial else -1), (3 + k, 11)]) for k in range(2)]
+    if flip:
+        traces[partial] = LineString(traces[partial].coords[::-1])
+    faces = d.barrier_faces(traces)
+    xyz, layer = cells(d)
+    side = xyz[:, 0] > 3 + layer
+    n, m = d.links["n"], d.links["m"]
+    both = (xyz[n, 1] > 6.5) & (xyz[m, 1] > 6.5)
+    cut = np.zeros(len(n), dtype=bool)
+    cut[faces.links] = True
+    assert not (both & (side[n] != side[m]) & ~cut).any()
+    assert not (both & (side[n] == side[m]) & cut).any()
+
+
+def sealed(d, faces, side):
+    """With the cut connections removed, no cell on one side reaches the other."""
+    keep = np.ones(len(d.links["n"]), dtype=bool)
+    keep[faces.links] = False
+    n, m = d.links["n"][keep], d.links["m"][keep]
+    _, label = connected_components(coo_matrix((np.ones(len(n)), (n, m)), shape=(d.nodes,) * 2), directed=False)
+    return not set(label[side]) & set(label[~side])
+
+
+def test_a_trace_through_cell_centres_puts_them_on_its_left():
+    d = disu.DisuGrid(boxes(5), 2.0, [1.0, 0.0]).build()
+    xyz, _ = cells(d)
+    for trace, west in ((LineString([(2.5, -1), (2.5, 6)]), True), (LineString([(2.5, 6), (2.5, -1)]), False)):
+        faces = d.barrier_faces(trace)
+        # Drawn northwards the centres on the trace join the west side, drawn southwards the east.
+        side = xyz[:, 0] > 2.5 if west else xyz[:, 0] >= 2.5
+        assert sealed(d, faces, side) and len(faces) == 10
+        np.testing.assert_array_equal(np.sort(faces.links), np.flatnonzero(side[d.links["n"]] != side[d.links["m"]]))
+
+
+def test_a_trace_that_crosses_a_connection_twice_does_not_cut_it():
+    d = disu.DisuGrid(boxes(5), 1.0, [0.0]).build()
+    xyz, _ = cells(d)
+    faces = d.barrier_faces(LineString([(1.9, 2.4), (2.6, 2.6), (1.9, 2.8)]))
+    pairs = {frozenset(map(tuple, xyz[p, :2].round(1))) for p in faces.pairs}
+    assert frozenset({(2.5, 2.5), (2.5, 3.5)}) not in pairs
+
+
+@pytest.mark.slow
+def test_a_fault_line_meshed_without_a_barrier_is_still_sealed():
+    from vorflow import ConceptualMesh, MeshGenerator, VoronoiTessellator
+
+    fault = LineString([(70, 0), (110, 120)])
+    cm = ConceptualMesh()
+    cm.add_polygon(box(0, 0, 200, 120), zone_id=1, resolution=10)
+    cm.add_line(fault, line_id="fault", resolution=6, is_barrier=False)
+    mg = MeshGenerator(background_lc=10, conceptual_mesh=cm, verbosity=0)
+    mg.generate()
+    grid = VoronoiTessellator(mg, cm).generate()
+    d = disu.DisuGrid(grid, 2.0, [1.0, 0.0]).build()
+    xyz, _ = cells(d)
+    on = np.array([fault.distance(Point(p)) < 1e-6 for p in xyz[:, :2]])
+    assert on.any()
+    west = (110 - 70) * xyz[:, 1] - 120 * (xyz[:, 0] - 70) > 0
+    assert sealed(d, d.barrier_faces(fault), west | on)
+
+
 def test_uneven_offsets_give_the_local_dip():
     d, traces, _ = stacked("uneven offsets")
     faces = d.barrier_faces(traces)
