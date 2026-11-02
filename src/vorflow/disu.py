@@ -214,11 +214,12 @@ class DisuGrid:
         self._node_layer, self._node_cell = np.nonzero(active)
 
         self.diagnostics = {"slivers_merged": 0, "largest_sliver": 0.0, "plan_slivers_merged": 0,
-                            **self._contact}
+                            "chained_links": 0, "largest_skipped_run": 0.0, **self._contact}
         overlaps = self._overlaps()
         vertical = concat_links(
             vertical_links(status, nodemap, top_l, bot_l, self._area),
             overlay_links(status, nodemap, top_l, bot_l, overlaps),
+            self._chained_links(status, nodemap, top_l, bot_l),
         )
         if opts.connectivity == "full":
             centres = columns[["x", "y"]].to_numpy(dtype=float)
@@ -605,6 +606,11 @@ class DisuGrid:
             lines.append(f"  max plan orthogonality error: {self.diagnostics['max_ortho_error']:.3g} deg "
                          "(faces that carry a connection)")
         diag = self.diagnostics
+        if diag["chained_links"]:
+            lines.append(
+                f"  {diag['chained_links']} vertical connections cross pass-through cells between two changes "
+                f"of grid; their thickness is skipped (largest {diag['largest_skipped_run']:.6g})."
+            )
         merged = diag["slivers_merged"] + diag["plan_slivers_merged"]
         if merged:
             lines.append(
@@ -803,6 +809,64 @@ class DisuGrid:
         overlaps, merged = _merge_plan_slivers(overlaps, self._area, self.options.sliver_abs_tol)
         self.diagnostics["plan_slivers_merged"] = merged
         return overlaps
+
+    def _chained_links(self, status, nodemap, top_l, bot_l):
+        """IHC=0 links through pass-through runs that cross more than one change of grid.
+
+        ``overlay_links`` joins the nearest active cells on either side of one
+        change of grid. A pass-through run that ends at a further change of
+        grid (grids A, B, A with a pass-through B cell) is followed across each
+        one, and the active cells at its two ends are joined over the plan
+        area they share through it. As in a single column with
+        ``collapse=None``, the run's thickness is skipped.
+        """
+        nlay = status.shape[0]
+        present = status != ABSENT
+        up, down = _columns.nearest_active(status)
+        geoms = self._columns.geometry.to_numpy()
+        starting = [np.flatnonzero(~present[s] & present[s + 1]) for s in range(nlay - 1)]
+        # Boundary below which a pass-through run starting at a change of grid leaves its column (-1: none).
+        exit_at = np.full(status.shape, -1, dtype=np.int64)
+        for s, cols in enumerate(starting):
+            run = status[s + 1, cols] == PASSTHROUGH
+            for t in range(s + 1, nlay - 1):
+                exit_at[s + 1, cols[run & (status[t + 1, cols] == ABSENT)]] = t
+                run &= status[t + 1, cols] == PASSTHROUGH
+        trees = [shapely.STRtree(geoms[cols]) for cols in starting]
+        found = {}
+        for s in range(nlay - 1):
+            bridges = starting[s][exit_at[s + 1, starting[s]] >= 0]
+            ending = np.flatnonzero(present[s] & ~present[s + 1] & (up[s] >= 0))
+            if not len(bridges) or not len(ending):
+                continue
+            ia, ib = shapely.STRtree(geoms[bridges]).query(geoms[ending], predicate="intersects")
+            stack = [(nodemap[up[s, a], a], shapely.intersection(geoms[a], geoms[b]), exit_at[s + 1, b])
+                     for a, b in zip(ending[ia], bridges[ib])]
+            while stack:
+                node, piece, t = stack.pop()
+                if piece.area <= self._touch_area.min():
+                    continue
+                cols = starting[t][trees[t].query(piece, predicate="intersects")]
+                for c, part in zip(cols, shapely.intersection(piece, geoms[cols])):
+                    if down[t + 1, c] >= 0:
+                        key = (node, nodemap[down[t + 1, c], c])
+                        found[key] = found.get(key, 0.0) + part.area
+                    elif exit_at[t + 1, c] >= 0:
+                        stack.append((node, part, exit_at[t + 1, c]))
+        if not found:
+            return concat_links()
+        n, m = (np.array(v, dtype=np.int64) for v in zip(*found))
+        area = np.array(list(found.values()))
+        keep = area > self._touch_area[self._node_cell[n]]
+        n, m, area = n[keep], m[keep], area[keep]
+        self.diagnostics["chained_links"] = len(n)
+        self.diagnostics["largest_skipped_run"] = float(np.max(self._node_bot[n] - self._node_top[m], initial=0.0))
+        return {
+            "n": n, "m": m, "ihc": np.zeros(len(n), dtype=np.int64),
+            "cl_n": (self._node_top[n] - self._node_bot[n]) / 2,
+            "cl_m": (self._node_top[m] - self._node_bot[m]) / 2,
+            "hwva": area, "height": np.zeros(len(n)), "angle": np.zeros(len(n)), "fahl": area,
+        }
 
     def _per_layer(self, values, name):
         """Split values shaped like ``botm`` into one array per layer."""

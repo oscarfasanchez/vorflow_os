@@ -197,6 +197,62 @@ def test_pit_refined_at_depth_cells_close(grids, dip):
     _contact_is_gap_free(d, 2, 3)
 
 
+def _assert_no_vertical_holes(d):
+    """No part of a cell's bottom is left unconnected above an active cell (only pass-through between)."""
+    import shapely
+
+    n, m, ihc, hwva = (np.asarray(d.links[key]) for key in ("n", "m", "ihc", "hwva"))
+    vertical = ihc == 0
+    geoms, col = d._columns.geometry.to_numpy(), d._node_cell
+    covered = np.bincount(n[vertical], weights=hwva[vertical], minlength=d.nodes)
+    for a in np.flatnonzero(np.abs(covered - d._area[col]) > 1e-9):
+        hole = geoms[col[a]].difference(shapely.union_all(geoms[col[m[vertical & (n == a)]]]))
+        lower = np.flatnonzero(d._node_top <= d._node_bot[a] + 1e-9)
+        assert not (shapely.area(shapely.intersection(hole, geoms[col[lower]])) > 1e-9).any(), a
+
+
+def test_a_pass_through_cell_between_two_changes_of_grid_keeps_the_column_connected(grids):
+    """Grids base, pit, base: the coarse cells above and below a pass-through fine cell meet through it."""
+    base, pit = grids
+    idomain = np.ones(len(pit), dtype=int)
+    hole = np.flatnonzero(pit.splice_source.to_numpy() == "fine")[0]
+    idomain[hole] = -1
+    d = disu.DisuGrid([base, pit, base], 10.0, [np.full(len(base), 6.0), np.full(len(pit), 4.0),
+                                                np.full(len(base), 0.0)], [None, idomain, None]).build()
+    assert d.diagnostics["chained_links"] == 1
+    assert d.diagnostics["largest_skipped_run"] == pytest.approx(2.0)
+    assert "1 vertical connections cross pass-through cells" in d.report()
+    n, m, hwva = (np.asarray(d.links[key]) for key in ("n", "m", "hwva"))
+    chained = (d._node_layer[n] == 0) & (d._node_layer[m] == 2)
+    assert hwva[chained] == pytest.approx([0.25])
+    assert d._node_cell[n[chained]] == d._node_cell[m[chained]]
+    assert_cells_close(d)
+    _assert_no_vertical_holes(d)
+
+
+@pytest.mark.parametrize("layout", ["ABAB", "ABBA", "ABCA"])
+def test_pass_through_runs_across_several_changes_of_grid_leave_no_holes(grids, layout):
+    base, pit = grids
+    finer = disu.splice(base, _boxes(16, 0.25, start_id=900), PIT)
+    pick = {"A": base, "B": pit, "C": finer}
+    rng = np.random.default_rng(7)
+    for _ in range(8):
+        layers = [pick[c] for c in layout]
+        tilt = rng.uniform(0, 0.5)
+        botm = [20 - 3 * (k + 1) + tilt * g.x.to_numpy() - rng.uniform(0, 2, len(g)) * (rng.random(len(g)) > 0.3)
+                for k, g in enumerate(layers)]
+        for k in range(1, len(layers)):
+            if layers[k] is layers[k - 1]:
+                botm[k] = np.minimum(botm[k], botm[k - 1])
+        # Pass-through cells in the inner layers only: in the top or bottom layer they leave a real hole.
+        idomain = [rng.choice([-1, 1, 1, 1], len(g)) if 0 < k < len(layers) - 1 else np.ones(len(g), dtype=int)
+                   for k, g in enumerate(layers)]
+        collapse = str(rng.choice(["split", "up", "down"]))
+        d = disu.DisuGrid(layers, 20 + tilt * base.x.to_numpy(), botm, idomain, collapse=collapse).build()
+        assert_cells_close(d)
+        _assert_no_vertical_holes(d)
+
+
 VORONOI_DOMAIN, VORONOI_PIT = box(0, 0, 1000, 600), box(400, 200, 600, 400)
 
 
