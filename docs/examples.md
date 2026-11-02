@@ -19,4 +19,5 @@ examples/basic_example_modflow
 examples/basic_example_mfusg
 examples/full_connectivity_demo
 examples/disu_refined_at_depth
+examples/disu_faults_and_gnc
 ```

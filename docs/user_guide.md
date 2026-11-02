@@ -162,6 +162,14 @@ has the plane's resistance; flow along the fault still sees the stair. Give the
 hydraulic characteristic (>= 0): a negative HFB value (a conductance multiplier)
 cannot carry the factor.
 
+Flat-topped cells make any dipping unit or fault a staircase. Heads, flow
+direction and the flux per square metre can all be right while the total water
+crossing the unit is too low by about Δx·tanθ/b (column width Δx, dip θ,
+vertical thickness b); only narrower columns reduce it. Keep Δx·tanθ/b at or
+below about 5 % where that water matters, and check total flows against a finer
+grid. `examples/disu_faults_and_gnc.ipynb` runs the whole fault workflow and
+checks it against an exact solution.
+
 The optional K-aware method needs current positive scalar isotropic conductivity
 in active-node order (use `d.to_nodes(...)` to map layer values):
 

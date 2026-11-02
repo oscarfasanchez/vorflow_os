@@ -25,6 +25,11 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   consecutive traces), each with a K-independent factor on the hydraulic
   characteristic so that flow normal to the fault meets the plane's resistance.
 
+- Example notebook `disu_faults_and_gnc.ipynb`: a dipping fault meshed per
+  layer, HFB and ghost-node corrections, checked against an exact solution.
+  `full_connectivity_demo.ipynb` notes the staircase's total-water loss
+  (about Δx·tanθ/b) and recommends keeping it at or below 5 %.
+
 - `vorflow.disu`: fully unstructured MODFLOW grids with full connectivity
   (Provost et al. 2025, after Langevin's USGS `disv2disu.py`).
   - `DisuGrid(grid, top, botm, idomain).build()` takes FloPy-style layer
