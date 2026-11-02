@@ -189,7 +189,7 @@ class DisuGrid:
         from ._mfusg import _planar_faces
 
         opts = self.options
-        planar = [_planar_faces(grid) for grid in self._grids]
+        planar = [_planar_faces(grid, disv=False) for grid in self._grids]
         tolerance = max(p[3] for p in planar)
         self._prepare_columns(tolerance)
         columns = self._columns
@@ -756,7 +756,7 @@ class DisuGrid:
         cell below it can be plan neighbours; with offset layers their walls
         overlap vertically and need a staggered connection.
         """
-        from ._mfusg import _straight_face
+        from ._mfusg import FACE_COLUMNS, _face_records, _simple_faces, _straight_face
 
         geoms = self._columns.geometry.to_numpy()
         centres = self._columns[["x", "y"]].to_numpy(dtype=float)
@@ -769,19 +769,36 @@ class DisuGrid:
                 if not len(a_only) or not len(b_only):
                     continue
                 ia, ib = shapely.STRtree(geoms[b_only]).query(geoms[a_only], predicate="intersects")
-                for i, j in zip(a_only[ia], b_only[ib]):
-                    if geoms[i].intersection(geoms[j]).area > self._touch_area[i]:
-                        continue                 # Overlapping cells meet vertically, not side by side.
-                    shared = shapely.intersection(geoms[i].boundary, geoms[j].boundary, grid_size=tolerance)
+                i, j = a_only[ia], b_only[ib]
+                # Overlapping cells meet vertically, not side by side.
+                inside = shapely.relate_pattern(geoms[i], geoms[j], "T********")
+                area = np.zeros(len(i))
+                area[inside] = shapely.area(shapely.intersection(geoms[i[inside]], geoms[j[inside]]))
+                i, j = i[area <= self._touch_area[i]], j[area <= self._touch_area[i]]
+                shared = shapely.intersection(shapely.boundary(geoms[i]), shapely.boundary(geoms[j]),
+                                              grid_size=tolerance)
+                fast = _simple_faces(shared, centres[i], centres[j], tolerance)
+                found = _face_records(shared[fast], centres[i[fast]], centres[j[fast]], i[fast], j[fast])
+                order = list(np.flatnonzero(fast))
+                slow = []
+                for k in np.flatnonzero(~fast):
+                    a, b = int(i[k]), int(j[k])
                     try:
-                        record = _straight_face(shared, centres[[i, j]], (int(i), int(j)), tolerance)
+                        record = _straight_face(shared[k], centres[[a, b]], (a, b), tolerance)
                     except ValueError:
-                        record = _bent_face(shared, centres[[i, j]], (int(i), int(j)))
-                    if record is not None and record["shared_length"] > tolerance:
-                        records.append(record)
-        columns = ["cell_id_1", "cell_id_2", "shared_length", "distance_1", "distance_2",
-                   "ortho_error", "normal_x", "normal_y"]
-        return pd.DataFrame(records, columns=columns)
+                        record = _bent_face(shared[k], centres[[a, b]], (a, b))
+                    if record is not None:
+                        slow.append(record)
+                        order.append(k)
+                if slow:
+                    slow = pd.DataFrame(slow, columns=list(FACE_COLUMNS))
+                    found = pd.concat([found, slow], ignore_index=True) if len(found) else slow
+                if len(found):
+                    records.append(found.iloc[np.argsort(order, kind="stable")])
+        if not records:
+            return pd.DataFrame(columns=list(FACE_COLUMNS))
+        faces = pd.concat(records, ignore_index=True)
+        return faces[faces.shared_length > tolerance].reset_index(drop=True)
 
     def _overlaps(self):
         """Plan overlaps between the columns of grids used in consecutive layers."""

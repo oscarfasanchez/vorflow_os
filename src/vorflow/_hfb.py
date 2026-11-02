@@ -107,7 +107,10 @@ def barrier_faces(grid, trace):
     layer = cells.layer.to_numpy()
     thickness = (cells.top - cells.bot).to_numpy(dtype=float)
     middle = ((cells.top + cells.bot) / 2).to_numpy(dtype=float)
-    polygons = np.array([grid._grids[int(g)].geometry.iloc[int(i)] for g, i in zip(cells.grid, cells.icpl)])
+    polygons = np.empty(len(cells), dtype=object)
+    which, icpl = cells.grid.to_numpy(dtype=np.int64), cells.icpl.to_numpy(dtype=np.int64)
+    for g in np.unique(which):
+        polygons[which == g] = grid._grids[g].geometry.to_numpy()[icpl[which == g]]
     tolerance = 1e-7 * max(float(np.ptp(xy, axis=0).max()), 1.0)
     cell_tree = shapely.STRtree(polygons)
 
@@ -132,7 +135,7 @@ def barrier_faces(grid, trace):
         dv = np.abs(depth(pa, la) - depth(pb, lb))
         return shapely.distance(pa, pb), np.where(np.isfinite(dv), dv, fallback)
 
-    ta =np.array([traces[k] for k in layer[n]], dtype=object)
+    ta = np.array([traces[k] for k in layer[n]], dtype=object)
     tb = np.array([traces[k] for k in layer[m]], dtype=object)
     same = np.array([_same(a, b) or a is None or b is None for a, b in zip(ta, tb)])
     hit = np.zeros(len(n), dtype=bool)
@@ -150,7 +153,9 @@ def barrier_faces(grid, trace):
     if len(walls):
         faces = shapely.intersection(shapely.boundary(polygons[n[walls]]), shapely.boundary(polygons[m[walls]]))
         lay = np.where([t is not None for t in ta[walls]], layer[n[walls]], layer[m[walls]])
-        on_trace[walls] = [f.length > tolerance and traces[k].buffer(tolerance).covers(f) for f, k in zip(faces, lay)]
+        bands = {k: traces[k].buffer(tolerance) for k in np.unique(lay)}
+        on_trace[walls] = (shapely.length(faces) > tolerance) & shapely.covers(
+            np.array([bands[k] for k in lay], dtype=object), faces)
         mid = np.where(shapely.length(faces) > tolerance, shapely.line_interpolate_point(faces, 0.5, normalized=True),
                        shapely.points((xy[n[walls]] + xy[m[walls]]) / 2))
         for k in np.unique(lay):
