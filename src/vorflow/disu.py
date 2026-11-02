@@ -301,7 +301,7 @@ class DisuGrid:
         )
 
     def estimate_gnc(self, k=None, *, method="geometric", connections="3d",
-                     min_offset=0., blocked_pairs=(), strict=False, contrast=10.):
+                     min_offset=0., blocked_pairs=(), barriers=(), strict=False, contrast=10.):
         """Return one-ring ghost-node corrections for explicit model export.
 
         Geometry-only estimation is the default. ``method='k_aware'`` requires
@@ -325,6 +325,10 @@ class DisuGrid:
         blocked_pairs : iterable of pairs of int, optional
             Zero-based active-node pairs excluded from correction and support.
             This option does not create a model hydraulic barrier.
+        barriers : iterable of pairs of int, optional
+            Node pairs across a barrier, such as ``barrier_faces(...).pairs``.
+            Ghost heads never interpolate across them; the barrier
+            connections are still corrected from each side.
         strict : bool, default False
             Raise on unsupported selected connections instead of warning.
         contrast : float, default 10
@@ -350,7 +354,34 @@ class DisuGrid:
 
         return estimate_gnc(self, k, method=method, connections=connections,
                             min_offset=min_offset, blocked_pairs=blocked_pairs,
-                            strict=strict, contrast=contrast)
+                            barriers=barriers, strict=strict, contrast=contrast)
+
+    def barrier_faces(self, trace):
+        """Return the connections a vertical barrier trace cuts, with HFB package data.
+
+        A horizontal connection is cut when the plan segment between its two
+        cell centres crosses the trace of either cell's layer. On a grid meshed
+        with ``add_line(..., is_barrier=True)`` these are the faces lying on the
+        trace (``on_trace`` True); otherwise they are the faces nearest it, a
+        zig-zag that still separates the two sides.
+
+        Parameters
+        ----------
+        trace : LineString, MultiLineString or sequence
+            One line geometry for every layer, or one per layer (None where a
+            layer has no barrier).
+
+        Returns
+        -------
+        BarrierFaces
+            Node pairs, ``on_trace`` flags, ``factor`` (1 on a vertical trace)
+            and ``get_gridprops_mf6_hfb`` / ``get_gridprops_mfusg_hfb``. Pass
+            ``.pairs`` to ``estimate_gnc(barriers=...)`` so that no ghost head
+            interpolates across the barrier.
+        """
+        from ._hfb import barrier_faces
+
+        return barrier_faces(self, trace)
 
     def write_gsf(self, filepath):
         """Write the grid specification file (GSF) used by MODFLOW-USG post-processors."""

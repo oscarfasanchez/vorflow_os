@@ -86,7 +86,8 @@ Vertical connections and lateral elevation offsets are selected by default.
 Use `connections="all"` to include in-plane offsets, for example at a splice.
 `min_offset` skips offsets smaller than a specified fraction of the perpendicular
 centre distance. `blocked_pairs` excludes zero-based node pairs from estimation
-and interpolation support; it does not create a model hydraulic barrier.
+and interpolation support; it does not create a model hydraulic barrier (see
+*Vertical barriers* below).
 
 `records` gives each host, neighbour, ghost target, contributing nodes and
 weights. `unsupported` gives selected connections where weights could not be
@@ -116,6 +117,29 @@ if options is not None:
 
 Empty collections return `None` from either package-export helper. Existing
 DISU exports are unchanged; estimating a collection attaches no model package.
+
+### Vertical barriers
+
+`d.barrier_faces(trace)` finds the connections a vertical barrier cuts: every
+horizontal connection whose two cell centres lie on opposite sides of the
+trace. Give one line for every layer, or one per layer with `None` where a
+layer has no barrier. On a grid meshed with `add_line(..., is_barrier=True)`
+the cut faces lie on the line (`on_trace` is True); on other grids they are
+the faces nearest it, a zig-zag that still separates the two sides.
+
+```python
+faces = d.barrier_faces(fault)                     # LineString, all layers
+flopy.mf6.ModflowGwfhfb(gwf, **faces.get_gridprops_mf6_hfb(hydchr))
+corrections = d.estimate_gnc(barriers=faces.pairs)  # no ghost interpolates across
+```
+
+`hydchr` is the barrier conductivity divided by its width, one value or one per
+connection; `get_gridprops_mfusg_hfb` gives the arguments for
+`flopy.modflow.ModflowHfb` in a USG model. With `barriers`, each ghost head is
+interpolated from cells on its own side; the barrier connections themselves are
+still corrected. Without it, a ghost next to the barrier can average heads
+across the head jump. A connection whose only support lies across the barrier
+is reported in `unsupported` and keeps standard conductance.
 
 The optional K-aware method needs current positive scalar isotropic conductivity
 in active-node order (use `d.to_nodes(...)` to map layer values):

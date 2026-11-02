@@ -27,28 +27,35 @@ class _Geometry:
     adjacency: list
     normals: np.ndarray
     tolerance: float
+    blocked: set
 
 
-def _geometry(grid, blocked_pairs):
-    grid._require_build()
-    if grid.options.cl12 != "plan":
-        raise ValueError("GNC requires cl12='plan' perpendicular face distances.")
-    if not grid.nodes:
-        raise ValueError("GNC requires at least one active cell.")
-    blocked = set()
-    for pair in blocked_pairs:
+def _pairs(pairs, nodes, name):
+    found = set()
+    for pair in pairs:
         if (
             len(pair) != 2
             or any(
                 isinstance(n, (bool, np.bool_))
                 or not isinstance(n, (int, np.integer))
-                or not 0 <= n < grid.nodes
+                or not 0 <= n < nodes
                 for n in pair
             )
             or pair[0] == pair[1]
         ):
-            raise ValueError("blocked_pairs must contain distinct active node indices.")
-        blocked.add(tuple(sorted(map(int, pair))))
+            raise ValueError(f"{name} must contain distinct active node indices.")
+        found.add(tuple(sorted(map(int, pair))))
+    return found
+
+
+def _geometry(grid, blocked_pairs, barriers):
+    grid._require_build()
+    if grid.options.cl12 != "plan":
+        raise ValueError("GNC requires cl12='plan' perpendicular face distances.")
+    if not grid.nodes:
+        raise ValueError("GNC requires at least one active cell.")
+    blocked = _pairs(blocked_pairs, grid.nodes, "blocked_pairs")
+    cut = blocked | _pairs(barriers, grid.nodes, "barriers")
     cells = grid.cellmap[grid.cellmap.node >= 0].sort_values("node")
     xyz = np.column_stack((cells.x, cells.y, (cells.top + cells.bot) / 2))
     polygons = [
@@ -70,7 +77,7 @@ def _geometry(grid, blocked_pairs):
         n, m = int(n), int(m)
         if ihc == 0:
             normals[i] = [0, 0, np.sign(xyz[m, 2] - xyz[n, 2])]
-        if tuple(sorted((n, m))) not in blocked:
+        if tuple(sorted((n, m))) not in cut:
             adjacency[n].append((m, i, normals[i].copy(), float(cn), float(cm)))
             adjacency[m].append((n, i, -normals[i].copy(), float(cm), float(cn)))
     for neighbours in adjacency:
@@ -85,6 +92,7 @@ def _geometry(grid, blocked_pairs):
         adjacency,
         normals,
         1e-9 * max(float(np.ptp(xyz, axis=0).max()), 1.0),
+        blocked,
     )
 
 
@@ -96,6 +104,7 @@ def estimate_gnc(
     connections="3d",
     min_offset=0.0,
     blocked_pairs=(),
+    barriers=(),
     strict=False,
     contrast=10.0,
 ):
@@ -121,6 +130,11 @@ def estimate_gnc(
     blocked_pairs : iterable of pairs of int, optional
         Zero-based active-node pairs excluded from correction and support.
         This does not create hydraulic barriers in the numerical model.
+    barriers : iterable of pairs of int, optional
+        Zero-based node pairs on either side of a barrier (for example
+        ``DisuGrid.barrier_faces(...).pairs``). No ghost head interpolates
+        across them; the barrier connections themselves are still corrected,
+        each ghost from its own side.
     strict : bool, default False
         Raise if any selected connection lacks admissible support; otherwise
         warn and return it in ``unsupported`` without a correction record.
@@ -168,7 +182,7 @@ def estimate_gnc(
     contrast = float(contrast)
     if not np.isfinite(contrast) or contrast < 1:
         raise ValueError("contrast must be a finite number of at least 1.")
-    g = _geometry(grid, blocked_pairs)
+    g = _geometry(grid, blocked_pairs, barriers)
     if method == "k_aware":
         if k is None:
             raise ValueError("k_aware requires current scalar conductivity k.")
@@ -273,7 +287,7 @@ def estimate_gnc(
         ):
             counts["outside_3d_scope"] += 1
             continue
-        if not any(edge[0] == b for edge in g.adjacency[a]):
+        if tuple(sorted((a, b))) in g.blocked:
             reason = "excluded connection"
         elif abs(delta @ normal) > g.tolerance:
             reason = "normal-distance mismatch or gap"

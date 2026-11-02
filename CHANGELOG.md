@@ -17,6 +17,11 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and exports MF6/MFUSG GNC package arguments. A precise MFUSG writer preserves
   double-precision fractions. Existing DISU exports do not enable GNC implicitly.
 
+- `DisuGrid.barrier_faces(trace)` finds the connections a vertical barrier
+  cuts (one trace for every layer, or one per layer) and returns MF6 and
+  MODFLOW-USG HFB package arguments. `estimate_gnc(barriers=...)` keeps ghost
+  heads from interpolating across those connections.
+
 - `vorflow.disu`: fully unstructured MODFLOW grids with full connectivity
   (Provost et al. 2025, after Langevin's USGS `disv2disu.py`).
   - `DisuGrid(grid, top, botm, idomain).build()` takes FloPy-style layer
