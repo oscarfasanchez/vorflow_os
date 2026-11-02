@@ -44,6 +44,7 @@ class GncCorrections:
     method: str = "geometric"
     connections: str = "3d"
     min_offset: float = 0.0
+    contrast: float | None = None
 
     def __post_init__(self):
         self.nodes = _integer(self.nodes, "nodes")
@@ -55,6 +56,13 @@ class GncCorrections:
             raise ValueError("min_offset must be finite and nonnegative.") from error
         if not np.isfinite(self.min_offset) or self.min_offset < 0:
             raise ValueError("min_offset must be finite and nonnegative.")
+        if self.contrast is not None:
+            try:
+                self.contrast = float(self.contrast)
+            except (TypeError, ValueError) as error:
+                raise ValueError("contrast must be None or a finite number of at least 1.") from error
+            if not np.isfinite(self.contrast) or self.contrast < 1:
+                raise ValueError("contrast must be None or a finite number of at least 1.")
         if not isinstance(self.records, list):
             raise ValueError("records must be a list of dictionaries.")
         self.records = deepcopy(self.records)

@@ -114,6 +114,52 @@ def test_homogeneous_k_limit_matches_geometric_corrections():
     assert geometric.records == aware.records
 
 
+@pytest.mark.parametrize("ratio", [0.2, 5.0, 9.9])
+def test_contrast_below_threshold_is_weighted_geometrically(ratio):
+    d = refined_grid()
+    k = np.where(centres(d)[:, 1] < 0, ratio, 1.0)
+    aware = d.estimate_gnc(k, method="k_aware", connections="all")
+    geometric = d.estimate_gnc(connections="all")
+    assert aware.records == geometric.records
+    assert aware.contrast == 10.0 and geometric.contrast is None
+
+
+@pytest.mark.parametrize("contrast", [1.0, 2.0, 5.0])
+def test_lower_contrast_treats_moderate_interface_as_contact(contrast):
+    d = refined_grid()
+    xyz = centres(d)
+    ratio = 5.0
+    k = np.where(xyz[:, 1] < 0, ratio, 1.0)
+    result = d.estimate_gnc(k, method="k_aware", connections="all", contrast=contrast)
+    assert result.records and result.contrast == contrast
+    assert result.records != d.estimate_gnc(connections="all").records
+
+    def resistance_coordinates(points):
+        p = np.array(points, dtype=float, copy=True)
+        p[..., 1] = np.where(p[..., 1] < 0, p[..., 1] / ratio, p[..., 1])
+        return p
+
+    for gradient in np.eye(3).tolist() + [[0.73, -0.21, 0.37]]:
+        heads = 23.0 + resistance_coordinates(xyz) @ gradient
+        for record in result.records:
+            target_head = 23.0 + resistance_coordinates(record["target"]) @ gradient
+            np.testing.assert_allclose(ghost_head(record, heads), target_head, atol=1e-9)
+
+
+def test_geometric_ignores_contrast():
+    d = refined_grid()
+    assert (
+        d.estimate_gnc(connections="all", contrast=1.0).records
+        == d.estimate_gnc(connections="all", contrast=1e6).records
+    )
+
+
+@pytest.mark.parametrize("contrast", [0.5, np.nan, np.inf, True, "10", [10.0], None])
+def test_invalid_contrast_fails_before_estimation(contrast):
+    with pytest.raises(ValueError, match="contrast"):
+        refined_grid().estimate_gnc(1.0, method="k_aware", contrast=contrast)
+
+
 @pytest.mark.parametrize("method", ["geometric", "k_aware"])
 def test_one_ring_sandwich_rejects_unit_sum_fit_before_export(method):
     d = sandwich()

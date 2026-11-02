@@ -174,3 +174,11 @@ def test_optional_flopy_constructor_smoke_for_both_engines(tmp_path):
     mfusg = flopy.mfusg.MfUsgGnc(usg, **correction.get_gridprops_mfusg_gnc())
     assert mf6.numgnc.get_data() == mfusg.numgnc == 2
     assert mf6.numalphaj.get_data() == mfusg.numalphaj == 3
+
+
+def test_contrast_metadata_is_optional_and_validated():
+    assert GncCorrections(records=_records(), nodes=6).contrast is None
+    assert GncCorrections(records=_records(), nodes=6, contrast=10).contrast == 10.0
+    for contrast in [0.5, float("nan"), "ten"]:
+        with pytest.raises(ValueError, match="contrast"):
+            GncCorrections(records=_records(), nodes=6, contrast=contrast)

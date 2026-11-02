@@ -7,6 +7,7 @@ heterogeneous-flow reconstruction or an implementation of ModelMuse/Gridgen.
 
 from collections import Counter
 from dataclasses import dataclass
+from numbers import Real
 import warnings
 
 import numpy as np
@@ -96,6 +97,7 @@ def estimate_gnc(
     min_offset=0.0,
     blocked_pairs=(),
     strict=False,
+    contrast=10.0,
 ):
     """Estimate one-ring corrections without using solved heads.
 
@@ -122,6 +124,11 @@ def estimate_gnc(
     strict : bool, default False
         Raise if any selected connection lacks admissible support; otherwise
         warn and return it in ``unsupported`` without a correction record.
+    contrast : float, default 10
+        For ``k_aware``, the smallest conductivity ratio across a face (either
+        direction) treated as a material contact. Smaller ratios are treated
+        as the same material and weighted geometrically. ``1`` treats every
+        conductivity difference as a contact. Ignored by ``'geometric'``.
 
     Returns
     -------
@@ -135,8 +142,10 @@ def estimate_gnc(
     ghost lies within its host prism. A physical connection receives either a
     valid one-host correction or a complete admissible pair of corrections.
     An unsupported connection retains standard model conductance; this is not
-    an accuracy guarantee. ``k_aware`` has known flow errors in a stepped
-    dipping-aquifer benchmark even when heads are close to its ideal reference.
+    an accuracy guarantee. ``k_aware`` assumes each face at or above the
+    contrast is the material contact. That holds where contacts follow cell
+    faces; a stair-stepped dipping contact violates it and gives flow errors
+    even when heads match the ideal reference.
     Confined scalar isotropic flow is the tested physical scope; anisotropy
     tensors and head-dependent interpolation weights are not supported.
     """
@@ -154,6 +163,11 @@ def estimate_gnc(
         raise ValueError("min_offset must be a finite nonnegative number.") from error
     if not np.isfinite(min_offset) or min_offset < 0:
         raise ValueError("min_offset must be a finite nonnegative number.")
+    if isinstance(contrast, (bool, np.bool_)) or not isinstance(contrast, Real):
+        raise ValueError("contrast must be a finite number of at least 1.")
+    contrast = float(contrast)
+    if not np.isfinite(contrast) or contrast < 1:
+        raise ValueError("contrast must be a finite number of at least 1.")
     g = _geometry(grid, blocked_pairs)
     if method == "k_aware":
         if k is None:
@@ -183,9 +197,12 @@ def estimate_gnc(
         js = np.array([edge[0] for edge in neighbours], dtype=int)
         vectors = g.xyz[js] - g.xyz[n]
         if method == "k_aware":
+            # Only a face with a contrast at or above the threshold is a contact.
             vectors = np.array(
                 [
                     vector + (k[n] / k[j] - 1) * cm * normal
+                    if max(k[n], k[j]) >= contrast * (1 - 1e-12) * min(k[n], k[j])
+                    else vector
                     for vector, (j, _, normal, _, cm) in zip(vectors, neighbours)
                 ]
             )
@@ -323,4 +340,5 @@ def estimate_gnc(
         method=method,
         connections=connections,
         min_offset=min_offset,
+        contrast=contrast if method == "k_aware" else None,
     )

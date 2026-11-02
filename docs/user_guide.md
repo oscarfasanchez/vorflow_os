@@ -121,12 +121,21 @@ The optional K-aware method needs current positive scalar isotropic conductivity
 in active-node order (use `d.to_nodes(...)` to map layer values):
 
 ```python
-k_corrections = d.estimate_gnc(k, method="k_aware")
+k_corrections = d.estimate_gnc(k, method="k_aware")              # contrast=10
+k_corrections = d.estimate_gnc(k, method="k_aware", contrast=2)  # more faces count
 ```
 
-This method is experimental. It reproduces controlled, locally compatible
-transmission fields but has known physical-flow errors in a stepped
-dipping-aquifer benchmark, even with nearly matching heads. It is not a verified
-copy of ModelMuse or Gridgen and is not a general replacement for XT3D.
+Where the conductivity ratio across a face reaches `contrast` (either
+direction), the face is treated as a material contact: the neighbour's head is
+weighted with Darcy's law across that face. Smaller differences are treated as
+the same material and weighted geometrically, so smoothly varying fields, such
+as pilot-point interpolations, behave like the geometric method. `contrast=1`
+treats every difference as a contact.
+
+This method is experimental. It is exact where contacts follow cell faces and
+flow crosses them. Where cells stair-step a dipping contact, the faces are not
+the real contact; flows are then in error even when heads match. Recompute the
+corrections whenever K changes. It is not a verified copy of ModelMuse or
+Gridgen and is not a general replacement for XT3D.
 Recompute corrections whenever K changes. Confined scalar isotropic flow is
 the tested scope; anisotropy tensors and head-dependent fractions are unsupported.

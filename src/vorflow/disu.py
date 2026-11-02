@@ -301,7 +301,7 @@ class DisuGrid:
         )
 
     def estimate_gnc(self, k=None, *, method="geometric", connections="3d",
-                     min_offset=0., blocked_pairs=(), strict=False):
+                     min_offset=0., blocked_pairs=(), strict=False, contrast=10.):
         """Return one-ring ghost-node corrections for explicit model export.
 
         Geometry-only estimation is the default. ``method='k_aware'`` requires
@@ -327,6 +327,10 @@ class DisuGrid:
             This option does not create a model hydraulic barrier.
         strict : bool, default False
             Raise on unsupported selected connections instead of warning.
+        contrast : float, default 10
+            For ``k_aware``, the smallest conductivity ratio across a face
+            treated as a material contact; smaller ratios are weighted
+            geometrically. ``1`` treats every difference as a contact.
 
         Returns
         -------
@@ -337,15 +341,16 @@ class DisuGrid:
         Notes
         -----
         The tested physical scope is confined scalar isotropic flow.
-        K-aware estimation has known flow errors on a stepped dipping-aquifer
-        benchmark and is not a general replacement for XT3D. Recompute it
+        K-aware estimation assumes each face at or above ``contrast`` is the
+        material contact. Where cells stair-step a dipping contact that is not
+        true, and flows are in error even when heads match. Recompute it
         whenever K changes. Do not combine MF6 GNC with XT3D.
         """
         from ._gnc import estimate_gnc
 
         return estimate_gnc(self, k, method=method, connections=connections,
                             min_offset=min_offset, blocked_pairs=blocked_pairs,
-                            strict=strict)
+                            strict=strict, contrast=contrast)
 
     def write_gsf(self, filepath):
         """Write the grid specification file (GSF) used by MODFLOW-USG post-processors."""

@@ -11,7 +11,9 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `DisuGrid.estimate_gnc()` returns an inspectable one-ring correction collection:
   geometry-only estimation by default, or explicitly selected experimental
-  scalar-K-aware estimation. The collection reports unsupported connections
+  scalar-K-aware estimation. K-aware estimation treats a face as a material
+  contact only where the conductivity ratio reaches `contrast` (default 10);
+  smaller differences are weighted geometrically. The collection reports unsupported connections
   and exports MF6/MFUSG GNC package arguments. A precise MFUSG writer preserves
   double-precision fractions. Existing DISU exports do not enable GNC implicitly.
 
