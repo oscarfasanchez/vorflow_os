@@ -238,6 +238,15 @@ def test_uneven_offsets_give_the_local_dip():
     np.testing.assert_allclose(faces.factor[walls & (layer[faces.n] == 1)], 1 / np.sqrt(1.25))
 
 
+def test_dip_is_measured_across_the_strike_up_to_the_grid_edge():
+    # Oblique traces that end on the grid edges, 1 m apart across the strike, through 1 m layers: 45 degrees.
+    d = disu.DisuGrid(boxes(8), 3.0, [2.0, 1.0, 0.0]).build()
+    shift = np.hypot(1.0, 0.5)
+    faces = d.barrier_faces([LineString([(1 + k * shift, 0), (5 + k * shift, 8)]) for k in range(3)])
+    assert faces.vertical.any()
+    np.testing.assert_allclose(faces.factor, np.sqrt(0.5), atol=1e-9)
+
+
 def test_fault_tips_close_the_step_polygon():
     d, traces, _ = stacked("uneven offsets")
     faces = d.barrier_faces([LineString([(t.coords[0][0], 1.5), (t.coords[0][0], 4.5)]) for t in traces])

@@ -71,6 +71,18 @@ class _Step:
         self.zone = shapely.union_all([self.polygon, a, b])
 
 
+def _extended(line, length):
+    """``line`` lengthened by ``length`` along its first and last segments; other geometries unchanged."""
+    if shapely.get_type_id(line) != shapely.GeometryType.LINESTRING:
+        return line
+    c = np.asarray(line.coords, dtype=float)
+    start, end = c[0] - c[1], c[-1] - c[-2]
+    if not (np.linalg.norm(start) and np.linalg.norm(end)):
+        return line
+    start, end = start / np.linalg.norm(start), end / np.linalg.norm(end)
+    return LineString(np.vstack((c[0] + length * start, c, c[-1] + length * end)))
+
+
 def _side(line, xy):
     """+1 or -1 for points left or right of an oriented LineString (0 on it)."""
     points = shapely.points(xy)
@@ -106,13 +118,21 @@ def barrier_faces(grid, trace):
         count = np.bincount(at, minlength=len(points))
         return np.bincount(at, weights=middle[cell], minlength=len(points)) / np.where(count, count, np.nan)
 
+    reach = float(np.ptp(xy, axis=0).max())
+
     def dip(points, a, la, b, lb, fallback):
-        """Horizontal and vertical offsets from trace ``a`` (layer la) to trace ``b`` (layer lb) near each point."""
+        """Horizontal and vertical offsets from trace ``a`` (layer la) to trace ``b`` (layer lb) near each point.
+
+        ``b`` is extended along its end segments, so that near the end of a
+        trace the offset is still measured across the strike.
+        """
         pa = shapely.line_interpolate_point(a, shapely.line_locate_point(a, points))
+        b = _extended(b, reach)
         pb = shapely.line_interpolate_point(b, shapely.line_locate_point(b, pa))
         dv = np.abs(depth(pa, la) - depth(pb, lb))
         return shapely.distance(pa, pb), np.where(np.isfinite(dv), dv, fallback)
-    ta = np.array([traces[k] for k in layer[n]], dtype=object)
+
+    ta =np.array([traces[k] for k in layer[n]], dtype=object)
     tb = np.array([traces[k] for k in layer[m]], dtype=object)
     same = np.array([_same(a, b) or a is None or b is None for a, b in zip(ta, tb)])
     hit = np.zeros(len(n), dtype=bool)

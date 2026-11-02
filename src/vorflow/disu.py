@@ -375,8 +375,8 @@ class DisuGrid:
         trace : LineString, MultiLineString or sequence
             One line geometry for every layer, or one per layer (None where a
             layer has no barrier). Traces that differ between layers must each
-            be one LineString, and should run past the grid or end at the
-            fault tips.
+            be one LineString; the dip is measured across the strike, also
+            near the ends of the traces.
 
         Returns
         -------
