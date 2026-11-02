@@ -300,8 +300,7 @@ layers of low K; analytic head on the perimeter):
 - New: `src/vorflow/disu.py`, `src/vorflow/_columns.py`,
   `src/vorflow/_connect3d.py`, `src/vorflow/_disu_export.py`,
   `src/vorflow/_refill.py`.
-- Examples: `examples/full_connectivity_demo.ipynb`,
-  `examples/disu_refined_at_depth.ipynb`.
+- Examples: `examples/disu_grids.ipynb`.
 - Tests: `tests/test_disu_*.py`.
 - Solver checks: local scripts in `benchmarks/disu_validation/` (git-ignored).
 - Changed: `src/vorflow/_mfusg.py`. The plan faces are shared (`_planar_faces`

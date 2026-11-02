@@ -616,12 +616,14 @@ around wells.
 [examples/barrier_meshing.ipynb](https://github.com/rhugman/vorflow/blob/main/examples/barrier_meshing.ipynb)
 shows how barrier faces are placed, what `barrier_report` lists and the
 remaining limits.
-[examples/full_connectivity_demo.ipynb](https://github.com/rhugman/vorflow/blob/main/examples/full_connectivity_demo.ipynb)
-builds DISU grids with full connectivity: the dipping-aquifer test of
-Provost et al. (2025) and a Voronoi model refined only at depth.
-[examples/disu_refined_at_depth.ipynb](https://github.com/rhugman/vorflow/blob/main/examples/disu_refined_at_depth.ipynb)
-refines a pit below some layers with `disu.refill` (shared outline vertices, gap-free contacts),
-keeps the dipping contact with `disu.split_contacts`, checks the accuracy, and maps the results in 2D with FloPy, `idomain_layers` and `layer_view`.
+[examples/disu_grids.ipynb](https://github.com/rhugman/vorflow/blob/main/examples/disu_grids.ipynb)
+builds layered unstructured (DISU) grids: the same plan grid in every layer
+with full connectivity, pinch-outs, a different plan grid per layer
+(`disu.splice`, `disu.refill`), sublayers (`disu.subdivide`,
+`disu.split_contacts`), and the arrays for MODFLOW 6 and MODFLOW-USG.
+[examples/disu_faults_and_gnc.ipynb](https://github.com/rhugman/vorflow/blob/main/examples/disu_faults_and_gnc.ipynb)
+turns vertical and dipping faults into barrier connections and adds
+ghost-node corrections, checked against an exact solution.
 
 ## Contributing
 

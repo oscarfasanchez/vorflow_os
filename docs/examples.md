@@ -17,7 +17,6 @@ examples/cleaning_limitations_demo
 examples/barrier_meshing
 examples/basic_example_modflow
 examples/basic_example_mfusg
-examples/full_connectivity_demo
-examples/disu_refined_at_depth
+examples/disu_grids
 examples/disu_faults_and_gnc
 ```

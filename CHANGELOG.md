@@ -27,8 +27,12 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Example notebook `disu_faults_and_gnc.ipynb`: a dipping fault meshed per
   layer, HFB and ghost-node corrections, checked against an exact solution.
-  `full_connectivity_demo.ipynb` notes the staircase's total-water loss
-  (about Δx·tanθ/b) and recommends keeping it at or below 5 %.
+
+- Example notebook `disu_grids.ipynb` replaces `full_connectivity_demo.ipynb`
+  and `disu_refined_at_depth.ipynb`: the three ways to build a DISU grid (the
+  same plan grid in every layer, a different grid per layer, sublayers),
+  pinch-outs, the face a dipping staircase loses (about Δx·tanθ/b; keep it at
+  or below 5 %) and the arrays for MODFLOW, without running MODFLOW.
 
 - `vorflow.disu`: fully unstructured MODFLOW grids with full connectivity
   (Provost et al. 2025, after Langevin's USGS `disv2disu.py`).
