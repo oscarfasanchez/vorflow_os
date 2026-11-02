@@ -125,7 +125,8 @@ horizontal connection whose two cell centres lie on opposite sides of the
 trace. Give one line for every layer, or one per layer with `None` where a
 layer has no barrier. On a grid meshed with `add_line(..., is_barrier=True)`
 the cut faces lie on the line (`on_trace` is True); on other grids they are
-the faces nearest it, a zig-zag that still separates the two sides.
+the faces nearest it, a zig-zag that still separates the two sides. A cell
+centre on the trace counts as left of it, in the direction the line is drawn.
 
 ```python
 faces = d.barrier_faces(fault)                     # LineString, all layers
@@ -139,7 +140,11 @@ connection; `get_gridprops_mfusg_hfb` gives the arguments for
 interpolated from cells on its own side; the barrier connections themselves are
 still corrected. Without it, a ghost next to the barrier can average heads
 across the head jump. A connection whose only support lies across the barrier
-is reported in `unsupported` and keeps standard conductance.
+is reported in `unsupported` and keeps standard conductance (and its HFB, if
+it is a barrier connection). Next to a dipping fault this is common: in the
+faults notebook `barriers=` leaves 366 connections without a ghost instead of
+13, among them the thin treads along the traces, whose ghost points sit at the
+fault edge of their cells.
 
 For a dipping fault, mesh each layer at its own trace and give one trace per
 layer. The fault becomes a staircase: walls on each trace, and treads where a
