@@ -20,7 +20,10 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `DisuGrid.barrier_faces(trace)` finds the connections a vertical barrier
   cuts (one trace for every layer, or one per layer) and returns MF6 and
   MODFLOW-USG HFB package arguments. `estimate_gnc(barriers=...)` keeps ghost
-  heads from interpolating across those connections.
+  heads from interpolating across those connections. With one trace per layer
+  a dipping fault becomes walls and treads (vertical connections between
+  consecutive traces), each with a K-independent factor on the hydraulic
+  characteristic so that flow normal to the fault meets the plane's resistance.
 
 - `vorflow.disu`: fully unstructured MODFLOW grids with full connectivity
   (Provost et al. 2025, after Langevin's USGS `disv2disu.py`).

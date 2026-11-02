@@ -141,6 +141,27 @@ still corrected. Without it, a ghost next to the barrier can average heads
 across the head jump. A connection whose only support lies across the barrier
 is reported in `unsupported` and keeps standard conductance.
 
+For a dipping fault, mesh each layer at its own trace and give one trace per
+layer. The fault becomes a staircase: walls on each trace, and treads where a
+vertical connection lies between the traces of two consecutive layers (the
+polygon joining them, closed at the fault tips). `faces.vertical` marks the
+treads; they need MODFLOW 6 6.7 or later, and the MODFLOW-USG export refuses
+them.
+
+```python
+traces = [fault_at(z) for z in layer_mid_depths]   # one LineString per layer, None where absent
+faces = d.barrier_faces(traces)
+```
+
+`faces.factor` does not depend on K. It is |n<sub>fault</sub> · n<sub>face</sub>|
+for the plane through consecutive traces, with the dip taken from the offset
+between the traces and the elevation difference of their layers' mid-depths,
+and the exporters multiply your
+hydraulic characteristic by it. With flow normal to the fault the staircase then
+has the plane's resistance; flow along the fault still sees the stair. Give the
+hydraulic characteristic (>= 0): a negative HFB value (a conductance multiplier)
+cannot carry the factor.
+
 The optional K-aware method needs current positive scalar isotropic conductivity
 in active-node order (use `d.to_nodes(...)` to map layer values):
 

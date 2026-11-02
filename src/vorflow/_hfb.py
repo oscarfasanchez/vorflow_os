@@ -1,17 +1,32 @@
 """Barrier connections of a built DISU grid and their HFB package data.
 
-A horizontal connection is a barrier connection when the plan segment between
-its two cell centres crosses the barrier trace of either cell's layer. On a
-grid meshed with ``is_barrier=True`` these are exactly the faces lying on the
-trace; elsewhere they are the faces nearest the trace (a zig-zag), which still
-separates the two sides. This module returns FloPy constructor arguments
-without importing FloPy. Node numbers are zero-based.
+Each layer has its own barrier trace (or none), and that layer's cells are
+meant to conform to it. The barrier is then a staircase: a vertical wall on
+each layer's trace and a horizontal tread between the traces of consecutive
+layers. A connection is cut when it crosses that staircase:
+
+* horizontal, between layers with the same trace: the plan segment between
+  the two cell centres crosses the trace. On a grid meshed with
+  ``is_barrier=True`` these are exactly the faces lying on the trace;
+  elsewhere they are the faces nearest it (a zig-zag), which still separates
+  the two sides;
+* vertical, between layers with different traces: the plan contact of the two
+  cells lies inside the polygon joining the two traces (closed at the tips);
+* horizontal between layers with different traces: the cells lie on opposite
+  sides of their own layers' traces and the segment between them touches the
+  fault.
+
+``factor`` is |n_fault . n_face| for the plane through consecutive traces,
+each at its layer's mid-depth, so that with flow normal to the fault the staircase has the plane's resistance.
+This module returns FloPy constructor arguments without importing FloPy. Node
+numbers are zero-based.
 """
 
 from dataclasses import dataclass
 
 import numpy as np
 import shapely
+from shapely.geometry import LineString, Polygon
 from shapely.geometry.base import BaseGeometry
 
 _LINEAR = {shapely.GeometryType.LINESTRING, shapely.GeometryType.LINEARRING,
@@ -36,34 +51,129 @@ def _traces(trace, nlay):
     return traces
 
 
+def _same(a, b):
+    return a is b or (a is not None and b is not None and a.equals(b))
+
+
+class _Step:
+    """The tread between two different traces: the polygon joining them, oriented alike."""
+
+    def __init__(self, a, b):
+        if shapely.get_type_id(a) != shapely.GeometryType.LINESTRING or \
+                shapely.get_type_id(b) != shapely.GeometryType.LINESTRING:
+            raise ValueError("Traces that differ between layers (a dipping fault) must each be one LineString; "
+                             "give one fault per barrier_faces call.")
+        start, end = shapely.points(a.coords[0]), shapely.points(a.coords[-1])
+        if start.distance(shapely.points(b.coords[0])) > end.distance(shapely.points(b.coords[0])):
+            b = LineString(b.coords[::-1])
+        self.a, self.b = a, b
+        self.polygon = shapely.make_valid(Polygon(list(a.coords) + list(b.coords)[::-1]))
+        self.zone = shapely.union_all([self.polygon, a, b])
+
+
+def _side(line, xy):
+    """+1 or -1 for points left or right of an oriented LineString (0 on it)."""
+    points = shapely.points(xy)
+    d = shapely.line_locate_point(line, points)
+    step = 1e-6 * line.length
+    before = shapely.get_coordinates(shapely.line_interpolate_point(line, np.maximum(d - step, 0)))
+    after = shapely.get_coordinates(shapely.line_interpolate_point(line, np.minimum(d + step, line.length)))
+    near = shapely.get_coordinates(shapely.line_interpolate_point(line, d))
+    t, p = after - before, xy - near
+    return np.sign(t[:, 0] * p[:, 1] - t[:, 1] * p[:, 0])
+
+
 def barrier_faces(grid, trace):
-    """Find the connections a barrier trace cuts; see ``DisuGrid.barrier_faces``."""
+    """Find the connections a barrier cuts; see ``DisuGrid.barrier_faces``."""
     grid._require_build()
     traces = _traces(trace, grid.nlay)
     links = grid.links
     n, m = np.asarray(links["n"], dtype=np.int64), np.asarray(links["m"], dtype=np.int64)
+    ihc = np.asarray(links["ihc"])
     cells = grid.cellmap[grid.cellmap.node >= 0].sort_values("node")
     xy = cells[["x", "y"]].to_numpy(dtype=float)
     layer = cells.layer.to_numpy()
-    horizontal = np.flatnonzero(np.asarray(links["ihc"]) != 0)
-    tree = shapely.STRtree(shapely.linestrings(np.stack((xy[n[horizontal]], xy[m[horizontal]]), axis=1)))
+    thickness = (cells.top - cells.bot).to_numpy(dtype=float)
+    middle = ((cells.top + cells.bot) / 2).to_numpy(dtype=float)
+    polygons = np.array([grid._grids[int(g)].geometry.iloc[int(i)] for g, i in zip(cells.grid, cells.icpl)])
+    tolerance = 1e-7 * max(float(np.ptp(xy, axis=0).max()), 1.0)
+    cell_tree = shapely.STRtree(polygons)
+
+    def depth(points, lay):
+        """Mid-depth of layer ``lay`` at plan points: mean centre elevation of its cells there (NaN outside)."""
+        at, cell = cell_tree.query(points, predicate="dwithin", distance=tolerance)
+        at, cell = at[layer[cell] == lay], cell[layer[cell] == lay]
+        count = np.bincount(at, minlength=len(points))
+        return np.bincount(at, weights=middle[cell], minlength=len(points)) / np.where(count, count, np.nan)
+
+    def dip(points, a, la, b, lb, fallback):
+        """Horizontal and vertical offsets from trace ``a`` (layer la) to trace ``b`` (layer lb) near each point."""
+        pa = shapely.line_interpolate_point(a, shapely.line_locate_point(a, points))
+        pb = shapely.line_interpolate_point(b, shapely.line_locate_point(b, pa))
+        dv = np.abs(depth(pa, la) - depth(pb, lb))
+        return shapely.distance(pa, pb), np.where(np.isfinite(dv), dv, fallback)
+    ta = np.array([traces[k] for k in layer[n]], dtype=object)
+    tb = np.array([traces[k] for k in layer[m]], dtype=object)
+    same = np.array([_same(a, b) or a is None or b is None for a, b in zip(ta, tb)])
     hit = np.zeros(len(n), dtype=bool)
+    factor = np.ones(len(n))
+    on_trace = np.zeros(len(n), dtype=bool)
+
+    # Walls: horizontal links between layers that share the trace (or where one has none).
+    horizontal = np.flatnonzero((ihc != 0) & same)
+    tree = shapely.STRtree(shapely.linestrings(np.stack((xy[n[horizontal]], xy[m[horizontal]]), axis=1)))
     for t in {id(t): t for t in traces if t is not None}.values():
         found = horizontal[tree.query(t, predicate="crosses")]
-        own = [k for k, other in enumerate(traces) if other is t]
+        own = [k for k, other in enumerate(traces) if _same(other, t)]
         hit[found[np.isin(layer[n[found]], own) | np.isin(layer[m[found]], own)]] = True
+    walls = np.flatnonzero(hit)
+    if len(walls):
+        faces = shapely.intersection(shapely.boundary(polygons[n[walls]]), shapely.boundary(polygons[m[walls]]))
+        lay = np.where([t is not None for t in ta[walls]], layer[n[walls]], layer[m[walls]])
+        on_trace[walls] = [f.length > tolerance and traces[k].buffer(tolerance).covers(f) for f, k in zip(faces, lay)]
+        mid = np.where(shapely.length(faces) > tolerance, shapely.line_interpolate_point(faces, 0.5, normalized=True),
+                       shapely.points((xy[n[walls]] + xy[m[walls]]) / 2))
+        for k in np.unique(lay):
+            w = lay == k
+            near = [j for j in (k - 1, k + 1) if 0 <= j < grid.nlay and traces[j] is not None]
+            if near:
+                fallback = (thickness[n[walls[w]]] + thickness[m[walls[w]]]) / 2
+                offsets = [dip(mid[w], traces[k], k, traces[j], j, fallback) for j in near]
+                dh, dv = np.mean([o[0] for o in offsets], axis=0), np.mean([o[1] for o in offsets], axis=0)
+                factor[walls[w]] = dv / np.hypot(dh, dv)
+
+    # Steps: links between layers whose traces differ.
+    steps = {}
+    for link in np.flatnonzero(~same):
+        key = (layer[n[link]], layer[m[link]])
+        if key not in steps:
+            steps[key] = _Step(ta[link], tb[link])
+    for (la, lb), step in steps.items():
+        pair = np.flatnonzero(~same & (layer[n] == la) & (layer[m] == lb))
+        dv = (thickness[n[pair]] + thickness[m[pair]]) / 2
+        vertical = ihc[pair] == 0
+        if vertical.any():
+            # Treads: the plan contact of the two cells lies between the traces.
+            v = pair[vertical]
+            touch = shapely.intersects(polygons[n[v]], step.polygon)
+            v, d = v[touch], dv[vertical][touch]
+            contact = shapely.point_on_surface(shapely.intersection(polygons[n[v]], polygons[m[v]]))
+            inside = shapely.contains(step.polygon, contact)
+            v, contact = v[inside], contact[inside]
+            dh, d = dip(contact, step.a, la, step.b, lb, d[inside])
+            hit[v] = True
+            factor[v] = dh / np.hypot(dh, d)
+        if (~vertical).any():
+            # Staggered horizontal links: opposite sides of their own traces, across the fault zone.
+            s = pair[~vertical]
+            connector = shapely.linestrings(np.stack((xy[n[s]], xy[m[s]]), axis=1))
+            cut = shapely.intersects(connector, step.zone) & (_side(step.a, xy[n[s]]) != _side(step.b, xy[m[s]]))
+            s = s[cut]
+            dh, d = dip(shapely.points((xy[n[s]] + xy[m[s]]) / 2), step.a, la, step.b, lb, dv[~vertical][cut])
+            hit[s] = True
+            factor[s] = d / np.hypot(dh, d)
     found = np.flatnonzero(hit)
-    on_trace = np.zeros(len(found), dtype=bool)
-    if len(found):
-        tolerance = 1e-7 * max(float(np.ptp(xy, axis=0).max()), 1.0)
-        polygons = [grid._grids[int(g)].geometry.iloc[int(i)] for g, i in zip(cells.grid, cells.icpl)]
-        shared = shapely.intersection(shapely.boundary([polygons[i] for i in n[found]]),
-                                      shapely.boundary([polygons[i] for i in m[found]]))
-        for k, link in enumerate(found):
-            face = shared[k]
-            zone = [t.buffer(tolerance) for t in (traces[layer[n[link]]], traces[layer[m[link]]]) if t is not None]
-            on_trace[k] = face.length > tolerance and any(z.covers(face) for z in zone)
-    return BarrierFaces(found, n[found], m[found], on_trace, np.ones(len(found)), grid.nodes)
+    return BarrierFaces(found, n[found], m[found], on_trace[found], factor[found], ihc[found] == 0, grid.nodes)
 
 
 @dataclass
@@ -71,10 +181,12 @@ class BarrierFaces:
     """Connections cut by a barrier, with MF6 and MODFLOW-USG HFB package data.
 
     ``links`` indexes ``DisuGrid.links``; ``n`` and ``m`` are the zero-based
-    nodes on either side. ``on_trace`` is True where the shared face lies on
-    the trace, False where the face is only the nearest one (zig-zag).
-    ``factor`` multiplies the hydraulic characteristic of each face (1 on a
-    vertical trace).
+    nodes on either side. ``on_trace`` is True where a horizontal face lies on
+    the trace, False where the face is only the nearest one (zig-zag) or the
+    connection is vertical. ``vertical`` marks the treads of a dipping fault.
+    ``factor`` multiplies the hydraulic characteristic of each face: 1 on a
+    vertical fault, and |n_fault . n_face| on a dipping one, with the dip taken
+    from the offset between consecutive traces, each at its layer's mid-depth.
     """
 
     links: np.ndarray
@@ -82,6 +194,7 @@ class BarrierFaces:
     m: np.ndarray
     on_trace: np.ndarray
     factor: np.ndarray
+    vertical: np.ndarray
     nodes: int
 
     def __len__(self):
@@ -109,7 +222,8 @@ class BarrierFaces:
 
         ``hydchr`` is the barrier conductivity divided by its width (>= 0; a
         negative value is MODFLOW's conductance multiplier), one number or one
-        per connection. Vertical barrier connections need MF6 6.7 or later.
+        per connection; it is multiplied by ``factor``. Vertical barrier
+        connections need MF6 6.7 or later.
         """
         values = self._hydchr(hydchr)
         if not len(self):
@@ -120,10 +234,17 @@ class BarrierFaces:
         }
 
     def get_gridprops_mfusg_hfb(self, hydchr):
-        """Return ``flopy.modflow.ModflowHfb`` kwargs for a USG model, or None when empty."""
+        """Return ``flopy.modflow.ModflowHfb`` kwargs for a USG model, or None when empty.
+
+        MODFLOW-USG's HFB package is for horizontal connections; a barrier with
+        vertical connections (a dipping fault) raises ValueError.
+        """
         values = self._hydchr(hydchr)
         if not len(self):
             return None
+        if self.vertical.any():
+            raise ValueError(f"{int(self.vertical.sum())} barrier connections are vertical; MODFLOW-USG HFB "
+                             "takes horizontal connections only. Use MODFLOW 6 (6.7 or later).")
         return {
             "nhfbnp": len(self),
             "hfb_data": [[int(a), int(b), float(h)] for a, b, h in zip(self.n, self.m, values)],

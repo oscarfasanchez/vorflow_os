@@ -120,15 +120,15 @@ def test_invalid_trace_is_rejected(trace):
 
 
 def exact_flows(d, faces, heads, gradient, hydchr):
-    """Two-point flows with HFB series conductance, GNC-corrected flows and exact flows (K = 1)."""
+    """Exact flows and GNC-corrected flows with HFB series conductance (K = 1); hydchr per face or one value."""
     xyz, _ = cells(d)
     links = d.links
     n, m = links["n"], links["m"]
     area = np.asarray(links["fahl"], dtype=float)
     conductance = area / (links["cl_n"] + links["cl_m"])
-    cut = np.zeros(len(n), dtype=bool)
-    cut[faces.links] = True
-    conductance = np.where(cut, 1 / (1 / conductance + 1 / (hydchr * area)), conductance)
+    barrier = np.full(len(n), np.inf)
+    barrier[faces.links] = hydchr
+    conductance = 1 / (1 / conductance + 1 / (barrier * area))
     normal = np.column_stack((np.cos(np.radians(links["angle"])), np.sin(np.radians(links["angle"])), np.zeros(len(n))))
     vertical = links["ihc"] == 0
     normal[vertical] = 0.0
@@ -172,3 +172,114 @@ def test_gnc_does_not_interpolate_across_a_barrier(grid, plain_crosses, unsuppor
 def test_invalid_barrier_pairs_are_rejected():
     with pytest.raises(ValueError, match="barriers"):
         spliced().estimate_gnc(barriers=[(0, 0)])
+
+
+def section(ncol=12, nlay=6):
+    """One row of unit columns over unit layers: a vertical x-z section."""
+    polygons = [box(i, 0, i + 1, 1) for i in range(ncol)]
+    grid = gpd.GeoDataFrame({"node_id": np.arange(ncol), "x": [p.centroid.x for p in polygons],
+                             "y": [0.5] * ncol}, geometry=polygons)
+    return disu.DisuGrid(grid, float(nlay), [float(nlay - 1 - k) for k in range(nlay)]).build()
+
+
+def test_dipping_fault_has_walls_and_treads_with_the_plane_resistance():
+    d = section()
+    # 45 degrees: each layer's trace one column further than the layer above.
+    faces = d.barrier_faces([LineString([(3 + k, -1), (3 + k, 2)]) for k in range(6)])
+    xyz, _ = cells(d)
+    far = xyz[:, 0] + xyz[:, 2] > 3 + 5.5
+    n, m = d.links["n"], d.links["m"]
+    np.testing.assert_array_equal(np.sort(faces.links), np.flatnonzero(far[n] != far[m]))
+    assert len(faces) == 11 and faces.vertical.sum() == 5
+    np.testing.assert_allclose(faces.factor, np.sqrt(0.5))
+    # Flow normal to the fault: with the factor every connection carries the exact flow.
+    normal, q, hydchr = np.array([1.0, 0.0, 1.0]) / np.sqrt(2), 0.7, 0.4
+    heads = 50 - q * xyz @ normal - far * q / hydchr
+    with_factor = exact_flows(d, faces, heads, -q * normal, hydchr * faces.factor)
+    without = exact_flows(d, faces, heads, -q * normal, hydchr)
+    assert np.abs(with_factor[1](d.estimate_gnc(connections="all")) - with_factor[0]).max() < 1e-12
+    assert np.abs(without[1](d.estimate_gnc(connections="all")) - without[0]).max() > 0.1
+
+
+def stacked(name):
+    if name == "uneven offsets":
+        xs = [2, 3, 3, 5]
+        d = disu.DisuGrid(boxes(6), 4.0, [3.0, 2.0, 1.0, 0.0]).build()
+        return d, [LineString([(x, -1), (x, 7)]) for x in xs], lambda x, y, k: x > np.array(xs)[k]
+    if name == "oblique strike":
+        d = disu.DisuGrid(boxes(8), 3.0, [2.0, 1.0, 0.0]).build()
+        return (d, [LineString([(1 + k, -1), (6 + k, 9)]) for k in range(3)],
+                lambda x, y, k: x > 1 + k + 0.5 * (y + 1))
+    grid = boxes(8)
+    x = grid.x.to_numpy()
+    d = disu.DisuGrid(grid, 12 - 0.3 * x, [10 - 0.3 * x - 2 * k for k in range(4)]).build()
+    return d, [LineString([(3 + k, -1), (3 + k, 9)]) for k in range(4)], lambda x, y, k: x > 3 + k
+
+
+@pytest.mark.parametrize("name", ["uneven offsets", "oblique strike", "dipping layers"])
+def test_stacked_traces_cut_every_connection_that_changes_side(name):
+    d, traces, right = stacked(name)
+    faces = d.barrier_faces(traces)
+    c = d.cellmap[d.cellmap.node >= 0].sort_values("node")
+    side = right(c.x.to_numpy(), c.y.to_numpy(), c.layer.to_numpy())
+    n, m = d.links["n"], d.links["m"]
+    np.testing.assert_array_equal(np.sort(faces.links), np.flatnonzero(side[n] != side[m]))
+    assert faces.vertical.any() and np.all((faces.factor > 0) & (faces.factor < 1))
+
+
+def test_uneven_offsets_give_the_local_dip():
+    d, traces, _ = stacked("uneven offsets")
+    faces = d.barrier_faces(traces)
+    _, layer = cells(d)
+    walls, treads = ~faces.vertical & (layer[faces.n] == layer[faces.m]), faces.vertical
+    # Walls in layer 3 see an offset of 2 (factor 1/sqrt(5)); treads from layer 2 to 3 the same offset.
+    np.testing.assert_allclose(faces.factor[walls & (layer[faces.n] == 3)], 1 / np.sqrt(5))
+    np.testing.assert_allclose(faces.factor[treads & (layer[faces.n] == 2)], 2 / np.sqrt(5))
+    np.testing.assert_allclose(faces.factor[walls & (layer[faces.n] == 1)], 1 / np.sqrt(1.25))
+
+
+def test_fault_tips_close_the_step_polygon():
+    d, traces, _ = stacked("uneven offsets")
+    faces = d.barrier_faces([LineString([(t.coords[0][0], 1.5), (t.coords[0][0], 4.5)]) for t in traces])
+    xyz, _ = cells(d)
+    assert len(faces) and np.all((xyz[faces.pairs, 1] > 1) & (xyz[faces.pairs, 1] < 5))
+
+
+def test_usg_export_rejects_vertical_barrier_connections():
+    faces = section().barrier_faces([LineString([(3 + k, -1), (3 + k, 2)]) for k in range(6)])
+    assert faces.get_gridprops_mf6_hfb(0.1)["maxhfb"] == 11
+    with pytest.raises(ValueError, match="vertical"):
+        faces.get_gridprops_mfusg_hfb(0.1)
+    with pytest.raises(ValueError, match="negative"):
+        faces.get_gridprops_mf6_hfb(-0.5)
+
+
+def test_traces_that_differ_must_be_single_lines():
+    two = LineString([(3, -1), (3, 2)]).union(LineString([(8, -1), (8, 2)]))
+    with pytest.raises(ValueError, match="one LineString"):
+        section(nlay=2).barrier_faces([two, LineString([(4, -1), (4, 2)])])
+
+
+def test_dipping_fault_through_dipping_layers_is_exact_with_gnc():
+    # Layers 0.7 thick slope 0.3 along x, so traces one column apart make a 45 degree fault plane
+    # through each layer's mid-depth; links across the fault include staggered ones.
+    grid = boxes(12)
+    x = grid.x.to_numpy()
+    top = 12 - 0.3 * x
+    d = disu.DisuGrid(grid, top, [top - 0.7 * (k + 1) for k in range(6)]).build()
+    faces = d.barrier_faces([LineString([(3 + k, -1), (3 + k, 13)]) for k in range(6)])
+    xyz, layer = cells(d)
+    plane = 3 + 12 - 0.3 * 3 - 0.35          # x + z at the top layer's mid-depth on x = 3
+    far = xyz[:, 0] + xyz[:, 2] > plane
+    n, m = d.links["n"], d.links["m"]
+    np.testing.assert_array_equal(np.sort(faces.links), np.flatnonzero(far[n] != far[m]))
+    assert (layer[faces.n] != layer[faces.m]).sum() > faces.vertical.sum()   # staggered links are cut too
+    np.testing.assert_allclose(faces.factor, np.sqrt(0.5))
+    normal, q, hydchr = np.array([1.0, 0.0, 1.0]) / np.sqrt(2), 0.7, 0.4
+    heads = 50 - q * xyz @ normal - far * q / hydchr
+    exact, corrected = exact_flows(d, faces, heads, -q * normal, hydchr * faces.factor)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        result = d.estimate_gnc(connections="all", barriers=faces.pairs)
+    error = np.delete(abs(corrected(result) - exact), [u["link"] for u in result.unsupported])
+    assert error.max() < 1e-9

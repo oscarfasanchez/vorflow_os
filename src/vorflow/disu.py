@@ -357,27 +357,38 @@ class DisuGrid:
                             barriers=barriers, strict=strict, contrast=contrast)
 
     def barrier_faces(self, trace):
-        """Return the connections a vertical barrier trace cuts, with HFB package data.
+        """Return the connections a barrier cuts, with HFB package data.
 
-        A horizontal connection is cut when the plan segment between its two
-        cell centres crosses the trace of either cell's layer. On a grid meshed
-        with ``add_line(..., is_barrier=True)`` these are the faces lying on the
-        trace (``on_trace`` True); otherwise they are the faces nearest it, a
-        zig-zag that still separates the two sides.
+        Give one trace for a vertical barrier, or one per layer for a dipping
+        one; each layer's cells should conform to its trace (mesh each layer
+        with ``add_line(..., is_barrier=True)`` at that layer's trace). The
+        barrier is then a staircase: walls on each layer's trace and treads
+        between the traces of consecutive layers. Horizontal connections are
+        cut where the segment between the two cell centres crosses the trace
+        (``on_trace`` True when the face lies on it, otherwise the nearest
+        faces, a zig-zag that still separates the two sides). Vertical
+        connections are cut where the two cells' plan contact lies inside the
+        polygon joining two consecutive traces, closed at the fault tips.
 
         Parameters
         ----------
         trace : LineString, MultiLineString or sequence
             One line geometry for every layer, or one per layer (None where a
-            layer has no barrier).
+            layer has no barrier). Traces that differ between layers must each
+            be one LineString, and should run past the grid or end at the
+            fault tips.
 
         Returns
         -------
         BarrierFaces
-            Node pairs, ``on_trace`` flags, ``factor`` (1 on a vertical trace)
-            and ``get_gridprops_mf6_hfb`` / ``get_gridprops_mfusg_hfb``. Pass
-            ``.pairs`` to ``estimate_gnc(barriers=...)`` so that no ghost head
-            interpolates across the barrier.
+            Node pairs, ``on_trace`` and ``vertical`` flags, ``factor`` and
+            ``get_gridprops_mf6_hfb`` / ``get_gridprops_mfusg_hfb``. ``factor``
+            does not depend on K: it is |n_fault . n_face| for the plane through
+            consecutive traces (1 on a vertical barrier), and the exporters
+            multiply ``hydchr`` by it, so that flow normal to the fault meets the
+            plane's resistance. Pass ``.pairs`` to ``estimate_gnc(barriers=...)``
+            so that no ghost head interpolates across the barrier. Vertical
+            barrier connections need MODFLOW 6 6.7 or later.
         """
         from ._hfb import barrier_faces
 
