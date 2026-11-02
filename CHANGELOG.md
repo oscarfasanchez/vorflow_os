@@ -25,8 +25,10 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   consecutive traces), each with a K-independent factor on the hydraulic
   characteristic so that flow normal to the fault meets the plane's resistance.
 
-- Example notebook `disu_faults_and_gnc.ipynb`: a dipping fault meshed per
-  layer, HFB and ghost-node corrections, checked against an exact solution.
+- Example notebook `disu_faults_and_gnc.ipynb`: vertical and dipping faults
+  as barrier connections, ghost-node corrections with and without
+  `barriers=`, checks against an exact solution without running MODFLOW, and
+  the HFB and GNC arrays.
 
 - Example notebook `disu_grids.ipynb` replaces `full_connectivity_demo.ipynb`
   and `disu_refined_at_depth.ipynb`: the three ways to build a DISU grid (the
