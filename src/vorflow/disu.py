@@ -39,7 +39,7 @@ from scipy.sparse.csgraph import connected_components
 from . import _columns
 from ._columns import ABSENT, ACTIVE, NOFLOW, PASSTHROUGH, STATUS_NAMES, subdivide  # noqa: F401
 from ._connect3d import concat_links, layered_links, overlay_links, staggered_links, vertical_links
-from ._disu_export import mf6_gridprops, mfusg_gridprops, write_gsf
+from ._disu_export import mf6_gridprops, mfusg_gridprops, mfusg_ksat, write_gsf
 from ._gnc_export import GncCorrections
 
 __all__ = ["DisuGrid", "DisuOptions", "GncCorrections", "refill", "splice", "split_contacts", "subdivide"]
@@ -294,12 +294,48 @@ class DisuGrid:
         horizontal. ``fahl`` is the interface area: for a horizontal connection
         the face width times its (merged) overlap height. MODFLOW-USG has no
         XT3D; offset layers rely on the two-point formulation (or GNC).
+
+        As with Gridgen, MODFLOW-USG divides a horizontal ``fahl`` by the mean
+        thickness of the two cells and uses the harmonic mean of K times
+        thickness, which is exact only when both cells are equally thick. For
+        staggered connections between cells of unequal thickness (wedges,
+        sublayers, pinch-outs), use ``MfUsgLpf(ikcflag=1, ksat=...)`` with
+        :meth:`get_mfusg_ksat`.
         """
         self._require_build()
         return mfusg_gridprops(
             self.nodes, self.nlay, self._node_top, self._node_bot, self._area[self._node_cell],
             self._node_layer, self.links,
         )
+
+    def get_mfusg_ksat(self, k, k33=None):
+        """Hydraulic conductivity per connection, for ``flopy.mfusg.MfUsgLpf(ikcflag=1, ksat=...)``.
+
+        With ``ikcflag=1`` MODFLOW-USG computes every conductance as
+        ``fahl * ksat / (cl1 + cl2)``, so the conductance follows the shared
+        face area also between cells of unequal thickness. ``ksat`` is the
+        distance-weighted harmonic mean of the two cells' K (``k33`` for
+        vertical connections), which gives MODFLOW 6's conductance. MODFLOW-USG
+        accepts ``ikcflag=1`` only with confined layers (``laytyp=0``).
+
+        Parameters
+        ----------
+        k : float or array_like of shape (nodes,)
+            Horizontal hydraulic conductivity per active node.
+        k33 : float or array_like of shape (nodes,), optional
+            Vertical hydraulic conductivity; ``k`` if omitted.
+
+        Returns
+        -------
+        numpy.ndarray
+            One value per entry of the ``ja`` array from
+            :meth:`get_gridprops_mfusg_disu` (the node's own K on the
+            diagonal, which MODFLOW-USG does not read).
+        """
+        self._require_build()
+        k = _node_values(k, self.nodes, "k")
+        k33 = k if k33 is None else _node_values(k33, self.nodes, "k33")
+        return mfusg_ksat(self.nodes, self.links, k, k33)
 
     def estimate_gnc(self, k=None, *, method="geometric", connections="3d",
                      min_offset=0., blocked_pairs=(), barriers=(), strict=False, contrast=10.):
@@ -1498,6 +1534,17 @@ def _bent_face(shared, centres, pair):
     return {"cell_id_1": pair[0], "cell_id_2": pair[1], "shared_length": float(lengths.sum()),
             "distance_1": float(abs(d1)), "distance_2": float(abs(d2)), "ortho_error": float(angle),
             "normal_x": float(normal[0]), "normal_y": float(normal[1])}
+
+
+def _node_values(values, nodes, name):
+    """Positive finite values, one per active node (a scalar applies to all)."""
+    try:
+        values = np.broadcast_to(np.asarray(values, dtype=float), (nodes,)).copy()
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{name} must be a number or have shape ({nodes},).") from error
+    if not (np.isfinite(values).all() and (values > 0).all()):
+        raise ValueError(f"{name} must hold positive finite values.")
+    return values
 
 
 def _merge_plan_slivers(overlaps, area, sliver_abs_tol=0.0):

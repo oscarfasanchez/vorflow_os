@@ -25,6 +25,13 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   consecutive traces), each with a K-independent factor on the hydraulic
   characteristic so that flow normal to the fault meets the plane's resistance.
 
+- `DisuGrid.get_mfusg_ksat(k, k33=None)` returns one hydraulic conductivity
+  per connection for `flopy.mfusg.MfUsgLpf(ikcflag=1, ksat=...)`. MODFLOW-USG
+  then gives staggered connections between cells of unequal thickness the
+  conductance of their shared face, as MODFLOW 6 does; by default (as with
+  Gridgen) it divides the face area by the cells' mean thickness. Confined
+  layers only.
+
 - Example notebook `disu_faults_and_gnc.ipynb`: vertical and dipping faults
   as barrier connections, ghost-node corrections with and without
   `barriers=`, checks against an exact solution without running MODFLOW, and
