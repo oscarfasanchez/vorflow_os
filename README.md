@@ -435,6 +435,13 @@ heads = d.to_layers(gwf.output.head().get_data().ravel())  # back to (nlay, ncpl
   0 no-flow), `layer_view` (one 2D map for a layer split into sublayers)
   and `vertex_grid` (a FloPy grid for those maps) cover the rest; MF6 DISU
   accepts IDOMAIN 0/1 only.
+- **Layer structure for other tools:** MF6 copies each node's plan polygon
+  to the binary grid file, but not its layer. `save_cellmap(path, parent)`
+  writes it for tools that work layer by layer in 2D, such as pilot points
+  per layer: every layer cell with its node, plan cell, centre, top, bottom
+  and mid-elevation, its `idomain` code, and its `unit`, the original layer
+  from `subdivide` or `split_contacts` (a wedge belongs to the unit above or
+  below it).
 - **Existing DISV models** (FloPy, LoopFlopy) go in through
   `disu.DisuGrid.from_disv(vertices, cell2d, top, botm, idomain)`.
 

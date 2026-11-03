@@ -9,6 +9,10 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `DisuGrid.save_cellmap(path, parent=None)` also writes each cell's
+  mid-elevation, `idomain` code and original layer (`unit`), the layer
+  structure that the DISU binary grid file lacks.
+
 - `DisuGrid.estimate_gnc()` returns an inspectable one-ring correction collection:
   geometry-only estimation by default, or explicitly selected experimental
   scalar-K-aware estimation. K-aware estimation treats a face as a material

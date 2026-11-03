@@ -3,6 +3,7 @@
 import functools
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from vorflow import disu
@@ -41,6 +42,19 @@ def test_upper_wedge_keeps_the_bottoms_above_and_belongs_to_the_layer_below():
     np.testing.assert_array_equal(made.bot, 3.75)
     _contact_is_gap_free(d, 2, 3)
     assert_cells_close(d)
+
+
+@pytest.mark.parametrize("wedge, unit", [("upper", [0, 1, 2, 2, 3]), ("lower", [0, 1, 1, 2, 3])])
+def test_the_cell_map_file_puts_the_wedge_in_the_unit_it_belongs_to(tmp_path, wedge, unit):
+    base, pit, grids, botm, contact = _straddling_model()
+    top = [10.0, None, contact, None] if wedge == "lower" else 10.0
+    grids2, top2, botm2, idomain2, parent = disu.split_contacts(grids, top, botm, wedge=wedge)
+    d = disu.DisuGrid(grids2, top2, botm2, idomain2).build()
+    cells = pd.read_csv(d.save_cellmap(tmp_path / "cells.csv", parent))
+    np.testing.assert_array_equal(cells.groupby("layer").unit.first(), unit)
+    # The wedge (layer 2) keeps its own plan grid: its unit spans two grids.
+    other = 3 if wedge == "upper" else 1
+    assert set(cells[cells.layer == 2].grid) != set(cells[cells.layer == other].grid)
 
 
 def test_lower_wedge_follows_the_contact_given_on_the_fine_grid():

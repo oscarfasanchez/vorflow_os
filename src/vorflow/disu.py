@@ -616,10 +616,35 @@ class DisuGrid:
             found[hit] = node[hit]
         return found if found.size > 1 else int(found[0])
 
-    def save_cellmap(self, path):
-        """Write :attr:`cellmap` to CSV, so results can be mapped back without vorflow."""
+    def save_cellmap(self, path, parent=None):
+        """Write :attr:`cellmap` to CSV, so results can be mapped back without vorflow.
+
+        The DISU arrays give each node's plan polygon (``vertices`` and
+        ``cell2d``), and MODFLOW 6 copies it to the binary grid file, but not
+        the layer structure. The file adds it for tools that work layer by
+        layer in 2D, such as pilot points per layer: besides the columns of
+        :attr:`cellmap`, ``z`` is the cell's mid-elevation, ``idomain`` the
+        code of :attr:`idomain_layers`, and ``unit`` the original layer.
+
+        Args:
+            path: The CSV file to write.
+            parent: The original layer of each layer, as returned by
+                :func:`subdivide` or :func:`split_contacts` (a wedge layer
+                belongs to the layer above or below it); ``None`` when no
+                layer was split, and ``unit`` is the layer.
+        """
         self._require_build()
-        self.cellmap.to_csv(path, index=False)
+        unit = np.arange(self.nlay) if parent is None else np.asarray(parent)
+        if unit.shape != (self.nlay,) or not np.issubdtype(unit.dtype, np.integer):
+            raise ValueError(f"parent needs one integer per layer ({self.nlay}).")
+        codes = np.zeros(len(STATUS_NAMES), dtype=np.int64)
+        codes[ACTIVE], codes[PASSTHROUGH] = 1, -1
+        cells = self.cellmap
+        layer = cells["layer"].to_numpy()
+        table = cells.assign(z=(cells["top"] + cells["bot"]) / 2,
+                             idomain=codes[self.status[layer, cells["column"].to_numpy()]],
+                             unit=unit[layer])
+        table.to_csv(path, index=False)
         return path
 
     def _columns_at(self, x, y):
