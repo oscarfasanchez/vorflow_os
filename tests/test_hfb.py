@@ -324,11 +324,19 @@ def test_fault_tips_close_the_step_polygon():
     assert len(faces) and np.all((xyz[faces.pairs, 1] > 1) & (xyz[faces.pairs, 1] < 5))
 
 
-def test_usg_export_rejects_vertical_barrier_connections():
-    faces = section().barrier_faces([LineString([(3 + k, -1), (3 + k, 2)]) for k in range(6)])
-    assert faces.get_gridprops_mf6_hfb(0.1)["maxhfb"] == 11
-    with pytest.raises(ValueError, match="vertical"):
-        faces.get_gridprops_mfusg_hfb(0.1)
+def test_usg_export_divides_vertical_hydchr_by_the_mean_thickness():
+    # MODFLOW-USG and USG-Transport multiply a vertical barrier's hydchr by the mean cell thickness
+    # (gwf2hfb7u1.f); dividing by it beforehand gives hydchr * area, as in MODFLOW 6.
+    d = section()
+    faces = d.barrier_faces([LineString([(3 + k, -1), (3 + k, 2)]) for k in range(6)])
+    mf6 = faces.get_gridprops_mf6_hfb(0.1)
+    usg = faces.get_gridprops_mfusg_hfb(0.1)
+    assert mf6["maxhfb"] == usg["nhfbnp"] == 11 and faces.vertical.any()
+    hydchr6 = np.array([h for _, _, h in mf6["stress_period_data"][0]])
+    hydchr_usg = np.array([h for _, _, h in usg["hfb_data"]])
+    thickness = d._node_top - d._node_bot
+    mean = (thickness[faces.n] + thickness[faces.m]) / 2
+    np.testing.assert_allclose(hydchr_usg, np.where(faces.vertical, hydchr6 / mean, hydchr6))
     with pytest.raises(ValueError, match="negative"):
         faces.get_gridprops_mf6_hfb(-0.5)
 

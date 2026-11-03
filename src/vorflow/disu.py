@@ -430,7 +430,8 @@ class DisuGrid:
             multiply ``hydchr`` by it, so that flow normal to the fault meets the
             plane's resistance. Pass ``.pairs`` to ``estimate_gnc(barriers=...)``
             so that no ghost head interpolates across the barrier. Vertical
-            barrier connections need MODFLOW 6 6.7 or later.
+            barrier connections need MODFLOW 6 6.7 or later; MODFLOW-USG and
+            USG-Transport accept them too (see ``get_gridprops_mfusg_hfb``).
         """
         from ._hfb import barrier_faces
 

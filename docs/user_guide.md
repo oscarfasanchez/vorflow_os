@@ -150,9 +150,11 @@ For a dipping fault, mesh each layer at its own trace and give one trace per
 layer. The fault becomes a staircase: walls on each trace, and treads where a
 vertical connection lies between the traces of two consecutive layers (the
 polygon joining them, closed at the fault tips). `faces.vertical` marks the
-treads; they need MODFLOW 6 6.7 or later, whose HFB (hydraulic flow barrier)
-accepts vertical connections. The MODFLOW-USG export refuses them, since USG's HFB
-is horizontal only.
+treads. HFB is the hydraulic flow barrier: MODFLOW 6 (6.7 or later),
+MODFLOW-USG and USG-Transport accept it on vertical connections. USG multiplies a
+vertical barrier's hydraulic characteristic by the mean thickness of the two
+cells, so `get_gridprops_mfusg_hfb` divides it by that thickness (exact for
+confined layers; convertible layers use the saturated thickness).
 
 ```python
 traces = [fault_at(z) for z in layer_mid_depths]   # one LineString per layer, None where absent

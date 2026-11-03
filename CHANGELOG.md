@@ -24,6 +24,8 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a dipping fault becomes walls and treads (vertical connections between
   consecutive traces), each with a K-independent factor on the hydraulic
   characteristic so that flow normal to the fault meets the plane's resistance.
+  The MODFLOW-USG export includes the vertical connections, with the hydraulic
+  characteristic divided by the mean cell thickness that USG multiplies it by.
 
 - `DisuGrid.get_mfusg_ksat(k, k33=None)` returns one hydraulic conductivity
   per connection for `flopy.mfusg.MfUsgLpf(ikcflag=1, ksat=...)`. MODFLOW-USG

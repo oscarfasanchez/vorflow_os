@@ -211,7 +211,9 @@ def barrier_faces(grid, trace):
             hit[s] = True
             factor[s] = d / np.hypot(dh, d)
     found = np.flatnonzero(hit)
-    return BarrierFaces(found, n[found], m[found], on_trace[found], factor[found], ihc[found] == 0, grid.nodes)
+    cell = grid._node_top - grid._node_bot
+    return BarrierFaces(found, n[found], m[found], on_trace[found], factor[found], ihc[found] == 0, grid.nodes,
+                        (cell[n[found]] + cell[m[found]]) / 2)
 
 
 @dataclass
@@ -225,6 +227,7 @@ class BarrierFaces:
     ``factor`` multiplies the hydraulic characteristic of each face: 1 on a
     vertical fault, and |n_fault . n_face| on a dipping one, with the dip taken
     from the offset between consecutive traces, each at its layer's mid-depth.
+    ``thickness`` is the mean thickness of the two cells of each connection.
     """
 
     links: np.ndarray
@@ -234,6 +237,7 @@ class BarrierFaces:
     factor: np.ndarray
     vertical: np.ndarray
     nodes: int
+    thickness: np.ndarray
 
     def __len__(self):
         return len(self.links)
@@ -274,15 +278,18 @@ class BarrierFaces:
     def get_gridprops_mfusg_hfb(self, hydchr):
         """Return ``flopy.modflow.ModflowHfb`` kwargs for a USG model, or None when empty.
 
-        MODFLOW-USG's HFB package is for horizontal connections; a barrier with
-        vertical connections (a dipping fault) raises ValueError.
+        MODFLOW-USG (and USG-Transport, whose HFB is the hydraulic flow
+        barrier) accepts barriers on vertical connections, but multiplies
+        their hydraulic characteristic by the mean thickness of the two cells
+        as well as by the plan area. For vertical connections ``hydchr`` is
+        therefore divided by that thickness, so that the barrier conductance is
+        ``hydchr * area`` as in MODFLOW 6. This is exact for confined layers;
+        in convertible layers MODFLOW-USG uses the saturated thickness instead.
         """
         values = self._hydchr(hydchr)
         if not len(self):
             return None
-        if self.vertical.any():
-            raise ValueError(f"{int(self.vertical.sum())} barrier connections are vertical; MODFLOW-USG HFB "
-                             "takes horizontal connections only. Use MODFLOW 6 (6.7 or later).")
+        values = np.where(self.vertical, values / self.thickness, values)
         return {
             "nhfbnp": len(self),
             "hfb_data": [[int(a), int(b), float(h)] for a, b, h in zip(self.n, self.m, values)],
