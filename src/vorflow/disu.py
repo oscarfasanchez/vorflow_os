@@ -317,8 +317,15 @@ class DisuGrid:
         ``fahl * ksat / (cl1 + cl2)``, so the conductance follows the shared
         face area also between cells of unequal thickness. ``ksat`` is the
         distance-weighted harmonic mean of the two cells' K (``k33`` for
-        vertical connections), which gives MODFLOW 6's conductance. MODFLOW-USG
-        accepts ``ikcflag=1`` only with confined layers (``laytyp=0``).
+        vertical connections), which gives MODFLOW 6's conductance.
+
+        Use it with confined layers (``laytyp=0``) or convertible layers with
+        upstream weighting (``laytyp=4``); both are exact while the cells are
+        saturated. With a water table inside cells of unequal thickness,
+        ``laytyp=4`` divides the face area by their mean thickness again.
+        MODFLOW-USG and USG-Transport do not allow ``laytyp=1`` with
+        ``ikcflag=1``; USG-Transport only warns and runs on with wrong
+        conductances.
 
         Parameters
         ----------

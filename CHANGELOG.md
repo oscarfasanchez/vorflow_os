@@ -31,8 +31,10 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   per connection for `flopy.mfusg.MfUsgLpf(ikcflag=1, ksat=...)`. MODFLOW-USG
   then gives staggered connections between cells of unequal thickness the
   conductance of their shared face, as MODFLOW 6 does; by default (as with
-  Gridgen) it divides the face area by the cells' mean thickness. Confined
-  layers only.
+  Gridgen) it divides the face area by the cells' mean thickness. For
+  confined layers (`laytyp=0`) or convertible layers with upstream weighting
+  (`laytyp=4`), exact while the cells are saturated; `laytyp=1` is not
+  allowed.
 
 - Example notebook `disu_faults_and_gnc.ipynb`: vertical and dipping faults
   as barrier connections, ghost-node corrections with and without
