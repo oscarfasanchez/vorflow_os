@@ -297,6 +297,41 @@ def test_a_fault_line_meshed_without_a_barrier_is_still_sealed():
     assert sealed(d, d.barrier_faces(fault), west | on)
 
 
+@pytest.mark.slow
+def test_layers_meshed_with_the_traces_above_and_below_give_an_exact_barrier():
+    # A 45 degree fault through four 10 m layers. Each layer's mesh has its own trace and those of the
+    # layers above and below, so consecutive meshes share the cells beside a trace.
+    from vorflow import ConceptualMesh, MeshGenerator, VoronoiTessellator
+
+    normal = np.array([120.0, -40.0]) / np.hypot(120.0, 40.0)
+    traces = [LineString([(70 + k * 10 / normal[0], 0), (110 + k * 10 / normal[0], 120)]) for k in range(4)]
+    grids = []
+    for k in range(4):
+        cm = ConceptualMesh()
+        cm.add_polygon(box(0, 0, 200, 120), zone_id=1, resolution=10)
+        for i in range(max(k - 1, 0), min(k + 2, 4)):
+            cm.add_line(traces[i], line_id=f"fault-{i}", resolution=6, is_barrier=True)
+        mg = MeshGenerator(background_lc=10, conceptual_mesh=cm, verbosity=0)
+        mg.generate()
+        grids.append(VoronoiTessellator(mg, cm).generate())
+    d = disu.DisuGrid(grids, 40.0, [30.0, 20.0, 10.0, 0.0]).build()
+    pairs = np.sort(np.column_stack((d.links["n"], d.links["m"])), axis=1)
+    assert len(np.unique(pairs, axis=0)) == len(pairs)
+
+    faces = d.barrier_faces(traces)
+    xyz, _ = cells(d)
+    beyond = (xyz[:, :2] - [70, 0]) @ normal - (35 - xyz[:, 2]) > 0
+    n3 = np.r_[normal, 1.0] / np.sqrt(2)
+    gradient, hydchr = -0.01 * n3, 0.01
+    heads = 50 + xyz @ gradient - beyond * 0.01 / hydchr
+    exact, corrected = exact_flows(d, faces, heads, gradient, hydchr * faces.factor)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        aware = d.estimate_gnc(connections="all", barriers=faces.pairs)
+    assert not np.isin(faces.links, [u["link"] for u in aware.unsupported]).any()
+    np.testing.assert_allclose(corrected(aware)[faces.links], exact[faces.links], rtol=1e-9)
+
+
 def test_uneven_offsets_give_the_local_dip():
     d, traces, _ = stacked("uneven offsets")
     faces = d.barrier_faces(traces)

@@ -291,3 +291,20 @@ def test_voronoi_pit_refined_at_depth_cells_close(dip):
     d = six_layers([base] * 3 + [disu.splice(base, fine, VORONOI_PIT)] * 3, dip)
     assert d.diagnostics["vertical_offset"] == 0
     assert_cells_close(d)
+
+
+def test_a_face_one_grid_already_has_is_not_added_again_between_two_others():
+    # A cell left of x = 2 is the same in the layer 1 and 2 grids, a cell right of it
+    # in the layer 2 and 3 grids. Comparing the layer 1 and 3 grids, the two meet as
+    # if they were cells of different grids; the layer 2 grid already joins them.
+    base = _boxes(4, 1.0)
+    fine = _boxes(8, 0.5, start_id=500)
+    east, west = disu.splice(base, fine, box(2, 0, 4, 4)), disu.splice(base, fine, box(0, 0, 2, 4))
+    d = disu.DisuGrid([east, base, west], 3.0, [2.0, 1.0, 0.0]).build()
+    pairs = np.sort(np.column_stack((d.links["n"], d.links["m"])), axis=1)
+    assert len(np.unique(pairs, axis=0)) == len(pairs)
+    layer = d.cellmap[d.cellmap.node >= 0].sort_values("node").layer.to_numpy()
+    middle = (layer[d.links["n"]] == 1) & (layer[d.links["m"]] == 1)
+    assert middle.sum() == 24                     # the 4 x 4 grid's own faces, once each
+    for props in (d.get_gridprops_mf6_disu(), d.get_gridprops_mfusg_disu()):
+        assert len(props["ja"]) == d.nodes + 2 * len(pairs)

@@ -196,8 +196,10 @@ class DisuGrid:
         self._faces = _global_faces([p[2] for p in planar], self._col_of)
         cross = self._cross_faces(tolerance)
         if len(cross):
-            self._faces = pd.concat([self._faces, cross.astype(self._faces.dtypes.to_dict())],
-                                    ignore_index=True)
+            faces = pd.concat([self._faces, cross.astype(self._faces.dtypes.to_dict())], ignore_index=True)
+            # A column can belong to several grids: one face per column pair, a grid's own face first.
+            key = np.sort(faces[["cell_id_1", "cell_id_2"]].to_numpy(dtype=np.int64), axis=1)
+            self._faces = faces[~pd.DataFrame(key).duplicated().to_numpy()].reset_index(drop=True)
         from .utils import grid_to_disv
 
         self._planar = grid_to_disv(columns, tolerance=tolerance)
