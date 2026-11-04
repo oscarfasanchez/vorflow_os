@@ -669,15 +669,17 @@ class DisuGrid:
         self._require_build()
         counts = {STATUS_NAMES[code]: int((self.status == code).sum()) for code in STATUS_NAMES}
         ihc = np.bincount(self.links["ihc"], minlength=3)
-        gained = (self._node_top - self._node_bot).sum() - (
-            self.top_l - self.bot_l)[self.status == ACTIVE].sum()
+        # Thickness each node takes from collapsed pass-through intervals.
+        gained = (self._node_top - self._node_bot) - (self.top_l - self.bot_l)[self.status == ACTIVE]
+        gained = float(gained.max()) if len(gained) else 0.0
         shape = (f"{self.nlay} layers x {self._grids[0].shape[0]} cells" if self.single_grid
                  else f"{self.nlay} layers on {len(self._grids)} grids")
         lines = [
             f"DISU grid: {self.nodes} nodes from {shape}",
             f"  cells: {counts['active']} active, {counts['passthrough']} pass-through, "
             f"{counts['noflow']} no-flow",
-            f"  pass-through thickness given to active cells: {gained:.6g} (collapse={self.options.collapse!r})",
+            f"  thickness given to active cells by pass-through cells: up to {gained:.6g} per cell "
+            f"(collapse={self.options.collapse!r})",
             f"  connections: {len(self.links['n'])} ({ihc[0]} vertical, {ihc[1]} horizontal, "
             f"{ihc[2]} staggered)",
         ]

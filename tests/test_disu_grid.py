@@ -130,6 +130,7 @@ def test_pass_through_and_noflow_cells_are_removed_and_tracked():
     assert entries[0, 2][1] == 2.5 and entries[2, 0][1] == 2.5
     # Second column keeps its gap next to no-flow only on the no-flow side: both actives take their run.
     assert props["bot"][1] == 6 and props["top"][3] == 4
+    assert "by pass-through cells: up to 1 per cell" in d.report()
 
 
 def test_roundoff_thin_cells_are_passed_through():
