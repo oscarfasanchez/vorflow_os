@@ -445,7 +445,7 @@ heads = d.to_layers(gwf.output.head().get_data().ravel())  # back to (nlay, ncpl
 - **Existing DISV models** (FloPy, LoopFlopy) go in through
   `disu.DisuGrid.from_disv(vertices, cell2d, top, botm, idomain)`.
 
-See [design note 9](docs/design/09-full-connectivity-disu.md) for the
+See the design note `docs/design/09-full-connectivity-disu.md` for the
 method, the MODFLOW details it relies on and the validation.
 
 ### Optional file export

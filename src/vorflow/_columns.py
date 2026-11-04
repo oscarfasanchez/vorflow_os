@@ -214,6 +214,10 @@ def subdivide(top, botm, idomain=None, nsub=None, fractions=None, where=None):
     Outside ``where``, the parent cell keeps its whole interval in its first
     sublayer; the other sublayers there have zero thickness and idomain -1, so
     they pass flow through and are removed from the DISU grid.
+
+    The arrays describe one plan grid used by every layer. For a different
+    grid per layer, subdivide each grid's layers separately or use
+    :func:`split_contacts`.
     """
     top_l, bot_l, idomain = layer_arrays(top, botm, idomain)
     nlay, ncpl = bot_l.shape

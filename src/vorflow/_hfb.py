@@ -225,7 +225,7 @@ class BarrierFaces:
     the trace, False where the face is only the nearest one (zig-zag) or the
     connection is vertical. ``vertical`` marks the treads of a dipping fault.
     ``factor`` multiplies the hydraulic characteristic of each face: 1 on a
-    vertical fault, and |n_fault . n_face| on a dipping one, with the dip taken
+    vertical fault, and ``|n_fault · n_face|`` on a dipping one, with the dip taken
     from the offset between consecutive traces, each at its layer's mid-depth.
     ``thickness`` is the mean thickness of the two cells of each connection.
     """

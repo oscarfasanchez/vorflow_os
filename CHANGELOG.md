@@ -40,17 +40,6 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`laytyp=4`), exact while the cells are saturated; `laytyp=1` is not
   allowed.
 
-- Example notebook `disu_faults_and_gnc.ipynb`: vertical and dipping faults
-  as barrier connections, ghost-node corrections with and without
-  `barriers=`, checks against an exact solution without running MODFLOW, and
-  the HFB and GNC arrays.
-
-- Example notebook `disu_grids.ipynb` replaces `full_connectivity_demo.ipynb`
-  and `disu_refined_at_depth.ipynb`: the three ways to build a DISU grid (the
-  same plan grid in every layer, a different grid per layer, sublayers),
-  pinch-outs, the face a dipping staircase loses (about Δx·tanθ/b; keep it at
-  or below 5 %) and the arrays for MODFLOW, without running MODFLOW.
-
 - `vorflow.disu`: fully unstructured MODFLOW grids with full connectivity
   (Provost et al. 2025, after Langevin's USGS `disv2disu.py`).
   - `DisuGrid(grid, top, botm, idomain).build()` takes FloPy-style layer

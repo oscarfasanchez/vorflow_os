@@ -250,13 +250,19 @@ def test_traces_of_different_length_are_paired_end_to_end(slope, partial, flip):
     assert not (both & (side[n] == side[m]) & cut).any()
 
 
-def sealed(d, faces, side):
-    """With the cut connections removed, no cell on one side reaches the other."""
+def sealed(d, faces, side, within=None):
+    """With the cut connections removed, no cell on one side reaches the other (moving only
+    through the cells ``within``, all by default)."""
     keep = np.ones(len(d.links["n"]), dtype=bool)
     keep[faces.links] = False
+    if within is not None:
+        keep &= within[d.links["n"]] & within[d.links["m"]]
+        side = side & within, ~side & within
+    else:
+        side = side, ~side
     n, m = d.links["n"][keep], d.links["m"][keep]
     _, label = connected_components(coo_matrix((np.ones(len(n)), (n, m)), shape=(d.nodes,) * 2), directed=False)
-    return not set(label[side]) & set(label[~side])
+    return not set(label[side[0]]) & set(label[side[1]])
 
 
 def test_a_trace_through_cell_centres_puts_them_on_its_left():
@@ -353,10 +359,14 @@ def test_dip_is_measured_across_the_strike_up_to_the_grid_edge():
 
 
 def test_fault_tips_close_the_step_polygon():
-    d, traces, _ = stacked("uneven offsets")
+    d, traces, right = stacked("uneven offsets")
     faces = d.barrier_faces([LineString([(t.coords[0][0], 1.5), (t.coords[0][0], 4.5)]) for t in traces])
-    xyz, _ = cells(d)
+    xyz, layer = cells(d)
     assert len(faces) and np.all((xyz[faces.pairs, 1] > 1) & (xyz[faces.pairs, 1] < 5))
+    assert faces.vertical.any()
+    # Between the tips the fault seals: the rows y = 2.5 and 3.5 are split into its two sides.
+    between = (xyz[:, 1] > 2) & (xyz[:, 1] < 4)
+    assert sealed(d, faces, right(xyz[:, 0], xyz[:, 1], layer), within=between)
 
 
 def test_usg_export_divides_vertical_hydchr_by_the_mean_thickness():
@@ -374,6 +384,32 @@ def test_usg_export_divides_vertical_hydchr_by_the_mean_thickness():
     np.testing.assert_allclose(hydchr_usg, np.where(faces.vertical, hydchr6 / mean, hydchr6))
     with pytest.raises(ValueError, match="negative"):
         faces.get_gridprops_mf6_hfb(-0.5)
+
+
+def test_flopy_hfb_packages_write_the_barrier_nodes_one_based(tmp_path):
+    flopy = pytest.importorskip("flopy")
+    d = section()
+    faces = d.barrier_faces([LineString([(3 + k, -1), (3 + k, 2)]) for k in range(6)])
+    expected = {(a + 1, b + 1) for a, b in zip(faces.n, faces.m)}
+
+    def pairs(path):
+        rows = [line.split() for line in path.read_text().splitlines()]
+        # node1 node2 hydchr; the USG header line also has three numbers, all integers
+        return {(int(r[0]), int(r[1])) for r in rows if len(r) == 3 and r[0].isdigit() and not r[2].isdigit()}
+
+    sim = flopy.mf6.MFSimulation(sim_ws=str(tmp_path / "mf6"))
+    flopy.mf6.ModflowTdis(sim)
+    gwf = flopy.mf6.ModflowGwf(sim, modelname="m")
+    flopy.mf6.ModflowGwfdisu(gwf, **d.get_gridprops_mf6_disu())
+    flopy.mf6.ModflowGwfhfb(gwf, **faces.get_gridprops_mf6_hfb(0.1))
+    sim.write_simulation(silent=True)
+    assert pairs(tmp_path / "mf6" / "m.hfb") == expected
+
+    usg = flopy.mfusg.MfUsg(modelname="u", model_ws=str(tmp_path / "usg"), structured=False)
+    flopy.mfusg.MfUsgDisU(usg, **d.get_gridprops_mfusg_disu())
+    flopy.modflow.ModflowHfb(usg, **faces.get_gridprops_mfusg_hfb(0.1))
+    usg.write_input()
+    assert pairs(tmp_path / "usg" / "u.hfb") == expected
 
 
 def test_traces_that_differ_must_be_single_lines():

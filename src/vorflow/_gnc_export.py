@@ -35,6 +35,9 @@ class GncCorrections:
     Inputs are copied so serialization cannot alter the caller's records.
     Fractions are nonnegative, with a strictly positive remaining host fraction.
     At most five contributors per record are supported by both engines.
+    ``contrast`` only records the K-aware threshold the records were built
+    with; ``estimate_gnc`` leaves it None for ``method="geometric"``, where it
+    has no effect.
     """
 
     records: list[dict] = field(default_factory=list)

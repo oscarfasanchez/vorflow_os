@@ -303,6 +303,9 @@ class DisuGrid:
         staggered connections between cells of unequal thickness (wedges,
         sublayers, pinch-outs), use ``MfUsgLpf(ikcflag=1, ksat=...)`` with
         :meth:`get_mfusg_ksat`.
+
+        MODFLOW-USG needs at least one node in every layer, so a layer with no
+        active cell (for example one pinched out everywhere) raises ValueError.
         """
         self._require_build()
         return mfusg_gridprops(
@@ -434,7 +437,7 @@ class DisuGrid:
         BarrierFaces
             Node pairs, ``on_trace`` and ``vertical`` flags, ``factor`` and
             ``get_gridprops_mf6_hfb`` / ``get_gridprops_mfusg_hfb``. ``factor``
-            does not depend on K: it is |n_fault . n_face| for the plane through
+            does not depend on K: it is ``|n_fault · n_face|`` for the plane through
             consecutive traces (1 on a vertical barrier), and the exporters
             multiply ``hydchr`` by it, so that flow normal to the fault meets the
             plane's resistance. Pass ``.pairs`` to ``estimate_gnc(barriers=...)``
@@ -862,7 +865,7 @@ class DisuGrid:
                     try:
                         record = _straight_face(shared[k], centres[[a, b]], (a, b), tolerance)
                     except ValueError:
-                        record = _bent_face(shared[k], centres[[a, b]], (a, b))
+                        record = _bent_face(shared[k], centres[[a, b]], (a, b), tolerance)
                     if record is not None:
                         slow.append(record)
                         order.append(k)
@@ -1548,19 +1551,27 @@ def _global_faces(face_tables, col_of):
     return faces[keep].reset_index(drop=True)
 
 
-def _bent_face(shared, centres, pair):
-    """One face for a contact that is not a single straight segment: total length, mean normal."""
+def _bent_face(shared, centres, pair, tolerance):
+    """One face for a contact that is not a single straight segment: total length, mean normal.
+
+    None when the contact is no longer than ``tolerance`` (``_cross_faces`` drops those
+    anyway) or its piece normals cancel, as they can for pieces a few 1e-11 m long.
+    """
     from ._mfusg import _line_parts
 
     parts = _line_parts(shared)
     if not parts:
         return None
     lengths = np.array([part.length for part in parts])
+    if lengths.sum() <= tolerance:
+        return None
     vectors = np.array([np.subtract(part.coords[-1], part.coords[0])[:2] for part in parts])
     normals = np.column_stack([-vectors[:, 1], vectors[:, 0]]) / lengths[:, None]
     towards = centres[1] - centres[0]
     normals *= np.sign(normals @ towards)[:, None]
     normal = (normals * lengths[:, None]).sum(axis=0)
+    if not np.linalg.norm(normal) > 0:
+        return None
     normal /= np.linalg.norm(normal)
     midpoints = np.array([part.interpolate(0.5, normalized=True).coords[0][:2] for part in parts])
     face_point = (midpoints * lengths[:, None]).sum(axis=0) / lengths.sum()

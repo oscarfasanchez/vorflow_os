@@ -87,7 +87,7 @@ Use `connections="all"` to include in-plane offsets, for example at a splice.
 `min_offset` skips offsets smaller than a specified fraction of the perpendicular
 centre distance. `blocked_pairs` excludes zero-based node pairs from estimation
 and interpolation support; it does not create a model hydraulic barrier (see
-*Vertical barriers* below).
+*Barriers and faults* below).
 
 `records` gives each host, neighbour, ghost target, contributing nodes and
 weights. `unsupported` gives selected connections where weights could not be
@@ -118,7 +118,7 @@ if options is not None:
 Empty collections return `None` from either package-export helper. Existing
 DISU exports are unchanged; estimating a collection attaches no model package.
 
-### Vertical barriers
+### Barriers and faults
 
 `d.barrier_faces(trace)` finds the connections a vertical barrier cuts: every
 horizontal connection whose two cell centres lie on opposite sides of the
@@ -198,6 +198,5 @@ This method is experimental. It is exact where contacts follow cell faces and
 flow crosses them. Where cells stair-step a dipping contact, the faces are not
 the real contact; flows are then in error even when heads match. Recompute the
 corrections whenever K changes. It is not a verified copy of ModelMuse or
-Gridgen and is not a general replacement for XT3D.
-Recompute corrections whenever K changes. Confined scalar isotropic flow is
-the tested scope; anisotropy tensors and head-dependent fractions are unsupported.
+Gridgen and is not a general replacement for XT3D. Confined scalar isotropic
+flow is the tested scope; anisotropy tensors and head-dependent fractions are unsupported.

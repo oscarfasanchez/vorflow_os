@@ -124,6 +124,14 @@ def test_contrast_below_threshold_is_weighted_geometrically(ratio):
     assert aware.contrast == 10.0 and geometric.contrast is None
 
 
+@pytest.mark.parametrize("ratio", [10.0, 0.1])
+def test_contrast_at_the_threshold_is_a_contact(ratio):
+    d = refined_grid()
+    k = np.where(centres(d)[:, 1] < 0, ratio, 1.0)
+    aware = d.estimate_gnc(k, method="k_aware", connections="all")
+    assert aware.records != d.estimate_gnc(connections="all").records
+
+
 @pytest.mark.parametrize("contrast", [1.0, 2.0, 5.0])
 def test_lower_contrast_treats_moderate_interface_as_contact(contrast):
     d = refined_grid()
