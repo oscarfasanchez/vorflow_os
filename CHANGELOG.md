@@ -13,7 +13,7 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   mid-elevation, `idomain` code and original layer (`unit`), the layer
   structure that the DISU binary grid file lacks.
 
-- `DisuGrid.estimate_gnc()` returns an inspectable one-ring correction collection:
+- `DisuGrid.estimate_gnc()` returns an inspectable correction collection:
   geometry-only estimation by default, or explicitly selected experimental
   scalar-K-aware estimation. K-aware estimation treats a face as a material
   contact only where the conductivity ratio reaches `contrast` (default 10);
@@ -319,6 +319,15 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   crossing plans and their spacing), replaced by `vorflow._barrier`.
 
 ### Fixed
+
+- Geometric GNC retains valid one-ring corrections and retries unsupported
+  connections inside their selected 3D support-cell union, using a second
+  neighbour ring only when needed. This recovers missing corrections around
+  irregular cells without crossing supplied barrier or blocked connections.
+  `rings` reports the longest support path used. K-aware stencil construction
+  is unchanged; improved linear consistency is not a guarantee of better
+  curved-flow accuracy. GNC's shared-face lookup also tolerates roundoff at
+  hanging vertices along spliced outlines.
 
 - Barriers no longer leave cut cells or faces of several edges at corners
   ([#67](https://github.com/rhugman/vorflow/issues/67)), short legs between

@@ -1,4 +1,4 @@
-"""One-ring ghost-head estimation for built DISU grids.
+"""Local ghost-head estimation for built DISU grids.
 
 The geometric method reproduces affine heads. The experimental conductivity
 method assumes locally planar scalar-K transmission; it is not a general
@@ -28,6 +28,7 @@ class _Geometry:
     normals: np.ndarray
     tolerance: float
     blocked: set
+    cut: set
 
 
 def _pairs(pairs, nodes, name):
@@ -93,6 +94,7 @@ def _geometry(grid, blocked_pairs, barriers):
         normals,
         1e-9 * max(float(np.ptp(xyz, axis=0).max()), 1.0),
         blocked,
+        cut,
     )
 
 
@@ -108,7 +110,7 @@ def estimate_gnc(
     strict=False,
     contrast=10.0,
 ):
-    """Estimate one-ring corrections without using solved heads.
+    """Estimate corrections without using solved heads.
 
     Parameters
     ----------
@@ -119,8 +121,10 @@ def estimate_gnc(
         Required for ``method='k_aware'``; ignored by ``'geometric'``.
     method : {'geometric', 'k_aware'}, default 'geometric'
         Geometry-only affine interpolation, or experimental scalar-K local
-        transmission interpolation. Both search immediate connected neighbours
-        only. Recompute K-aware corrections when K changes.
+        transmission interpolation. Geometric estimation retries unsupported
+        connections inside the selected support-cell union, using a second
+        neighbour ring only if needed. K-aware estimation retains its one-ring,
+        host-prism restriction; recompute its corrections when K changes.
     connections : {'3d', 'all'}, default '3d'
         Correct vertical connections and lateral elevation offsets, or also
         in-plane offsets (for example at a splice). Aligned links are skipped.
@@ -152,11 +156,15 @@ def estimate_gnc(
 
     Notes
     -----
-    Fractions are nonnegative and retain positive host-cell influence. Each
-    ghost lies within its host prism. A physical connection receives either a
+    Fractions are nonnegative and retain positive host-cell influence. Existing
+    admissible one-ring host-prism corrections are preserved. A geometric
+    fallback ghost can lie outside its host, but must lie inside the 3D union
+    of its host and selected contributor cells. Support paths do not cross
+    blocked or barrier connections. A physical connection receives either a
     valid one-host correction or a complete admissible pair of corrections.
     An unsupported connection retains standard model conductance; this is not
-    an accuracy guarantee. ``k_aware`` assumes each face at or above the
+    an accuracy guarantee: affine consistency does not ensure smaller errors
+    than standard on curved heads. ``k_aware`` assumes each face at or above the
     contrast is the material contact. That holds where contacts follow cell
     faces; a stair-stepped dipping contact violates it and gives flow errors
     even when heads match the ideal reference.
@@ -196,16 +204,28 @@ def estimate_gnc(
             raise ValueError("k must contain positive finite scalar conductivities.")
     counts, records, unsupported = Counter(), [], []
 
-    def endpoint(n, m, target, link):
+    def in_prism(node, target):
+        if not g.bottom[node] - g.tolerance <= target[2] <= g.top[node] + g.tolerance:
+            return False
+        return g.polygons[node].buffer(g.tolerance).covers(Point(*target[:2]))
+
+    def endpoint(n, m, target, link, relaxed=False, rings=1):
         offset = target - g.xyz[n]
         if np.linalg.norm(offset) <= g.tolerance:
             return None, None
-        if (
-            not g.polygons[n].buffer(g.tolerance).covers(Point(*target[:2]))
-            or not g.bottom[n] - g.tolerance <= target[2] <= g.top[n] + g.tolerance
-        ):
+        if not relaxed and not in_prism(n, target):
             return None, "ghost outside host prism"
         neighbours = g.adjacency[n]
+        paths = {edge[0]: [edge[0]] for edge in neighbours}
+        if rings == 2:
+            found = {edge[0]: edge for edge in neighbours}
+            for first in neighbours:
+                for second in g.adjacency[first[0]]:
+                    j = second[0]
+                    if j != n and j not in found and tuple(sorted((n, j))) not in g.cut:
+                        found[j] = second
+                        paths[j] = [first[0], j]
+            neighbours = [found[j] for j in sorted(found)]
         if not neighbours:
             return None, "no interpolation support"
         js = np.array([edge[0] for edge in neighbours], dtype=int)
@@ -246,6 +266,8 @@ def estimate_gnc(
             or weights.sum() > 1 - 1e-8 + 1e-12
         ):
             return None, "interpolation fractions violate positive host bound"
+        if relaxed and not any(in_prism(j, target) for j in [n, *js]):
+            return None, "ghost outside selected support union"
         residual = float(np.linalg.norm(weights @ vectors[keep] - offset))
         if residual > g.tolerance:
             return None, "reconstruction residual"
@@ -261,7 +283,7 @@ def estimate_gnc(
                 target=target.tolist(),
                 contributors=js.tolist(),
                 weights=weights.tolist(),
-                paths=[[int(j)] for j in js],
+                paths=[paths[int(j)] for j in js],
                 residual=residual,
                 effective_rank=len(positive),
                 active_condition=float(positive.max() / positive.min()),
@@ -271,6 +293,47 @@ def estimate_gnc(
         )
 
     links = grid.links
+
+    def correction(a, b, delta, normal, cn, cb, link, relaxed=False, rings=1):
+        orientations = [(a, b, delta), (b, a, -delta)]
+        if g.volume[b] > g.volume[a]:
+            orientations.reverse()
+        for n, m, offset in orientations:
+            record, reason = endpoint(n, m, g.xyz[n] + offset, link, relaxed, rings)
+            if reason is None:
+                return [record] if record is not None else [], None, "single_host_links"
+        targets = None
+        if links["ihc"][link] == 0:
+            contact = g.polygons[a].intersection(g.polygons[b])
+            if contact.is_empty or contact.area <= 0:
+                reason = "missing vertical contact footprint"
+            else:
+                xy = contact.centroid.coords[0]
+                targets = (np.r_[xy, g.xyz[a, 2]], np.r_[xy, g.xyz[b, 2]])
+        else:
+            # Hanging vertices on a splice may differ by roundoff while the
+            # built connection still has a valid face.
+            contact = g.polygons[a].boundary.intersection(
+                g.polygons[b].buffer(g.tolerance)
+            )
+            lower, upper = max(g.bottom[a], g.bottom[b]), min(g.top[a], g.top[b])
+            if contact.is_empty or contact.length <= g.tolerance or upper <= lower:
+                reason = "missing horizontal contact"
+            else:
+                face = np.r_[contact.centroid.coords[0], (lower + upper) / 2]
+                targets = (face - cn * normal, face + cb * normal)
+        if targets is not None:
+            ra, ea = endpoint(a, b, targets[0], link, relaxed, rings)
+            rb, eb = endpoint(b, a, targets[1], link, relaxed, rings)
+            reason = ea or eb
+            if reason is None:
+                return (
+                    [r for r in (ra, rb) if r is not None],
+                    None,
+                    "paired_target_links",
+                )
+        return [], reason, None
+
     for link, (a, b, cn, cb) in enumerate(
         zip(links["n"], links["m"], links["cl_n"], links["cl_m"])
     ):
@@ -292,47 +355,27 @@ def estimate_gnc(
         elif abs(delta @ normal) > g.tolerance:
             reason = "normal-distance mismatch or gap"
         else:
-            reason = "no bounded interpolation support"
-            orientations = [(a, b, delta), (b, a, -delta)]
-            if g.volume[b] > g.volume[a]:
-                orientations.reverse()
-            for n, m, offset in orientations:
-                record, reason = endpoint(n, m, g.xyz[n] + offset, link)
+            attempts = [(False, 1)]
+            if method == "geometric":
+                attempts += [(True, 1), (True, 2)]
+            for relaxed, rings in attempts:
+                added, reason, kind = correction(
+                    a, b, delta, normal, cn, cb, link, relaxed, rings
+                )
                 if reason is None:
-                    if record is not None:
-                        records.append(record)
-                    counts["single_host_links"] += 1
+                    records.extend(added)
+                    counts[kind] += 1
+                    if kind == "paired_target_links":
+                        counts[
+                            "two_ghost_links" if len(added) == 2 else "one_ghost_links"
+                        ] += 1
+                    if relaxed:
+                        counts["support_union_links"] += 1
+                    if rings == 2:
+                        counts["second_ring_links"] += 1
                     break
             if reason is None:
                 continue
-            targets = None
-            if links["ihc"][link] == 0:
-                contact = g.polygons[a].intersection(g.polygons[b])
-                if contact.is_empty or contact.area <= 0:
-                    reason = "missing vertical contact footprint"
-                else:
-                    xy = contact.centroid.coords[0]
-                    targets = (np.r_[xy, g.xyz[a, 2]], np.r_[xy, g.xyz[b, 2]])
-            else:
-                contact = g.polygons[a].boundary.intersection(g.polygons[b].boundary)
-                lower, upper = max(g.bottom[a], g.bottom[b]), min(g.top[a], g.top[b])
-                if contact.is_empty or contact.length <= g.tolerance or upper <= lower:
-                    reason = "missing horizontal contact"
-                else:
-                    face = np.r_[contact.centroid.coords[0], (lower + upper) / 2]
-                    targets = (face - cn * normal, face + cb * normal)
-            if targets is not None:
-                ra, ea = endpoint(a, b, targets[0], link)
-                rb, eb = endpoint(b, a, targets[1], link)
-                reason = ea or eb
-                if reason is None:
-                    added = [r for r in (ra, rb) if r is not None]
-                    records.extend(added)
-                    counts["paired_target_links"] += 1
-                    counts[
-                        "two_ghost_links" if len(added) == 2 else "one_ghost_links"
-                    ] += 1
-                    continue
         unsupported.append(dict(link=link, n=a, m=b, reason=reason))
         counts[reason] += 1
     if strict and unsupported:

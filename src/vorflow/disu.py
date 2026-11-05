@@ -351,12 +351,16 @@ class DisuGrid:
 
     def estimate_gnc(self, k=None, *, method="geometric", connections="3d",
                      min_offset=0., blocked_pairs=(), barriers=(), strict=False, contrast=10.):
-        """Return one-ring ghost-node corrections for explicit model export.
+        """Return ghost-node corrections for explicit model export.
 
         Geometry-only estimation is the default. ``method='k_aware'`` requires
         current positive scalar conductivity in active-node order and remains
-        experimental. Both methods use only immediate connected neighbours;
-        unsupported connections are reported and retain standard conductance.
+        experimental. Geometric estimation preserves valid one-ring corrections,
+        then retries unsupported connections in their selected support-cell union
+        and, if needed, a second neighbour ring. K-aware estimation keeps its
+        one-ring host-prism construction. Unsupported connections are reported
+        and retain standard conductance. More complete correction does not
+        guarantee smaller head errors than standard for curved flow fields.
 
         Each offset connection needs a small linear program, a few
         milliseconds each: expect minutes for 100,000 offset connections.

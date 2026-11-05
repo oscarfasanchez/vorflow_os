@@ -144,9 +144,9 @@ def exact_flows(d, faces, heads, gradient, hydchr):
     return exact, corrected
 
 
-@pytest.mark.parametrize("grid, plain_crosses, unsupported_links", [(spliced, True, 8), (dipping, False, 0)])
+@pytest.mark.parametrize("grid, plain_crosses, unsupported_links", [(spliced, True, 0), (dipping, False, 0)])
 def test_gnc_does_not_interpolate_across_a_barrier(grid, plain_crosses, unsupported_links):
-    # Spliced: corner ghosts beside the barrier lose their only support and keep standard conductance.
+    # Spliced: second-ring support recovers corner ghosts without crossing the barrier.
     # Dipping: ghosts use their own column, so they never reached across the barrier.
     d = grid()
     faces = d.barrier_faces(FAULT)

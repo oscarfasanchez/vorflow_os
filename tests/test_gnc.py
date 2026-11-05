@@ -1,13 +1,14 @@
-"""Behavioural checks for the public one-ring GNC workflow."""
+"""Behavioural checks for geometric GNC and the one-ring K-aware workflow."""
 
 import warnings
 
 import geopandas as gpd
 import numpy as np
 import pytest
-from shapely.geometry import box
+import shapely
+from shapely.geometry import MultiPoint, Point, Polygon, box
 
-from vorflow.disu import DisuGrid
+from vorflow.disu import DisuGrid, splice
 
 
 def plan(polygons):
@@ -151,7 +152,9 @@ def test_lower_contrast_treats_moderate_interface_as_contact(contrast):
         heads = 23.0 + resistance_coordinates(xyz) @ gradient
         for record in result.records:
             target_head = 23.0 + resistance_coordinates(record["target"]) @ gradient
-            np.testing.assert_allclose(ghost_head(record, heads), target_head, atol=1e-9)
+            np.testing.assert_allclose(
+                ghost_head(record, heads), target_head, atol=1e-9
+            )
 
 
 def test_geometric_ignores_contrast():
@@ -173,14 +176,175 @@ def test_one_ring_sandwich_rejects_unit_sum_fit_before_export(method):
     d = sandwich()
     layer = d.cellmap[d.cellmap.node >= 0].sort_values("node").layer.to_numpy()
     k = np.array([1.0, 0.01, 1.0])[layer]
-    with pytest.warns(RuntimeWarning, match="left without GNC"):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", RuntimeWarning)
         result = d.estimate_gnc(k, method=method)
-    assert result.corrected_connections == 16 and len(result.unsupported) == 16
+    if method == "k_aware":
+        assert any("left without GNC" in str(w.message) for w in caught)
+        assert result.corrected_connections == 16 and len(result.unsupported) == 16
+        assert result.rings == 1
+    else:
+        assert not caught and not result.unsupported
+        assert result.corrected_connections == 32 and result.rings == 2
     for record in result.records:
         assert min(record["weights"]) >= 0
         assert 1 - sum(record["weights"]) >= 1e-8 - 1e-12
     assert result.get_gridprops_mf6_gnc() is not None
     assert result.get_gridprops_mfusg_gnc() is not None
+
+
+def boundary_grid():
+    """Fourteen Voronoi generators, including generators clipped at the edge."""
+    xy = np.array(
+        [
+            (0, 0),
+            (2, 0),
+            (4, 0),
+            (4, 2),
+            (4, 4),
+            (2, 4),
+            (0, 4),
+            (0, 2),
+            (0.6, 0.8),
+            (1.7, 0.6),
+            (3.2, 0.7),
+            (0.8, 2.8),
+            (2.1, 2.2),
+            (3.4, 3.1),
+        ]
+    )
+    domain = box(0, 0, 4, 4)
+    polygons = [
+        p.intersection(domain)
+        for p in shapely.voronoi_polygons(
+            MultiPoint(xy), extend_to=domain, ordered=True
+        ).geoms
+    ]
+    grid = plan(polygons)
+    grid["x"], grid["y"] = xy.T
+    dip = 0.6 * xy[:, 0]
+    return DisuGrid(grid, 10 - dip, [7 - dip, 4 - dip, 1 - dip]).build()
+
+
+def test_geometric_fallback_recovers_boundary_flux_and_preserves_valid_records():
+    d = boundary_grid()
+    # Uniform K makes the unchanged K-aware path the old one-ring affine
+    # construction; no heterogeneous transmission assumption enters this check.
+    with pytest.warns(RuntimeWarning, match="left without GNC"):
+        original = d.estimate_gnc(1.0, method="k_aware", connections="all")
+    assert any(u["reason"] == "ghost outside host prism" for u in original.unsupported)
+    revised = d.estimate_gnc(connections="all", strict=True)
+    assert not revised.unsupported and revised.diagnostics["support_union_links"] > 0
+    by_host = {(r["link"], r["n"]): r for r in revised.records}
+    assert all(r == by_host[(r["link"], r["n"])] for r in original.records)
+    cm = d.cellmap[d.cellmap.node >= 0].sort_values("node")
+    xyz = centres(d)
+    gradient = np.array([0.2, -0.1, 0.7])
+    heads = 31 + xyz @ gradient
+    links = d.links
+    a, b = links["n"], links["m"]
+    area = links["fahl"]
+    conductance = area / (links["cl_n"] + links["cl_m"])
+    flux = conductance * (heads[b] - heads[a])
+    normals = np.column_stack(
+        [
+            np.cos(np.radians(links["angle"])),
+            np.sin(np.radians(links["angle"])),
+            np.zeros(len(a)),
+        ]
+    )
+    vertical = links["ihc"] == 0
+    normals[vertical] = [0, 0, -1]
+    outside_host = False
+    for r in revised.records:
+        shift = ghost_head(r, heads) - heads[r["n"]]
+        flux[r["link"]] += (
+            (-1 if r["n"] == a[r["link"]] else 1) * conductance[r["link"]] * shift
+        )
+
+        def covers(j):
+            polygon = d._grids[int(cm.iloc[j].grid)].geometry.iloc[int(cm.iloc[j].icpl)]
+            return (
+                polygon.buffer(1e-8).covers(Point(*r["target"][:2]))
+                and cm.iloc[j].bot - 1e-8 <= r["target"][2] <= cm.iloc[j].top + 1e-8
+            )
+
+        outside_host |= not covers(r["n"])
+        assert any(covers(j) for j in [r["n"], *r["contributors"]])
+    assert outside_host
+    np.testing.assert_allclose(flux, area * (normals @ gradient), atol=1e-8)
+
+
+def test_second_ring_paths_respect_blocked_and_barrier_connections():
+    d = sandwich()
+    original = d.estimate_gnc()
+    record = next(r for r in original.records if any(len(p) == 2 for p in r["paths"]))
+    path = next(p for p in record["paths"] if len(p) == 2)
+    pair = tuple(sorted((path[0], path[1])))
+    for option in ("blocked_pairs", "barriers"):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            result = d.estimate_gnc(**{option: [pair]})
+        for r in result.records:
+            for support in r["paths"]:
+                route = [r["n"], *support]
+                assert all(
+                    tuple(sorted(edge)) != pair for edge in zip(route, route[1:])
+                )
+            assert all(tuple(sorted((r["n"], j))) != pair for j in r["contributors"])
+
+
+def test_roundoff_at_a_spliced_hanging_vertex_keeps_the_paired_face():
+    base = plan([box(x, y, x + 1, y + 1) for y in range(4) for x in range(4)])
+    fine = plan(
+        [
+            box(x / 2, y / 2, (x + 1) / 2, (y + 1) / 2)
+            for y in range(8)
+            for x in range(8)
+        ]
+    )
+    grid = splice(base, fine, box(1, 1, 3, 3))
+    dip = 0.6 * grid.x.to_numpy()
+    d = DisuGrid(grid, 10 - dip, [7 - dip, 4 - dip, 1 - dip]).build()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        before = d.estimate_gnc(1.0, method="k_aware", connections="all")
+    cm = d.cellmap[d.cellmap.node >= 0].sort_values("node")
+    counts = {}
+    for r in before.records:
+        counts[r["link"]] = counts.get(r["link"], 0) + 1
+    for r in before.records:
+        a, b = int(cm.iloc[r["n"]].icpl), int(cm.iloc[r["m"]].icpl)
+        if (
+            counts[r["link"]] == 2
+            and grid.iloc[a].splice_source != grid.iloc[b].splice_source
+        ):
+            break
+    else:
+        pytest.fail("Fixture needs a paired correction on the splice outline")
+    polygon = d._grids[0].geometry.iloc[a]
+    other = d._grids[0].geometry.iloc[b]
+    midpoint = polygon.boundary.intersection(other.boundary).centroid
+    xy = np.array(midpoint.coords[0])
+    direction = np.array(polygon.centroid.coords[0]) - xy
+    inset = xy + 5e-14 * direction / np.linalg.norm(direction)
+    ring = list(polygon.exterior.coords)
+    for i, (start, end) in enumerate(zip(ring, ring[1:])):
+        if shapely.LineString([start, end]).distance(midpoint) < 1e-14:
+            ring.insert(i + 1, tuple(inset))
+            break
+    # Stored outlines can differ from the built contact by roundoff, as at a
+    # hanging vertex on independently meshed splice outlines.
+    d._grids[0].at[a, "geometry"] = Polygon(ring)
+    assert (
+        d._grids[0].geometry.iloc[a].boundary.intersection(other.boundary).length
+        < 1e-10
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        after = d.estimate_gnc(1.0, method="k_aware", connections="all")
+    assert not any(u["link"] == r["link"] for u in after.unsupported)
+    assert sum(s["link"] == r["link"] for s in after.records) == 2
 
 
 def test_scope_threshold_and_existing_exports_are_explicit():

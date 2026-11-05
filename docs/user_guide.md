@@ -71,17 +71,23 @@ Many come from grading and from clipping at the domain boundary, not from the
 inputs; use `vorflow.utils.calculate_mesh_quality` on the finished grid for
 those.
 
-## One-ring ghost-node corrections for DISU
+## Ghost-node corrections for DISU
 
 After building a `vorflow.disu.DisuGrid`, request one collection of corrections:
 
 ```python
-corrections = d.estimate_gnc()  # geometric, one-ring, 3D connections
+corrections = d.estimate_gnc()  # geometric, 3D connections
 print(corrections.corrected_connections, len(corrections.unsupported))
 ```
 
-The geometric estimator uses only cell geometry. Both available methods search
-immediate connected neighbours; they do not add numerical cells or layers.
+The geometric estimator uses only cell geometry. It first searches immediate
+connected neighbours and preserves every admissible original correction. For
+an unsupported connection it automatically retries with ghost points inside the
+3D union of the host and selected contributor cells, even if outside the host
+itself. Only if that fails does it search a second neighbour ring. Fractions
+remain nonnegative, retain positive host influence, and use at most five
+contributors. The experimental K-aware method keeps its one-ring, host-prism
+restriction. Neither method adds numerical cells or layers.
 Vertical connections and lateral elevation offsets are selected by default.
 Use `connections="all"` to include in-plane offsets, for example at a splice.
 `min_offset` skips offsets smaller than a specified fraction of the perpendicular
@@ -95,6 +101,25 @@ built. Those connections receive no GNC record and retain standard conductance;
 `strict=True` raises instead. `record_count` counts ghost records, while
 `corrected_connections` counts physical connections: a connection can use two
 ghost records. Inspect coverage before applying the package.
+
+The fallback is useful when irregular or clipped cells at boundaries, holes,
+wells or grid transitions leave some offset connections without correction.
+Connections already corrected by the original construction are unchanged, and
+aligned connections need no correction. `diagnostics["support_union_links"]`
+and `diagnostics["second_ring_links"]`, when present, count recovered
+connections; `rings` gives the longest support path actually used. Additional
+interpolation solves are limited to previously unsupported connections. A
+second-ring contributor can add a solver coupling.
+
+This repairs affine consistency where valid interpolation support exists; it
+does not guarantee smaller head or flux errors than standard for curved flow.
+In local homogeneous confined tests, the fallback reduced linear-head maxima
+on stacked, spliced and refilled grids from about 9.3 mm to 2e-12–5e-12 m. In a
+curved radial field plus a vertical gradient, the revised stacked maximum was
+7.14 mm versus standard's 6.76 mm, although the 99th percentile improved from
+2.31 mm to 1.07 mm. Removing a linear geometric error can remove accidental
+cancellation with the curved-flow error too. Check accuracy for the intended
+flow field and refinement; correction coverage alone is not an accuracy bound.
 
 For MODFLOW 6, keep XT3D disabled when applying GNC:
 
@@ -141,10 +166,10 @@ interpolated from cells on its own side; the barrier connections themselves are
 still corrected. Without it, a ghost next to the barrier can average heads
 across the head jump. A connection whose only support lies across the barrier
 is reported in `unsupported` and keeps standard conductance (and its HFB, if
-it is a barrier connection). Next to a dipping fault this is common: in the
-faults notebook `barriers=` leaves 366 connections without a ghost instead of
-13, among them the thin treads along the traces, whose ghost points sit at the
-fault edge of their cells.
+it is a barrier connection). This can occur next to a dipping fault, including
+thin treads whose ghost points sit at the fault edge of their cells. Both
+one-ring and second-ring support paths avoid the supplied barrier connections;
+inspect `unsupported` for the actual remaining count on the current grid.
 
 For a dipping fault, mesh each layer at its own trace and give one trace per
 layer. The fault becomes a staircase: walls on each trace, and treads where a

@@ -63,9 +63,13 @@ class GncCorrections:
             try:
                 self.contrast = float(self.contrast)
             except (TypeError, ValueError) as error:
-                raise ValueError("contrast must be None or a finite number of at least 1.") from error
+                raise ValueError(
+                    "contrast must be None or a finite number of at least 1."
+                ) from error
             if not np.isfinite(self.contrast) or self.contrast < 1:
-                raise ValueError("contrast must be None or a finite number of at least 1.")
+                raise ValueError(
+                    "contrast must be None or a finite number of at least 1."
+                )
         if not isinstance(self.records, list):
             raise ValueError("records must be a list of dictionaries.")
         self.records = deepcopy(self.records)
@@ -157,8 +161,11 @@ class GncCorrections:
 
     @property
     def rings(self):
-        """The supported construction uses one neighboring-cell ring."""
-        return 1
+        """Largest recorded support-path length, or one for an empty collection."""
+        return max(
+            (len(path) for record in self.records for path in record.get("paths", [])),
+            default=1,
+        )
 
     def get_gridprops_mf6_gnc(self, explicit=False):
         """Return ``ModflowGwfgnc`` kwargs, or None when no package is needed.
