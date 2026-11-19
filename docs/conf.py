@@ -26,9 +26,17 @@ def _copy_notebooks(src, dst):
     Sphinx only builds files under ``docs/``; the notebooks stay in
     ``examples/`` so they remain runnable from the repository root.
     """
-    dst.mkdir(exist_ok=True)
-    for notebook in sorted(src.glob("*.ipynb")):
-        shutil.copy2(notebook, dst / notebook.name)
+    for notebook in sorted(src.rglob("*.ipynb")):
+        relative = notebook.relative_to(src)
+        if any(part.startswith(".") for part in relative.parts):
+            continue
+        target = dst / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(notebook, target)
+    # Remove stale generated copies after a source notebook is moved or renamed.
+    for target in dst.rglob("*.ipynb"):
+        if not (src / target.relative_to(dst)).exists():
+            target.unlink()
 
 
 _copy_notebooks(EXAMPLES_SRC, EXAMPLES_DST)

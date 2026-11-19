@@ -18,3 +18,13 @@ examples/barrier_meshing
 examples/basic_example_modflow
 examples/basic_example_mfusg
 ```
+
+## DISU grids
+
+```{toctree}
+:maxdepth: 1
+
+Sample elevations and handle pinch-outs <examples/disu/elevations_and_pinchouts>
+Explore full connectivity <examples/disu/full_connectivity_demo>
+Refine a grid at depth and plot heads <examples/disu/disu_refined_at_depth>
+```
